@@ -26,7 +26,11 @@ dotenv.config();
 const app = express();
 app.use(
   cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:5173",
+    origin: [
+  "http://localhost:5173",
+  "https://collabiora.vercel.app",
+  "https://collabiora-git-main-anshs-projects-d959a793.vercel.app"
+],
     credentials: true, // Allow cookies to be sent
   })
 );
