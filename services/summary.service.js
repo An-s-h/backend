@@ -14,18 +14,62 @@ if (!apiKey) {
 }
 
 const genAI = new GoogleGenerativeAI(apiKey || "");
-export async function summarizeText(text) {
-  if (!text) return "";
+export async function summarizeText(text, type = "general") {
+  if (!text)
+    return type === "publication" ? { structured: false, summary: "" } : "";
 
   // fallback if API key missing
   if (!process.env.GOOGLE_AI_API_KEY) {
     const clean = String(text).replace(/\s+/g, " ").trim();
     const words = clean.split(" ");
-    return words.slice(0, 40).join(" ") + (words.length > 40 ? "…" : "");
+    const fallback =
+      words.slice(0, 40).join(" ") + (words.length > 40 ? "…" : "");
+    return type === "publication"
+      ? { structured: false, summary: fallback }
+      : fallback;
   }
 
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
+
+    // For publications, generate structured summary
+    if (type === "publication") {
+      const prompt = `You are a medical communication expert. Summarize this research publication in plain language for patients. Use simple words and short sentences. Structure your response as a JSON object with these sections:
+
+{
+  "coreMessage": "The most important finding in 1-2 short sentences (what they discovered)",
+  "what": "What the study was about - describe the research question/problem in simple terms (2-3 sentences)",
+  "why": "Why this research matters - explain the importance and context (2-3 sentences)",
+  "how": "How they did the study - describe the methods briefly in plain language (2-3 sentences)",
+  "soWhat": "So what does this mean for patients? - explain relevance, implications, and why it matters to them (2-3 sentences)",
+  "keyTakeaway": "One sentence takeaway that patients should remember"
+}
+
+Publication content: ${text.substring(0, 2000)}
+
+Return ONLY valid JSON, no markdown formatting. Use plain language throughout - avoid jargon.`;
+
+      const result = await model.generateContent(prompt);
+      let responseText = result.response.text().trim();
+
+      // Clean markdown if present
+      if (responseText.startsWith("```")) {
+        responseText = responseText
+          .replace(/```json\n?/g, "")
+          .replace(/```\n?/g, "")
+          .trim();
+      }
+
+      try {
+        const structured = JSON.parse(responseText);
+        return { structured: true, ...structured };
+      } catch (parseError) {
+        // If JSON parsing fails, return as plain text
+        return { structured: false, summary: responseText };
+      }
+    }
+
+    // For trials and general summaries, use simple format
     const result = await model.generateContent(
       `Summarize the following medical content in 3-4 sentences, focusing on key findings and relevance: ${text}`
     );
@@ -34,7 +78,11 @@ export async function summarizeText(text) {
     console.error("AI summary error:", e);
     const clean = String(text).replace(/\s+/g, " ").trim();
     const words = clean.split(" ");
-    return words.slice(0, 40).join(" ") + (words.length > 40 ? "…" : "");
+    const fallback =
+      words.slice(0, 40).join(" ") + (words.length > 40 ? "…" : "");
+    return type === "publication"
+      ? { structured: false, summary: fallback }
+      : fallback;
   }
 }
 

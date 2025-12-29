@@ -1,12 +1,17 @@
 import { Router } from "express";
-import { summarizeText, extractConditions, extractExpertInfo, generateTrialContactMessage } from "../services/summary.service.js";
+import {
+  summarizeText,
+  extractConditions,
+  extractExpertInfo,
+  generateTrialContactMessage,
+} from "../services/summary.service.js";
 import { generateSummaryReport } from "../services/summaryReport.service.js";
 
 const router = Router();
 
 router.post("/ai/summary", async (req, res) => {
-  const { text } = req.body || {};
-  const summary = await summarizeText(text || "");
+  const { text, type } = req.body || {};
+  const summary = await summarizeText(text || "", type || "general");
   res.json({ summary });
 });
 
@@ -25,12 +30,15 @@ router.post("/ai/extract-expert-info", async (req, res) => {
 router.post("/ai/generate-summary-report", async (req, res) => {
   try {
     const { selectedItems, patientContext } = req.body || {};
-    
+
     if (!selectedItems) {
       return res.status(400).json({ error: "selectedItems is required" });
     }
 
-    const report = await generateSummaryReport(selectedItems, patientContext || {});
+    const report = await generateSummaryReport(
+      selectedItems,
+      patientContext || {}
+    );
     res.json({ report });
   } catch (error) {
     console.error("Error generating summary report:", error);
@@ -41,7 +49,7 @@ router.post("/ai/generate-summary-report", async (req, res) => {
 router.post("/ai/generate-trial-message", async (req, res) => {
   try {
     const { userName, userLocation, trial } = req.body || {};
-    
+
     if (!trial) {
       return res.status(400).json({ error: "trial is required" });
     }
@@ -59,5 +67,3 @@ router.post("/ai/generate-trial-message", async (req, res) => {
 });
 
 export default router;
-
-
