@@ -4,13 +4,40 @@ import {
   extractConditions,
   extractExpertInfo,
   generateTrialContactMessage,
+  simplifyTitle,
+  generateTrialDetails,
 } from "../services/summary.service.js";
 import { generateSummaryReport } from "../services/summaryReport.service.js";
 
 const router = Router();
 
 router.post("/ai/summary", async (req, res) => {
-  const { text, type } = req.body || {};
+  const { text, type, trial } = req.body || {};
+  
+  // For trials, generate structured summary with procedures, risks/benefits, and participant requirements
+  if (type === "trial" && trial) {
+    try {
+      const details = await generateTrialDetails(trial, "all");
+      
+      // Also generate a general summary
+      const generalSummary = await summarizeText(text || "", type || "general");
+      
+      res.json({ 
+        summary: {
+          structured: true,
+          generalSummary: generalSummary,
+          procedures: details.procedures,
+          risksBenefits: details.risksBenefits,
+          participantRequirements: details.participantRequirements,
+        }
+      });
+      return;
+    } catch (error) {
+      console.error("Error generating structured trial summary:", error);
+      // Fallback to regular summary
+    }
+  }
+  
   const summary = await summarizeText(text || "", type || "general");
   res.json({ summary });
 });
@@ -63,6 +90,38 @@ router.post("/ai/generate-trial-message", async (req, res) => {
   } catch (error) {
     console.error("Error generating trial contact message:", error);
     res.status(500).json({ error: "Failed to generate message" });
+  }
+});
+
+router.post("/ai/simplify-title", async (req, res) => {
+  try {
+    const { title } = req.body || {};
+
+    if (!title) {
+      return res.status(400).json({ error: "title is required" });
+    }
+
+    const simplified = await simplifyTitle(title);
+    res.json({ simplifiedTitle: simplified });
+  } catch (error) {
+    console.error("Error simplifying title:", error);
+    res.status(500).json({ error: "Failed to simplify title" });
+  }
+});
+
+router.post("/ai/trial-details", async (req, res) => {
+  try {
+    const { trial, section } = req.body || {};
+
+    if (!trial) {
+      return res.status(400).json({ error: "trial is required" });
+    }
+
+    const details = await generateTrialDetails(trial, section || "all");
+    res.json({ details });
+  } catch (error) {
+    console.error("Error generating trial details:", error);
+    res.status(500).json({ error: "Failed to generate trial details" });
   }
 });
 

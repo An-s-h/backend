@@ -147,11 +147,8 @@ router.get("/recommendations/:userId", async (req, res) => {
     globalExpertsQuery = `${combinedQuery} global`;
   }
 
-  // Build PubMed query with country only (e.g., "Neurology OR Alzheimer's Disease Canada")
+  // Build PubMed query without location (e.g., "Neurology OR Alzheimer's Disease")
   let pubmedQuery = combinedQuery;
-  if (userLocation?.country) {
-    pubmedQuery = `${combinedQuery} ${userLocation.country}`;
-  }
 
   // For clinical trials, search with combined query but also try individual searches
   // to get more diverse results

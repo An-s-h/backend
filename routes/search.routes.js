@@ -12,7 +12,7 @@ import {
 } from "../services/matching.service.js";
 import { Profile } from "../models/Profile.js";
 
-// New unified search limit system (fingerprint + deviceToken + IP)
+// Token-based search limit system (anonymous session token + IP throttling)
 import {
   checkSearchLimit,
   incrementSearchCount,
@@ -24,7 +24,7 @@ const router = Router();
 
 router.get("/search/trials", async (req, res) => {
   try {
-    // Check search limit for anonymous users (uses risk scoring)
+    // Check search limit for anonymous users (token-based)
     if (!req.user) {
       const limitCheck = await checkSearchLimit(req);
       if (!limitCheck.canSearch) {
@@ -44,7 +44,6 @@ router.get("/search/trials", async (req, res) => {
     const results = await searchClinicalTrials({ q, status, location });
 
     // Increment search count for anonymous users after successful search
-    // Updates ALL identifiers (fingerprint, deviceToken, IP) with same count
     if (!req.user) {
       await incrementSearchCount(req);
     }
@@ -117,7 +116,7 @@ router.get("/search/trials", async (req, res) => {
 
 router.get("/search/publications", async (req, res) => {
   try {
-    // Check search limit for anonymous users (uses risk scoring)
+    // Check search limit for anonymous users (token-based)
     if (!req.user) {
       const limitCheck = await checkSearchLimit(req);
       if (!limitCheck.canSearch) {
@@ -142,7 +141,6 @@ router.get("/search/publications", async (req, res) => {
     const results = await searchPubMed({ q: pubmedQuery });
 
     // Increment search count for anonymous users after successful search
-    // Updates ALL identifiers (fingerprint, deviceToken, IP) with same count
     if (!req.user) {
       await incrementSearchCount(req);
     }
@@ -212,7 +210,7 @@ router.get("/search/publications", async (req, res) => {
 
 router.get("/search/experts", async (req, res) => {
   try {
-    // Check search limit for anonymous users (uses risk scoring)
+    // Check search limit for anonymous users (token-based)
     if (!req.user) {
       const limitCheck = await checkSearchLimit(req);
       if (!limitCheck.canSearch) {
@@ -285,7 +283,6 @@ router.get("/search/experts", async (req, res) => {
     const experts = await findResearchersWithGemini(expertsQuery);
 
     // Increment search count for anonymous users after successful search
-    // Updates ALL identifiers (fingerprint, deviceToken, IP) with same count
     if (!req.user) {
       await incrementSearchCount(req);
     }
@@ -489,7 +486,7 @@ router.get("/search/remaining", async (req, res) => {
       return res.json({ remaining: null, unlimited: true });
     }
 
-    // Check remaining searches for anonymous users (uses combined fingerprint + deviceToken + IP)
+    // Check remaining searches for anonymous users (token-based)
     try {
       const limitCheck = await checkSearchLimit(req);
       return res.json({ remaining: limitCheck.remaining, unlimited: false });
@@ -508,7 +505,7 @@ router.get("/search/remaining", async (req, res) => {
 // ============================================
 // DEBUG ENDPOINT
 // ============================================
-// Debug endpoint to check search limit status using risk scoring
+// Debug endpoint to check search limit status (token-based)
 // Usage: GET /api/search/debug
 router.get("/search/debug", async (req, res) => {
   try {
@@ -536,7 +533,7 @@ router.post("/search/reset-for-testing", async (req, res) => {
 
     const result = await SearchLimit.updateMany(
       {},
-      { $set: { searchCount: 0, lastSearchAt: null, linkedIdentifiers: [] } }
+      { $set: { searchCount: 0, lastSearchAt: null } }
     );
 
     res.json({

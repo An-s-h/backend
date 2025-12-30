@@ -34,6 +34,7 @@ const researcherSchema = new mongoose.Schema(
     interests: [{ type: String }],
     orcid: String,
     researchGate: String,
+    institutionAffiliation: String,
     available: { type: Boolean, default: false },
     bio: String,
     location: locationSchema,

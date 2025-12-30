@@ -51,11 +51,14 @@ export async function searchResearchers(query) {
 // --------------------------------------
 export async function fetchFullORCIDProfile(orcidId, skipAI = false) {
   try {
+    // Normalize ORCID ID (remove spaces, ensure proper format)
+    const normalizedOrcid = orcidId.trim().replace(/\s+/g, "");
+
     const res = await axios.get(
-      `https://pub.orcid.org/v3.0/${orcidId}/record`,
+      `https://pub.orcid.org/v3.0/${normalizedOrcid}/record`,
       {
         headers: { Accept: "application/json" },
-        timeout: 8000,
+        timeout: 10000, // Increased timeout
       }
     );
 
@@ -71,47 +74,164 @@ export async function fetchFullORCIDProfile(orcidId, skipAI = false) {
 
     const biography = person?.biography?.content || null;
 
-    // Affiliations
-    const employ =
-      activities?.employments?.["employment-summary"] ||
-      activities?.employments?.employment_summary ||
-      [];
-    const edu =
-      activities?.educations?.["education-summary"] ||
-      activities?.educations?.education_summary ||
-      [];
+    // Affiliations - Get ALL employments and educations
+    // ORCID API v3.0 structure: employments.affiliation-group[].summaries[].employment-summary
+    const employmentGroups =
+      activities?.employments?.["affiliation-group"] || [];
+    const employ = [];
+    employmentGroups.forEach((group) => {
+      const summaries = group.summaries || [];
+      summaries.forEach((summary) => {
+        if (summary["employment-summary"]) {
+          employ.push(summary["employment-summary"]);
+        }
+      });
+    });
+
+    // Education structure: educations.affiliation-group[].summaries[].education-summary
+    const educationGroups = activities?.educations?.["affiliation-group"] || [];
+    const edu = [];
+    educationGroups.forEach((group) => {
+      const summaries = group.summaries || [];
+      summaries.forEach((summary) => {
+        if (summary["education-summary"]) {
+          edu.push(summary["education-summary"]);
+        }
+      });
+    });
+
     const aff = [...employ, ...edu];
 
+    // Primary affiliation (most recent employment)
     const affiliation =
+      employ[0]?.organization?.name ||
+      edu[0]?.organization?.name ||
       aff[0]?.organization?.name ||
       aff[0]?.["department-name"] ||
       aff[0]?.department_name ||
-      "Not Available";
+      null;
 
+    // Current position (most recent employment)
     const currentPosition = employ[0]
       ? `${employ[0]?.["role-title"] || employ[0]?.role_title || ""} at ${
           employ[0]?.organization?.name || ""
         }`.trim()
       : null;
 
-    // Location
-    const addr = person?.addresses?.address || [];
-    const location =
-      addr[0]?.country?.value ||
-      aff[0]?.organization?.address?.city ||
-      "Unknown";
+    // All employments (for detailed history)
+    const allEmployments = employ.map((emp) => ({
+      roleTitle: emp["role-title"] || emp.role_title || null,
+      organization: emp.organization?.name || null,
+      department: emp["department-name"] || emp.department_name || null,
+      startDate: emp["start-date"]
+        ? `${emp["start-date"].year?.value || ""}-${String(
+            emp["start-date"].month?.value || ""
+          ).padStart(2, "0")}-${String(
+            emp["start-date"].day?.value || ""
+          ).padStart(2, "0")}`
+        : null,
+      endDate: emp["end-date"]
+        ? `${emp["end-date"].year?.value || ""}-${String(
+            emp["end-date"].month?.value || ""
+          ).padStart(2, "0")}-${String(
+            emp["end-date"].day?.value || ""
+          ).padStart(2, "0")}`
+        : null,
+    }));
 
-    // Research Interests
+    // All educations
+    const allEducations = edu.map((ed) => ({
+      degree: ed["role-title"] || ed.role_title || null,
+      organization: ed.organization?.name || null,
+      department: ed["department-name"] || ed.department_name || null,
+      startDate: ed["start-date"]
+        ? `${ed["start-date"].year?.value || ""}-${String(
+            ed["start-date"].month?.value || ""
+          ).padStart(2, "0")}-${String(
+            ed["start-date"].day?.value || ""
+          ).padStart(2, "0")}`
+        : null,
+      endDate: ed["end-date"]
+        ? `${ed["end-date"].year?.value || ""}-${String(
+            ed["end-date"].month?.value || ""
+          ).padStart(2, "0")}-${String(
+            ed["end-date"].day?.value || ""
+          ).padStart(2, "0")}`
+        : null,
+    }));
+
+    // Location - try multiple sources
+    const addr = person?.addresses?.address || [];
+    let location = null;
+    if (addr.length > 0) {
+      const primaryAddr = addr[0];
+      const city = primaryAddr.city || "";
+      const region = primaryAddr.region || "";
+      const country = primaryAddr.country?.value || "";
+      location = [city, region, country].filter(Boolean).join(", ") || null;
+    }
+    // Fallback to organization address
+    if (!location && employ[0]?.organization?.address) {
+      const orgAddr = employ[0].organization.address;
+      location =
+        [orgAddr.city, orgAddr.region, orgAddr.country]
+          .filter(Boolean)
+          .join(", ") || null;
+    }
+
+    // Research Interests/Keywords
     const interests =
       (person?.keywords?.keyword || [])
         .map((k) => k?.content)
         .filter(Boolean) || [];
 
-    // Emails (public)
-    const email = person?.emails?.email?.[0]?.email || null;
+    // Emails (public) - get all public emails
+    const emails = (person?.emails?.email || [])
+      .map((e) => e.email)
+      .filter(Boolean);
+    const email = emails[0] || null;
 
-    // Fetch Publications
-    const publications = await fetchORCIDWorks(orcidId);
+    // Other Names (also known as)
+    const otherNames = (person?.["other-names"]?.["other-name"] || [])
+      .map((n) => n.content)
+      .filter(Boolean);
+
+    // Country (primary)
+    const country = addr[0]?.country?.value || null;
+
+    // Fetch ALL Publications (no limit)
+    const publications = await fetchORCIDWorks(normalizedOrcid);
+
+    // Get funding information if available
+    const funding =
+      activities?.fundings?.["funding-summary"] ||
+      activities?.fundings?.funding_summary ||
+      [];
+    const allFundings = funding.slice(0, 10).map((fund) => ({
+      title: fund.title?.title?.value || null,
+      organization: fund.organization?.name || null,
+      amount: fund.amount?.value || null,
+      currency: fund.amount?.currencyCode || null,
+      startDate: fund["start-date"]
+        ? `${fund["start-date"].year?.value || ""}-${String(
+            fund["start-date"].month?.value || ""
+          ).padStart(2, "0")}`
+        : null,
+      endDate: fund["end-date"]
+        ? `${fund["end-date"].year?.value || ""}-${String(
+            fund["end-date"].month?.value || ""
+          ).padStart(2, "0")}`
+        : null,
+    }));
+
+    // Get peer reviews if available
+    const peerReviews =
+      activities?.["peer-reviews"]?.["peer-review-group"] ||
+      activities?.peer_reviews?.peer_review_group ||
+      [];
+    const totalPeerReviews = peerReviews.reduce((sum, group) => {
+      return sum + (group["peer-review-summary"]?.length || 0);
+    }, 0);
 
     // Extract external links/researcher URLs
     const externalLinks = {};
@@ -175,34 +295,39 @@ export async function fetchFullORCIDProfile(orcidId, skipAI = false) {
       } catch {}
     }
 
-    // Only return meaningful profiles
-    if (
-      affiliation === "Not Available" &&
-      interests.length === 0 &&
-      location === "Unknown"
-    ) {
-      return null;
-    }
-
+    // Always return profile data, even if some fields are missing
+    // The profile should be returned as long as we can fetch the ORCID record
     return {
       name: fullName,
-      orcid: orcidId,
-      orcidId,
-      orcidUrl: `https://orcid.org/${orcidId}`,
+      orcid: normalizedOrcid,
+      orcidId: normalizedOrcid,
+      orcidUrl: `https://orcid.org/${normalizedOrcid}`,
       biography,
-      affiliation,
+      affiliation: affiliation || null,
       currentPosition,
-      location,
+      location: location || null,
+      country: country || null,
       researchInterests: interests,
       email,
+      emails: emails, // All public emails
+      otherNames: otherNames, // Also known as names
       publications,
       works: publications, // Alias for compatibility
+      totalWorks: publications.length, // Total count
       impactMetrics: {
         totalPublications: publications.length,
         hIndex: 0,
         totalCitations: 0,
         maxCitations: 0,
       },
+      // Employment and education history
+      employments: allEmployments,
+      educations: allEducations,
+      // Funding information
+      fundings: allFundings,
+      totalFundings: funding.length,
+      // Peer review information
+      totalPeerReviews: totalPeerReviews,
       externalLinks,
       education: aiExtract?.education || null,
       age: aiExtract?.age || null,
@@ -212,6 +337,10 @@ export async function fetchFullORCIDProfile(orcidId, skipAI = false) {
     };
   } catch (err) {
     console.error(`ORCID fetch failed for ${orcidId}:`, err.message);
+    if (err.response) {
+      console.error(`ORCID API response status: ${err.response.status}`);
+      console.error(`ORCID API response data:`, err.response.data);
+    }
     return null;
   }
 }
@@ -228,8 +357,8 @@ async function fetchORCIDWorks(orcidId) {
 
     const groups = res.data.group || [];
 
+    // Return ALL works, not just first 50
     return groups
-      .slice(0, 50)
       .map((g) => {
         const w = g["work-summary"]?.[0];
         if (!w) return null;

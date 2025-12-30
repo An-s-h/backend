@@ -1,8 +1,7 @@
 import { Router } from "express";
 import { Profile } from "../models/Profile.js";
 import { User } from "../models/User.js";
-import { DeviceToken } from "../models/DeviceToken.js";
-import { IPLimit } from "../models/IPLimit.js";
+import { SearchLimit } from "../models/SearchLimit.js";
 
 const router = Router();
 
@@ -117,109 +116,24 @@ router.patch("/admin/experts/:userId/verify", verifyAdmin, async (req, res) => {
 // SEARCH LIMIT MANAGEMENT ENDPOINTS (FOR TESTING)
 // ============================================
 
-// Reset all device token search counts (for testing)
-router.post(
-  "/admin/search/reset-device-tokens",
-  verifyAdmin,
-  async (req, res) => {
-    try {
-      const result = await DeviceToken.updateMany(
-        {},
-        { $set: { searchCount: 0, lastSearchAt: null } }
-      );
-
-      res.json({
-        success: true,
-        message: `Reset search counts for ${result.modifiedCount} device tokens`,
-        modifiedCount: result.modifiedCount,
-      });
-    } catch (error) {
-      console.error("Error resetting device token search counts:", error);
-      res
-        .status(500)
-        .json({ error: "Failed to reset device token search counts" });
-    }
-  }
-);
-
-// Reset all IP search counts (for testing)
-router.post("/admin/search/reset-ip-limits", verifyAdmin, async (req, res) => {
+// Reset all search limits (token-based)
+router.post("/admin/search/reset-all", verifyAdmin, async (req, res) => {
   try {
-    const result = await IPLimit.updateMany(
+    const result = await SearchLimit.updateMany(
       {},
       { $set: { searchCount: 0, lastSearchAt: null } }
     );
 
     res.json({
       success: true,
-      message: `Reset search counts for ${result.modifiedCount} IP addresses`,
-      modifiedCount: result.modifiedCount,
-    });
-  } catch (error) {
-    console.error("Error resetting IP search counts:", error);
-    res.status(500).json({ error: "Failed to reset IP search counts" });
-  }
-});
-
-// Reset all search limits (device tokens + IPs) - convenient for testing
-router.post("/admin/search/reset-all", verifyAdmin, async (req, res) => {
-  try {
-    const [deviceResult, ipResult] = await Promise.all([
-      DeviceToken.updateMany(
-        {},
-        { $set: { searchCount: 0, lastSearchAt: null } }
-      ),
-      IPLimit.updateMany({}, { $set: { searchCount: 0, lastSearchAt: null } }),
-    ]);
-
-    res.json({
-      success: true,
       message: "Reset all search limits successfully",
-      deviceTokensReset: deviceResult.modifiedCount,
-      ipLimitsReset: ipResult.modifiedCount,
+      recordsReset: result.modifiedCount,
     });
   } catch (error) {
-    console.error("Error resetting all search limits:", error);
+    console.error("Error resetting search limits:", error);
     res.status(500).json({ error: "Failed to reset search limits" });
   }
 });
-
-// Cleanup old unused device tokens (for maintenance)
-router.post(
-  "/admin/search/cleanup-device-tokens",
-  verifyAdmin,
-  async (req, res) => {
-    try {
-      // Delete tokens that haven't been used in 30+ days OR were created 7+ days ago and never used
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-      const sevenDaysAgo = new Date();
-      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
-      const result = await DeviceToken.deleteMany({
-        $or: [
-          // Tokens that haven't been used in 30+ days
-          { lastSearchAt: { $lt: thirtyDaysAgo } },
-          // Tokens created 7+ days ago that were never used
-          {
-            createdAt: { $lt: sevenDaysAgo },
-            lastSearchAt: { $exists: false },
-          },
-        ],
-      });
-
-      res.json({
-        success: true,
-        message: `Cleaned up ${result.deletedCount} old device tokens`,
-        deletedCount: result.deletedCount,
-      });
-    } catch (error) {
-      console.error("Error cleaning up device tokens:", error);
-      res.status(500).json({ error: "Failed to cleanup device tokens" });
-    }
-  }
-);
 
 // Get current search limit configuration
 router.get("/admin/search/config", verifyAdmin, async (req, res) => {
@@ -230,18 +144,9 @@ router.get("/admin/search/config", verifyAdmin, async (req, res) => {
     );
 
     // Get statistics
-    const [
-      deviceTokenCount,
-      ipLimitCount,
-      totalDeviceSearches,
-      totalIPSearches,
-    ] = await Promise.all([
-      DeviceToken.countDocuments({}),
-      IPLimit.countDocuments({}),
-      DeviceToken.aggregate([
-        { $group: { _id: null, total: { $sum: "$searchCount" } } },
-      ]),
-      IPLimit.aggregate([
+    const [tokenCount, totalSearches] = await Promise.all([
+      SearchLimit.countDocuments({}),
+      SearchLimit.aggregate([
         { $group: { _id: null, total: { $sum: "$searchCount" } } },
       ]),
     ]);
@@ -249,13 +154,9 @@ router.get("/admin/search/config", verifyAdmin, async (req, res) => {
     res.json({
       maxFreeSearches: MAX_FREE_SEARCHES,
       statistics: {
-        deviceTokens: {
-          total: deviceTokenCount,
-          totalSearches: totalDeviceSearches[0]?.total || 0,
-        },
-        ipLimits: {
-          total: ipLimitCount,
-          totalSearches: totalIPSearches[0]?.total || 0,
+        anonymousTokens: {
+          total: tokenCount,
+          totalSearches: totalSearches[0]?.total || 0,
         },
       },
     });

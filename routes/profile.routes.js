@@ -65,7 +65,9 @@ router.get("/curalink-expert/profile/:userId", async (req, res) => {
     // If ORCID exists, fetch ORCID profile data
     if (researcher.orcid) {
       try {
-        const orcidProfileData = await fetchFullORCIDProfile(researcher.orcid);
+        // Normalize ORCID ID (remove spaces, ensure proper format)
+        const normalizedOrcid = researcher.orcid.trim().replace(/\s+/g, "");
+        const orcidProfileData = await fetchFullORCIDProfile(normalizedOrcid);
         if (orcidProfileData) {
           // Merge ALL ORCID data with database data (keep database name, ORCID takes precedence for other fields)
           profileData = {
@@ -109,15 +111,52 @@ router.get("/curalink-expert/profile/:userId", async (req, res) => {
               ]),
             ].slice(0, 10), // Limit to top 10
             // Keep ORCID ID for reference
-            orcidId: orcidProfileData.orcidId || researcher.orcid,
+            orcidId: orcidProfileData.orcidId || normalizedOrcid,
             // Add works/publications from ORCID
             works: orcidProfileData.works || [],
             publications: orcidProfileData.works || [], // Alias for works
+            // Add impact metrics
+            impactMetrics: orcidProfileData.impactMetrics || {
+              totalPublications: orcidProfileData.publications?.length || 0,
+              hIndex: 0,
+              totalCitations: 0,
+              maxCitations: 0,
+            },
+            // Add all other ORCID data (note: researchInterests already merged above)
+            externalLinks: orcidProfileData.externalLinks || {},
+            // Additional ORCID data
+            country: orcidProfileData.country || null,
+            emails: orcidProfileData.emails || [],
+            otherNames: orcidProfileData.otherNames || [],
+            employments: orcidProfileData.employments || [],
+            educations: orcidProfileData.educations || [],
+            fundings: orcidProfileData.fundings || [],
+            totalFundings: orcidProfileData.totalFundings || 0,
+            totalPeerReviews: orcidProfileData.totalPeerReviews || 0,
+            totalWorks: orcidProfileData.totalWorks || orcidProfileData.publications?.length || 0,
+          };
+        } else {
+          // Even if fetchFullORCIDProfile returns null, still include publications count as 0
+          profileData.publications = [];
+          profileData.works = [];
+          profileData.impactMetrics = {
+            totalPublications: 0,
+            hIndex: 0,
+            totalCitations: 0,
+            maxCitations: 0,
           };
         }
       } catch (error) {
         console.error("Error fetching ORCID profile:", error.message);
-        // Continue with basic database info if ORCID fetch fails
+        // Continue with basic database info if ORCID fetch fails, but include empty arrays
+        profileData.publications = [];
+        profileData.works = [];
+        profileData.impactMetrics = {
+          totalPublications: 0,
+          hIndex: 0,
+          totalCitations: 0,
+          maxCitations: 0,
+        };
       }
     }
 

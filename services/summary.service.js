@@ -199,6 +199,70 @@ Return ONLY valid JSON, no explanations or markdown formatting.`;
   }
 }
 
+export async function simplifyTitle(title) {
+  if (!title || typeof title !== "string") {
+    return title || "";
+  }
+
+  // If title is already short (less than 60 characters), return as is
+  if (title.length <= 60) {
+    return title;
+  }
+
+  // Fallback if API key missing - just truncate
+  const apiKey = process.env.GOOGLE_AI_API_KEY;
+  if (!apiKey) {
+    const words = title.split(" ");
+    if (words.length <= 10) {
+      return title;
+    }
+    // Return first 10 words with ellipsis
+    return words.slice(0, 10).join(" ") + "...";
+  }
+
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
+
+    const prompt = `Simplify this medical research publication title to make it easier to understand for patients. Keep the core meaning and main topic, but use simpler words and shorter phrases. The simplified title should be concise (aim for 8-12 words or 60-80 characters max) while preserving the essential information about what the study is about.
+
+Original title: "${title}"
+
+Return ONLY the simplified title, no explanations, no quotes, no markdown formatting. Just the simplified title text.`;
+
+    const result = await model.generateContent(prompt, {
+      generationConfig: {
+        maxOutputTokens: 100,
+        temperature: 0.3, // Lower temperature for more consistent results
+      },
+    });
+
+    let simplified = result.response.text().trim();
+
+    // Clean up common AI artifacts
+    simplified = simplified
+      .replace(/^["']|["']$/g, "") // Remove surrounding quotes
+      .replace(/^Simplified[:\s]*/i, "")
+      .replace(/^Title[:\s]*/i, "")
+      .trim();
+
+    // Fallback if result is too long or empty
+    if (!simplified || simplified.length > title.length) {
+      const words = title.split(" ");
+      return words.length <= 12 ? title : words.slice(0, 12).join(" ") + "...";
+    }
+
+    return simplified;
+  } catch (e) {
+    console.error("AI title simplification error:", e);
+    // Fallback: truncate intelligently
+    const words = title.split(" ");
+    if (words.length <= 12) {
+      return title;
+    }
+    return words.slice(0, 12).join(" ") + "...";
+  }
+}
+
 export async function generateTrialContactMessage(
   userName,
   userLocation,
@@ -324,5 +388,121 @@ Thank you.
 
 Best regards,
 ${userName || "Patient"}`;
+  }
+}
+
+/**
+ * Generate detailed trial information (procedures, risks/benefits, participant requirements)
+ */
+export async function generateTrialDetails(trial, section = "all") {
+  // Fallback if API key missing
+  const apiKey = process.env.GOOGLE_AI_API_KEY;
+  if (!apiKey) {
+    return {
+      procedures: "Detailed information about study procedures, schedule, and treatments is available on the ClinicalTrials.gov website.",
+      risksBenefits: "Information about potential risks and benefits associated with this clinical trial is available on the ClinicalTrials.gov website. Please review this information carefully before deciding to participate.",
+      participantRequirements: "Specific requirements and expectations for participants, including visits, tests, and follow-up procedures, are detailed on the ClinicalTrials.gov website.",
+    };
+  }
+
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
+
+    // Build trial information
+    const trialInfo = {
+      title: trial.title || "N/A",
+      id: trial.id || trial._id || "N/A",
+      status: trial.status || "N/A",
+      phase: trial.phase || "N/A",
+      conditions: Array.isArray(trial.conditions)
+        ? trial.conditions.join(", ")
+        : trial.conditions || "N/A",
+      description: trial.description || trial.conditionDescription || "",
+      eligibility: trial.eligibility?.criteria || "",
+      location: trial.location || "Not specified",
+    };
+
+    // Determine which sections to generate
+    const sectionsToGenerate = section === "all" 
+      ? ["procedures", "risksBenefits", "participantRequirements"]
+      : [section];
+
+    const result = {};
+
+    // Generate procedures, schedule, and treatments
+    if (sectionsToGenerate.includes("procedures")) {
+      const proceduresPrompt = `You are a medical communication expert. Based on the clinical trial information provided, explain in plain language what happens during this trial - including procedures, schedule, and treatments. Write this for patients in simple, clear language (3-4 sentences). If specific details are not available, provide a general explanation based on the trial phase and type.
+
+Trial Information:
+- Title: ${trialInfo.title}
+- Phase: ${trialInfo.phase}
+- Conditions: ${trialInfo.conditions}
+- Description: ${trialInfo.description.substring(0, 500)}
+- Eligibility: ${trialInfo.eligibility.substring(0, 300)}
+
+Return ONLY the explanation text, no markdown formatting, no labels, just the plain explanation.`;
+
+      const proceduresResult = await model.generateContent(proceduresPrompt, {
+        generationConfig: {
+          maxOutputTokens: 300,
+          temperature: 0.7,
+        },
+      });
+      result.procedures = proceduresResult.response.text().trim();
+    }
+
+    // Generate risks and benefits
+    if (sectionsToGenerate.includes("risksBenefits")) {
+      const risksBenefitsPrompt = `You are a medical communication expert. Based on the clinical trial information provided, explain in plain language the potential risks and benefits of participating in this clinical trial. Write this for patients in simple, clear language (3-4 sentences). Be balanced and informative.
+
+Trial Information:
+- Title: ${trialInfo.title}
+- Phase: ${trialInfo.phase}
+- Conditions: ${trialInfo.conditions}
+- Description: ${trialInfo.description.substring(0, 500)}
+
+Return ONLY the explanation text, no markdown formatting, no labels, just the plain explanation.`;
+
+      const risksBenefitsResult = await model.generateContent(risksBenefitsPrompt, {
+        generationConfig: {
+          maxOutputTokens: 300,
+          temperature: 0.7,
+        },
+      });
+      result.risksBenefits = risksBenefitsResult.response.text().trim();
+    }
+
+    // Generate participant requirements
+    if (sectionsToGenerate.includes("participantRequirements")) {
+      const requirementsPrompt = `You are a medical communication expert. Based on the clinical trial information provided, explain in plain language what participants need to do - including visits, tests, follow-up procedures, and time commitments. Write this for patients in simple, clear language (3-4 sentences).
+
+Trial Information:
+- Title: ${trialInfo.title}
+- Phase: ${trialInfo.phase}
+- Conditions: ${trialInfo.conditions}
+- Description: ${trialInfo.description.substring(0, 500)}
+- Eligibility: ${trialInfo.eligibility.substring(0, 300)}
+- Location: ${trialInfo.location}
+
+Return ONLY the explanation text, no markdown formatting, no labels, just the plain explanation.`;
+
+      const requirementsResult = await model.generateContent(requirementsPrompt, {
+        generationConfig: {
+          maxOutputTokens: 300,
+          temperature: 0.7,
+        },
+      });
+      result.participantRequirements = requirementsResult.response.text().trim();
+    }
+
+    return result;
+  } catch (e) {
+    console.error("AI trial details generation error:", e);
+    // Fallback
+    return {
+      procedures: "Detailed information about study procedures, schedule, and treatments is available on the ClinicalTrials.gov website.",
+      risksBenefits: "Information about potential risks and benefits associated with this clinical trial is available on the ClinicalTrials.gov website. Please review this information carefully before deciding to participate.",
+      participantRequirements: "Specific requirements and expectations for participants, including visits, tests, and follow-up procedures, are detailed on the ClinicalTrials.gov website.",
+    };
   }
 }
