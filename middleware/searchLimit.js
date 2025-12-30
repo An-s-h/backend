@@ -1,168 +1,144 @@
-import { SearchLimit } from "../models/SearchLimit.js";
-import {
-  getOrCreateAnonymousToken,
-  getAnonymousTokenUuid,
-  TOKEN_COOKIE_NAME,
-} from "../utils/anonymousToken.js";
-import { checkIPThrottle } from "../utils/ipThrottle.js";
+import { IPLimit } from "../models/IPLimit.js";
+import { getClientIP } from "../utils/ipThrottle.js";
+import crypto from "crypto";
 
-// Configuration
-const MAX_FREE_SEARCHES = parseInt(process.env.MAX_FREE_SEARCHES || "6", 10);
-
-// Thresholds for different actions
-const THRESHOLDS = {
-  ALLOWED: 0,
-  WARNING: MAX_FREE_SEARCHES - 2, // Show warning about remaining
-  SLOW_DOWN: MAX_FREE_SEARCHES - 1, // Add slight delay
-  SOFT_LIMIT: MAX_FREE_SEARCHES, // Suggest sign-up
-  HARD_LIMIT: MAX_FREE_SEARCHES + 2, // Actually block (with override option)
-};
+// Configuration - Strict limit of 6 searches per IP (hardcoded to ensure strictness)
+const MAX_FREE_SEARCHES = 6;
 
 /**
- * Check search limit for anonymous user (token-based)
- * Returns risk assessment with soft thresholds
+ * Hash IP address for privacy (consistent with ipThrottle.js)
+ */
+function hashIP(ip) {
+  if (!ip) return null;
+  const salt = process.env.IP_HASH_SALT || "curalink-ip-throttle-salt";
+  const hash = crypto.createHash("sha256");
+  hash.update(ip + salt);
+  return hash.digest("hex").substring(0, 32);
+}
+
+/**
+ * Check search limit for anonymous user (IP-based only)
+ * Returns strict limit check - blocks after 6 searches
  */
 export async function checkSearchLimit(req, res = null) {
-  // Get or create anonymous session token (res is optional for cases where we just want to check)
-  const tokenData = res
-    ? getOrCreateAnonymousToken(req, res)
-    : { uuid: getAnonymousTokenUuid(req) };
+  // Get client IP address
+  const clientIP = getClientIP(req);
 
-  if (!tokenData || !tokenData.uuid) {
-    // If we can't get/create token, allow but log
-    console.warn("[SearchLimit] Failed to get anonymous token");
+  if (!clientIP) {
+    // If we can't get IP, block to be strict
+    console.warn("[SearchLimit] Failed to get client IP - blocking request");
     return {
-      canSearch: true,
-      remaining: MAX_FREE_SEARCHES,
-      action: "ALLOWED",
+      canSearch: false,
+      remaining: 0,
+      action: "BLOCKED",
+      message: "Unable to verify request. Please try again.",
+      showSignUpPrompt: true,
     };
   }
 
-  const tokenUuid = tokenData.uuid;
+  const hashedIP = hashIP(clientIP);
+  if (!hashedIP) {
+    console.warn("[SearchLimit] Failed to hash IP - blocking request");
+    return {
+      canSearch: false,
+      remaining: 0,
+      action: "BLOCKED",
+      message: "Unable to verify request. Please try again.",
+      showSignUpPrompt: true,
+    };
+  }
 
   try {
-    // Check IP throttling first (secondary check, not identity)
-    const ipThrottle = checkIPThrottle(req);
-    if (ipThrottle.throttled) {
-      return {
-        canSearch: false,
-        remaining: 0,
-        action: "THROTTLED",
-        message: "Too many requests. Please try again in a moment.",
-        showSignUpPrompt: false,
-      };
-    }
-
-    // Find search limit record for this token
-    const searchLimitRecord = await SearchLimit.findOne({ tokenUuid });
+    // Find or create IP limit record
+    let ipLimitRecord = await IPLimit.findOne({ hashedIP });
 
     let searchCount = 0;
-    if (searchLimitRecord) {
-      searchCount = searchLimitRecord.searchCount;
+    if (ipLimitRecord) {
+      searchCount = ipLimitRecord.searchCount || 0;
+    } else {
+      // Create new record with count 0
+      ipLimitRecord = await IPLimit.create({
+        hashedIP,
+        searchCount: 0,
+        lastSearchAt: null,
+      });
     }
 
     const remaining = Math.max(0, MAX_FREE_SEARCHES - searchCount);
-    const action = determineAction(searchCount);
 
-    // Debug logging
+    // Strict limit: block if searchCount >= MAX_FREE_SEARCHES (strict enforcement)
+    if (searchCount >= MAX_FREE_SEARCHES) {
+      if (process.env.NODE_ENV !== "production") {
+        console.log(
+          `[SearchLimit] BLOCKED: hashedIP=${hashedIP.substring(
+            0,
+            8
+          )}..., count=${searchCount}, limit=${MAX_FREE_SEARCHES}`
+        );
+      }
+      return {
+        canSearch: false,
+        remaining: 0,
+        action: "BLOCKED",
+        message:
+          "You've reached your free search limit. Sign up for unlimited searches.",
+        showSignUpPrompt: true,
+        effectiveCount: searchCount,
+      };
+    }
+
+    // Allow search
     if (process.env.NODE_ENV !== "production") {
       console.log(
-        `[SearchLimit] Check: tokenUuid=${tokenUuid.substring(
+        `[SearchLimit] ALLOWED: hashedIP=${hashedIP.substring(
           0,
           8
-        )}..., count=${searchCount}, remaining=${remaining}, action=${
-          action.action
-        }`
+        )}..., count=${searchCount}, remaining=${remaining}`
       );
     }
 
     return {
-      ...action,
+      canSearch: true,
       remaining,
+      action: "ALLOWED",
+      message: remaining <= 2 ? `${remaining} free searches remaining` : null,
+      showSignUpPrompt: false,
       effectiveCount: searchCount,
     };
   } catch (error) {
     console.error("[SearchLimit] Error checking limit:", error);
-    // Fail open - allow request if there's an error
+    // Fail closed - block request if there's an error (strict mode)
     return {
-      canSearch: true,
-      remaining: MAX_FREE_SEARCHES,
-      action: "ERROR",
-    };
-  }
-}
-
-/**
- * Determine action based on search count
- */
-function determineAction(count) {
-  // Hard limit
-  if (count >= THRESHOLDS.HARD_LIMIT) {
-    return {
-      action: "BLOCKED",
       canSearch: false,
-      message:
-        "You've reached your free search limit. Sign up for unlimited searches.",
-      showSignUpPrompt: true,
-    };
-  }
-
-  // Soft limit
-  if (count >= THRESHOLDS.SOFT_LIMIT) {
-    return {
-      action: "SOFT_LIMIT",
-      canSearch: true, // Still allowed but strongly encouraged to sign up
-      message: "You've used all your free searches. Sign up to continue.",
-      showSignUpPrompt: true,
-      addDelay: 1000, // 1 second delay
-    };
-  }
-
-  // Slow down
-  if (count >= THRESHOLDS.SLOW_DOWN) {
-    return {
-      action: "SLOW_DOWN",
-      canSearch: true,
-      message: "Last free search! Sign up for unlimited access.",
-      showSignUpPrompt: false,
-      addDelay: 500, // 0.5 second delay
-    };
-  }
-
-  // Warning
-  if (count >= THRESHOLDS.WARNING) {
-    return {
-      action: "WARNING",
-      canSearch: true,
-      message: `${THRESHOLDS.SOFT_LIMIT - count} free searches remaining`,
+      remaining: 0,
+      action: "ERROR",
+      message: "An error occurred. Please try again later.",
       showSignUpPrompt: false,
     };
   }
-
-  // Fully allowed
-  return {
-    action: "ALLOWED",
-    canSearch: true,
-    message: null,
-    showSignUpPrompt: false,
-  };
 }
 
 /**
- * Increment search count for anonymous session token
- * Returns the updated search count and remaining searches
+ * Increment search count for IP address
  */
 export async function incrementSearchCount(req) {
-  const tokenUuid = getAnonymousTokenUuid(req);
+  const clientIP = getClientIP(req);
 
-  if (!tokenUuid) {
-    console.warn("[SearchLimit] No token UUID to increment");
-    return { searchCount: 0, remaining: MAX_FREE_SEARCHES };
+  if (!clientIP) {
+    console.warn("[SearchLimit] No IP to increment count for");
+    return;
+  }
+
+  const hashedIP = hashIP(clientIP);
+  if (!hashedIP) {
+    console.warn("[SearchLimit] Failed to hash IP for increment");
+    return;
   }
 
   try {
-    const updated = await SearchLimit.findOneAndUpdate(
-      { tokenUuid },
+    // Use atomic increment to prevent race conditions
+    const result = await IPLimit.findOneAndUpdate(
+      { hashedIP },
       {
         $inc: { searchCount: 1 },
         $set: { lastSearchAt: new Date() },
@@ -170,23 +146,31 @@ export async function incrementSearchCount(req) {
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
-    const searchCount = updated.searchCount || 0;
-    const remaining = Math.max(0, MAX_FREE_SEARCHES - searchCount);
-
-    if (process.env.NODE_ENV !== "production") {
-      console.log(
-        `[SearchLimit] Incremented search count for token: ${tokenUuid.substring(
+    // Double-check: if count exceeds limit after increment, don't allow it
+    if (result && result.searchCount > MAX_FREE_SEARCHES) {
+      // Rollback if somehow we exceeded the limit
+      await IPLimit.findOneAndUpdate(
+        { hashedIP },
+        { $inc: { searchCount: -1 } }
+      );
+      console.warn(
+        `[SearchLimit] Prevented exceeding limit for IP: ${hashedIP.substring(
           0,
           8
-        )}..., new count=${searchCount}, remaining=${remaining}`
+        )}...`
       );
     }
 
-    return { searchCount, remaining };
+    if (process.env.NODE_ENV !== "production") {
+      console.log(
+        `[SearchLimit] Incremented search count for IP: ${hashedIP.substring(
+          0,
+          8
+        )}...`
+      );
+    }
   } catch (error) {
     console.error("[SearchLimit] Error incrementing count:", error);
-    // Return fallback values on error
-    return { searchCount: 0, remaining: MAX_FREE_SEARCHES };
   }
 }
 
@@ -194,40 +178,45 @@ export async function incrementSearchCount(req) {
  * Get debug info for search limits
  */
 export async function getSearchLimitDebug(req) {
-  const tokenUuid = getAnonymousTokenUuid(req);
+  const clientIP = getClientIP(req);
 
-  if (!tokenUuid) {
+  if (!clientIP) {
     return {
-      error: "No anonymous token found",
-      tokenUuid: null,
+      error: "No client IP found",
+      hashedIP: null,
     };
   }
 
-  const searchLimitRecord = await SearchLimit.findOne({ tokenUuid }).lean();
+  const hashedIP = hashIP(clientIP);
+  if (!hashedIP) {
+    return {
+      error: "Failed to hash IP",
+      hashedIP: null,
+    };
+  }
 
-  const count = searchLimitRecord?.searchCount || 0;
+  const ipLimitRecord = await IPLimit.findOne({ hashedIP }).lean();
+
+  const count = ipLimitRecord?.searchCount || 0;
   const remaining = Math.max(0, MAX_FREE_SEARCHES - count);
 
   return {
-    tokenUuid: tokenUuid.substring(0, 8) + "...",
+    hashedIP: hashedIP.substring(0, 8) + "...",
+    clientIP: clientIP.substring(0, 8) + "...",
     searchCount: count,
     remaining,
-    lastSearchAt: searchLimitRecord?.lastSearchAt || null,
-    thresholds: THRESHOLDS,
+    lastSearchAt: ipLimitRecord?.lastSearchAt || null,
     maxFreeSearches: MAX_FREE_SEARCHES,
-    action: determineAction(count),
+    canSearch: count < MAX_FREE_SEARCHES,
   };
 }
 
 /**
- * Middleware to ensure anonymous session token cookie is set
+ * Middleware to ensure IP-based tracking is ready
+ * (No longer needs to set cookies, just passes through)
  */
 export function searchLimitMiddleware(req, res, next) {
-  // Only set token for non-authenticated users
-  if (!req.user) {
-    // This will create token if it doesn't exist and set the cookie
-    getOrCreateAnonymousToken(req, res);
-  }
+  // No-op middleware - IP tracking happens in checkSearchLimit
   next();
 }
 
