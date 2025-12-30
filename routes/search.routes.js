@@ -26,7 +26,7 @@ router.get("/search/trials", async (req, res) => {
   try {
     // Check search limit for anonymous users (token-based)
     if (!req.user) {
-      const limitCheck = await checkSearchLimit(req);
+      const limitCheck = await checkSearchLimit(req, res);
       if (!limitCheck.canSearch) {
         return res.status(429).json({
           error:
@@ -44,8 +44,10 @@ router.get("/search/trials", async (req, res) => {
     const results = await searchClinicalTrials({ q, status, location });
 
     // Increment search count for anonymous users after successful search
+    let remaining = null;
     if (!req.user) {
-      await incrementSearchCount(req);
+      const incrementResult = await incrementSearchCount(req);
+      remaining = incrementResult.remaining;
     }
 
     // Build user profile for matching
@@ -97,13 +99,6 @@ router.get("/search/trials", async (req, res) => {
       .sort((a, b) => (b.matchPercentage || 0) - (a.matchPercentage || 0))
       .slice(0, 9);
 
-    // Get remaining searches for anonymous users
-    let remaining = null;
-    if (!req.user) {
-      const limitCheck = await checkSearchLimit(req);
-      remaining = limitCheck.remaining;
-    }
-
     res.json({
       results: sortedResults,
       ...(remaining !== null && { remaining }),
@@ -118,7 +113,7 @@ router.get("/search/publications", async (req, res) => {
   try {
     // Check search limit for anonymous users (token-based)
     if (!req.user) {
-      const limitCheck = await checkSearchLimit(req);
+      const limitCheck = await checkSearchLimit(req, res);
       if (!limitCheck.canSearch) {
         return res.status(429).json({
           error:
@@ -141,8 +136,10 @@ router.get("/search/publications", async (req, res) => {
     const results = await searchPubMed({ q: pubmedQuery });
 
     // Increment search count for anonymous users after successful search
+    let remaining = null;
     if (!req.user) {
-      await incrementSearchCount(req);
+      const incrementResult = await incrementSearchCount(req);
+      remaining = incrementResult.remaining;
     }
 
     // Build user profile for matching
@@ -189,13 +186,6 @@ router.get("/search/publications", async (req, res) => {
         })
       : results;
 
-    // Get remaining searches for anonymous users
-    let remaining = null;
-    if (!req.user) {
-      const limitCheck = await checkSearchLimit(req);
-      remaining = limitCheck.remaining;
-    }
-
     res.json({
       results: resultsWithMatch,
       ...(remaining !== null && { remaining }),
@@ -212,7 +202,7 @@ router.get("/search/experts", async (req, res) => {
   try {
     // Check search limit for anonymous users (token-based)
     if (!req.user) {
-      const limitCheck = await checkSearchLimit(req);
+      const limitCheck = await checkSearchLimit(req, res);
       if (!limitCheck.canSearch) {
         return res.status(429).json({
           error:
@@ -254,13 +244,13 @@ router.get("/search/experts", async (req, res) => {
         researchArea = parts[0].trim();
         // The disease interest is everything after the first "in"
         // Remove location patterns if they exist (city, country at the end)
-        let remaining = parts.slice(1).join(" in ").trim();
+        let diseasePart = parts.slice(1).join(" in ").trim();
         // Remove common location patterns (e.g., "Toronto, Canada", "New York, USA")
         const locationPattern = /,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s*$/;
-        remaining = remaining.replace(locationPattern, "").trim();
+        diseasePart = diseasePart.replace(locationPattern, "").trim();
         // Also remove "global" if present
-        remaining = remaining.replace(/\s+global\s*$/i, "").trim();
-        diseaseInterest = remaining || null;
+        diseasePart = diseasePart.replace(/\s+global\s*$/i, "").trim();
+        diseaseInterest = diseasePart || null;
       } else {
         researchArea = parts[0].trim();
       }
@@ -283,8 +273,10 @@ router.get("/search/experts", async (req, res) => {
     const experts = await findResearchersWithGemini(expertsQuery);
 
     // Increment search count for anonymous users after successful search
+    let remaining = null;
     if (!req.user) {
-      await incrementSearchCount(req);
+      const incrementResult = await incrementSearchCount(req);
+      remaining = incrementResult.remaining;
     }
 
     // If no experts found and it might be due to overload, return a helpful message
@@ -293,6 +285,7 @@ router.get("/search/experts", async (req, res) => {
         results: [],
         message:
           "No experts found. The AI service may be temporarily unavailable. Please try again in a moment.",
+        ...(remaining !== null && { remaining }),
       });
     }
 
@@ -375,13 +368,6 @@ router.get("/search/experts", async (req, res) => {
           };
         })
       : experts;
-
-    // Get remaining searches for anonymous users
-    let remaining = null;
-    if (!req.user) {
-      const limitCheck = await checkSearchLimit(req);
-      remaining = limitCheck.remaining;
-    }
 
     res.json({
       results: resultsWithMatch,
@@ -488,7 +474,7 @@ router.get("/search/remaining", async (req, res) => {
 
     // Check remaining searches for anonymous users (token-based)
     try {
-      const limitCheck = await checkSearchLimit(req);
+      const limitCheck = await checkSearchLimit(req, res);
       return res.json({ remaining: limitCheck.remaining, unlimited: false });
     } catch (dbError) {
       console.error("Database error getting remaining searches:", dbError);

@@ -150,17 +150,18 @@ function determineAction(count) {
 
 /**
  * Increment search count for anonymous session token
+ * Returns the updated search count and remaining searches
  */
 export async function incrementSearchCount(req) {
   const tokenUuid = getAnonymousTokenUuid(req);
 
   if (!tokenUuid) {
     console.warn("[SearchLimit] No token UUID to increment");
-    return;
+    return { searchCount: 0, remaining: MAX_FREE_SEARCHES };
   }
 
   try {
-    await SearchLimit.findOneAndUpdate(
+    const updated = await SearchLimit.findOneAndUpdate(
       { tokenUuid },
       {
         $inc: { searchCount: 1 },
@@ -169,16 +170,23 @@ export async function incrementSearchCount(req) {
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
+    const searchCount = updated.searchCount || 0;
+    const remaining = Math.max(0, MAX_FREE_SEARCHES - searchCount);
+
     if (process.env.NODE_ENV !== "production") {
       console.log(
         `[SearchLimit] Incremented search count for token: ${tokenUuid.substring(
           0,
           8
-        )}...`
+        )}..., new count=${searchCount}, remaining=${remaining}`
       );
     }
+
+    return { searchCount, remaining };
   } catch (error) {
     console.error("[SearchLimit] Error incrementing count:", error);
+    // Return fallback values on error
+    return { searchCount: 0, remaining: MAX_FREE_SEARCHES };
   }
 }
 
