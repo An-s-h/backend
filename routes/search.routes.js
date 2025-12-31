@@ -12,7 +12,9 @@ import {
 } from "../services/matching.service.js";
 import { Profile } from "../models/Profile.js";
 
-// IP-based search limit system (strict 6 searches per IP)
+// Browser-based search limit system (strict 6 searches per device/browser)
+// Uses deviceId from localStorage (survives IP changes, proxies, browser restarts)
+// Falls back to IP-based tracking for backward compatibility
 import {
   checkSearchLimit,
   incrementSearchCount,
@@ -24,7 +26,7 @@ const router = Router();
 
 router.get("/search/trials", async (req, res) => {
   try {
-    // Check search limit for anonymous users (IP-based)
+    // Check search limit for anonymous users (browser-based deviceId)
     if (!req.user) {
       const limitCheck = await checkSearchLimit(req);
       if (!limitCheck.canSearch) {
@@ -116,7 +118,7 @@ router.get("/search/trials", async (req, res) => {
 
 router.get("/search/publications", async (req, res) => {
   try {
-    // Check search limit for anonymous users (IP-based)
+    // Check search limit for anonymous users (browser-based deviceId)
     if (!req.user) {
       const limitCheck = await checkSearchLimit(req);
       if (!limitCheck.canSearch) {
@@ -210,7 +212,7 @@ router.get("/search/publications", async (req, res) => {
 
 router.get("/search/experts", async (req, res) => {
   try {
-    // Check search limit for anonymous users (IP-based)
+    // Check search limit for anonymous users (browser-based deviceId)
     if (!req.user) {
       const limitCheck = await checkSearchLimit(req);
       if (!limitCheck.canSearch) {
@@ -486,7 +488,7 @@ router.get("/search/remaining", async (req, res) => {
       return res.json({ remaining: null, unlimited: true });
     }
 
-    // Check remaining searches for anonymous users (IP-based)
+    // Check remaining searches for anonymous users (browser-based deviceId)
     try {
       const limitCheck = await checkSearchLimit(req);
       return res.json({ remaining: limitCheck.remaining, unlimited: false });
@@ -505,7 +507,7 @@ router.get("/search/remaining", async (req, res) => {
 // ============================================
 // DEBUG ENDPOINT
 // ============================================
-// Debug endpoint to check search limit status (IP-based)
+// Debug endpoint to check search limit status (browser-based deviceId)
 // Usage: GET /api/search/debug
 router.get("/search/debug", async (req, res) => {
   try {
