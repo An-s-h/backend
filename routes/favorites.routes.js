@@ -49,6 +49,11 @@ router.post("/favorites/:userId", async (req, res) => {
     existsQuery.$or.push({ "item.name": item.name });
   }
   
+  // For forum/thread types, also check the alternate type
+  if (type === "forum" || type === "thread") {
+    existsQuery.type = { $in: ["forum", "thread"] };
+  }
+  
   const exists = await Favorite.findOne(existsQuery);
   
   if (exists) return res.json({ ok: true });
@@ -79,6 +84,11 @@ router.delete("/favorites/:userId", async (req, res) => {
   // For experts, also check by name (exact match)
   if (type === "expert") {
     deleteQuery.$or.push({ "item.name": id });
+  }
+  
+  // For forum/thread types, allow matching between both types
+  if (type === "forum" || type === "thread") {
+    deleteQuery.type = { $in: ["forum", "thread"] };
   }
   
   await Favorite.deleteOne(deleteQuery);
