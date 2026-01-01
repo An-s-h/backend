@@ -14,7 +14,7 @@ if (!apiKey) {
 }
 
 const genAI = new GoogleGenerativeAI(apiKey || "");
-export async function summarizeText(text, type = "general") {
+export async function summarizeText(text, type = "general", simplify = false) {
   if (!text)
     return type === "publication" ? { structured: false, summary: "" } : "";
 
@@ -34,20 +34,24 @@ export async function summarizeText(text, type = "general") {
 
     // For publications, generate structured summary
     if (type === "publication") {
-      const prompt = `You are a medical communication expert. Summarize this research publication in plain language for patients. Use simple words and short sentences. Structure your response as a JSON object with these sections:
+      const languageInstruction = simplify
+        ? "Summarize this research publication in plain language for patients. Use simple words and short sentences."
+        : "Summarize this research publication for researchers and medical professionals. Use appropriate technical terminology and research language.";
+      
+      const prompt = `You are a medical research expert. ${languageInstruction} Structure your response as a JSON object with these sections:
 
 {
-  "coreMessage": "The most important finding in 1-2 short sentences (what they discovered)",
-  "what": "What the study was about - describe the research question/problem in simple terms (2-3 sentences)",
+  "coreMessage": "The most important finding in 1-2 sentences (what they discovered)",
+  "what": "What the study was about - describe the research question/problem (2-3 sentences)",
   "why": "Why this research matters - explain the importance and context (2-3 sentences)",
-  "how": "How they did the study - describe the methods briefly in plain language (2-3 sentences)",
-  "soWhat": "So what does this mean for patients? - explain relevance, implications, and why it matters to them (2-3 sentences)",
-  "keyTakeaway": "One sentence takeaway that patients should remember"
+  "how": "How they did the study - describe the methods (2-3 sentences)",
+  "soWhat": "So what does this mean? - explain relevance, implications, and significance (2-3 sentences)",
+  "keyTakeaway": "One sentence takeaway that should be remembered"
 }
 
 Publication content: ${text.substring(0, 2000)}
 
-Return ONLY valid JSON, no markdown formatting. Use plain language throughout - avoid jargon.`;
+Return ONLY valid JSON, no markdown formatting.${simplify ? " Use plain language throughout - avoid jargon." : " Use appropriate technical and scientific terminology."}`;
 
       const result = await model.generateContent(prompt);
       let responseText = result.response.text().trim();
@@ -69,9 +73,13 @@ Return ONLY valid JSON, no markdown formatting. Use plain language throughout - 
       }
     }
 
-    // For trials and general summaries, use simple format
+    // For trials and general summaries
+    const languageInstruction = simplify
+      ? "Summarize the following medical content in 3-4 sentences using simple, plain language for patients. Focus on key findings and relevance."
+      : "Summarize the following medical content in 3-4 sentences using appropriate technical and scientific terminology for researchers. Focus on key findings, methodology, and clinical relevance.";
+    
     const result = await model.generateContent(
-      `Summarize the following medical content in 3-4 sentences, focusing on key findings and relevance: ${text}`
+      `${languageInstruction}: ${text}`
     );
     return result.response.text();
   } catch (e) {
@@ -394,7 +402,7 @@ ${userName || "Patient"}`;
 /**
  * Generate detailed trial information (procedures, risks/benefits, participant requirements)
  */
-export async function generateTrialDetails(trial, section = "all") {
+export async function generateTrialDetails(trial, section = "all", simplify = false) {
   // Fallback if API key missing
   const apiKey = process.env.GOOGLE_AI_API_KEY;
   if (!apiKey) {
@@ -431,7 +439,11 @@ export async function generateTrialDetails(trial, section = "all") {
 
     // Generate procedures, schedule, and treatments
     if (sectionsToGenerate.includes("procedures")) {
-      const proceduresPrompt = `You are a medical communication expert. Based on the clinical trial information provided, explain in plain language what happens during this trial - including procedures, schedule, and treatments. Write this for patients in simple, clear language (3-4 sentences). If specific details are not available, provide a general explanation based on the trial phase and type.
+      const languageInstruction = simplify
+        ? "explain in plain language what happens during this trial - including procedures, schedule, and treatments. Write this for patients in simple, clear language (3-4 sentences)"
+        : "explain what happens during this trial - including procedures, schedule, and treatments. Write this for researchers using appropriate technical terminology and research language (3-4 sentences)";
+      
+      const proceduresPrompt = `You are a medical research expert. Based on the clinical trial information provided, ${languageInstruction}. If specific details are not available, provide a general explanation based on the trial phase and type.
 
 Trial Information:
 - Title: ${trialInfo.title}
@@ -440,7 +452,7 @@ Trial Information:
 - Description: ${trialInfo.description.substring(0, 500)}
 - Eligibility: ${trialInfo.eligibility.substring(0, 300)}
 
-Return ONLY the explanation text, no markdown formatting, no labels, just the plain explanation.`;
+Return ONLY the explanation text, no markdown formatting, no labels, just the explanation.`;
 
       const proceduresResult = await model.generateContent(proceduresPrompt, {
         generationConfig: {
@@ -453,7 +465,11 @@ Return ONLY the explanation text, no markdown formatting, no labels, just the pl
 
     // Generate risks and benefits
     if (sectionsToGenerate.includes("risksBenefits")) {
-      const risksBenefitsPrompt = `You are a medical communication expert. Based on the clinical trial information provided, explain in plain language the potential risks and benefits of participating in this clinical trial. Write this for patients in simple, clear language (3-4 sentences). Be balanced and informative.
+      const languageInstruction = simplify
+        ? "explain in plain language the potential risks and benefits of participating in this clinical trial. Write this for patients in simple, clear language (3-4 sentences)"
+        : "explain the potential risks and benefits of participating in this clinical trial. Write this for researchers using appropriate technical terminology and clinical language (3-4 sentences)";
+      
+      const risksBenefitsPrompt = `You are a medical research expert. Based on the clinical trial information provided, ${languageInstruction}. Be balanced and informative.
 
 Trial Information:
 - Title: ${trialInfo.title}
@@ -461,7 +477,7 @@ Trial Information:
 - Conditions: ${trialInfo.conditions}
 - Description: ${trialInfo.description.substring(0, 500)}
 
-Return ONLY the explanation text, no markdown formatting, no labels, just the plain explanation.`;
+Return ONLY the explanation text, no markdown formatting, no labels, just the explanation.`;
 
       const risksBenefitsResult = await model.generateContent(risksBenefitsPrompt, {
         generationConfig: {
@@ -474,7 +490,11 @@ Return ONLY the explanation text, no markdown formatting, no labels, just the pl
 
     // Generate participant requirements
     if (sectionsToGenerate.includes("participantRequirements")) {
-      const requirementsPrompt = `You are a medical communication expert. Based on the clinical trial information provided, explain in plain language what participants need to do - including visits, tests, follow-up procedures, and time commitments. Write this for patients in simple, clear language (3-4 sentences).
+      const languageInstruction = simplify
+        ? "explain in plain language what participants need to do - including visits, tests, follow-up procedures, and time commitments. Write this for patients in simple, clear language (3-4 sentences)"
+        : "explain what participants need to do - including visits, tests, follow-up procedures, and time commitments. Write this for researchers using appropriate technical terminology and research language (3-4 sentences)";
+      
+      const requirementsPrompt = `You are a medical research expert. Based on the clinical trial information provided, ${languageInstruction}.
 
 Trial Information:
 - Title: ${trialInfo.title}
@@ -484,7 +504,7 @@ Trial Information:
 - Eligibility: ${trialInfo.eligibility.substring(0, 300)}
 - Location: ${trialInfo.location}
 
-Return ONLY the explanation text, no markdown formatting, no labels, just the plain explanation.`;
+Return ONLY the explanation text, no markdown formatting, no labels, just the explanation.`;
 
       const requirementsResult = await model.generateContent(requirementsPrompt, {
         generationConfig: {

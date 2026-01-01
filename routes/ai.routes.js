@@ -12,15 +12,15 @@ import { generateSummaryReport } from "../services/summaryReport.service.js";
 const router = Router();
 
 router.post("/ai/summary", async (req, res) => {
-  const { text, type, trial } = req.body || {};
+  const { text, type, trial, simplify = false } = req.body || {};
   
   // For trials, generate structured summary with procedures, risks/benefits, and participant requirements
   if (type === "trial" && trial) {
     try {
-      const details = await generateTrialDetails(trial, "all");
+      const details = await generateTrialDetails(trial, "all", simplify);
       
       // Also generate a general summary
-      const generalSummary = await summarizeText(text || "", type || "general");
+      const generalSummary = await summarizeText(text || "", type || "general", simplify);
       
       res.json({ 
         summary: {
@@ -38,7 +38,7 @@ router.post("/ai/summary", async (req, res) => {
     }
   }
   
-  const summary = await summarizeText(text || "", type || "general");
+  const summary = await summarizeText(text || "", type || "general", simplify);
   res.json({ summary });
 });
 
