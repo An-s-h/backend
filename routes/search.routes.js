@@ -5,6 +5,7 @@ import { searchORCID } from "../services/orcid.service.js";
 import { findResearchersWithGemini } from "../services/geminiExperts.service.js";
 import { searchGoogleScholarPublications } from "../services/googleScholar.service.js";
 import { getExpertProfile } from "../services/expertProfile.service.js";
+import { fetchTrialById } from "../services/urlParser.service.js";
 import {
   calculateTrialMatch,
   calculatePublicationMatch,
@@ -516,6 +517,38 @@ router.get("/search/debug", async (req, res) => {
   } catch (error) {
     console.error("Error getting search limit debug:", error);
     res.status(500).json({ error: "Failed to get debug info" });
+  }
+});
+
+// Endpoint to fetch detailed trial information by NCT ID
+router.get("/search/trial/:nctId", async (req, res) => {
+  try {
+    const { nctId } = req.params;
+
+    if (!nctId || !nctId.trim()) {
+      return res.status(400).json({ error: "NCT ID is required" });
+    }
+
+    // Clean up NCT ID (remove whitespace, ensure uppercase)
+    const cleanNctId = nctId.trim().toUpperCase();
+
+    // Fetch detailed trial information
+    const trial = await fetchTrialById(cleanNctId);
+
+    if (!trial) {
+      return res.status(404).json({
+        error: `Trial with ID ${cleanNctId} not found`,
+        trial: null,
+      });
+    }
+
+    res.json({ trial });
+  } catch (error) {
+    console.error("Error fetching trial details:", error);
+    res.status(500).json({
+      error: "Failed to fetch trial details",
+      trial: null,
+    });
   }
 });
 

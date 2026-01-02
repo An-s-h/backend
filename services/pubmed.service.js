@@ -17,13 +17,41 @@ function getCache(key) {
   return item.value;
 }
 
+/**
+ * Retry helper with exponential backoff for PubMed API calls
+ */
+async function retryWithBackoff(fn, maxRetries = 3, initialDelay = 1000) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      const isLastAttempt = attempt === maxRetries - 1;
+      const isTimeoutError = 
+        error.code === "ECONNABORTED" || 
+        error.message?.includes("timeout") ||
+        error.message?.includes("exceeded");
+      
+      if (isLastAttempt || !isTimeoutError) {
+        throw error;
+      }
+      
+      // Exponential backoff: 1s, 2s, 4s
+      const delay = initialDelay * Math.pow(2, attempt);
+      console.log(
+        `PubMed request timeout, retrying in ${delay}ms... (attempt ${attempt + 1}/${maxRetries})`
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
 export async function searchPubMed({ q = "" } = {}) {
   const key = `pm:${q}`;
   const cached = getCache(key);
   if (cached) return cached;
 
   try {
-    // Step 1: Get PMIDs
+    // Step 1: Get PMIDs with retry logic and increased timeout
     const esearchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi`;
     const esearchParams = new URLSearchParams({
       db: "pubmed",
@@ -31,21 +59,34 @@ export async function searchPubMed({ q = "" } = {}) {
       retmode: "json",
       retmax: "9",
     });
-    const idsResp = await axios.get(`${esearchUrl}?${esearchParams}`, {
-      timeout: 10000,
+    
+    const idsResp = await retryWithBackoff(async () => {
+      return await axios.get(`${esearchUrl}?${esearchParams}`, {
+        timeout: 20000, // Increased from 10000 to 20000ms
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; CuraLink/1.0)',
+        },
+      });
     });
+    
     const ids = idsResp.data?.esearchresult?.idlist || [];
     if (ids.length === 0) return [];
 
-    // Step 2: Fetch detailed metadata with EFetch
+    // Step 2: Fetch detailed metadata with EFetch with retry logic and increased timeout
     const efetchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi`;
     const efetchParams = new URLSearchParams({
       db: "pubmed",
       id: ids.join(","),
       retmode: "xml",
     });
-    const xmlResp = await axios.get(`${efetchUrl}?${efetchParams}`, {
-      timeout: 15000,
+    
+    const xmlResp = await retryWithBackoff(async () => {
+      return await axios.get(`${efetchUrl}?${efetchParams}`, {
+        timeout: 30000, // Increased from 15000 to 30000ms
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; CuraLink/1.0)',
+        },
+      });
     });
 
     // Step 3: Parse XML
@@ -170,7 +211,13 @@ export async function searchPubMed({ q = "" } = {}) {
     setCache(key, items);
     return items;
   } catch (e) {
-    console.error("PubMed fetch error:", e.message);
+    // More detailed error logging
+    if (e.code === "ECONNABORTED" || e.message?.includes("timeout")) {
+      console.error("PubMed fetch error: timeout exceeded after retries", e.message);
+    } else {
+      console.error("PubMed fetch error:", e.message);
+    }
+    // Return empty array instead of throwing to prevent cascading failures
     return [];
   }
 }

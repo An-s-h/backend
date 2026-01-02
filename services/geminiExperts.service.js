@@ -4,14 +4,42 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const apiKey = process.env.GOOGLE_AI_API_KEY;
+const apiKey2 = process.env.GOOGLE_AI_API_KEY_2; // Second API key for load balancing
 
-if (!apiKey) {
+if (!apiKey && !apiKey2) {
   console.warn(
-    "⚠️  GOOGLE_AI_API_KEY not found in environment variables. Gemini expert search will not work."
+    "⚠️  GOOGLE_AI_API_KEY or GOOGLE_AI_API_KEY_2 not found in environment variables. Gemini expert search will not work."
   );
 }
 
+// Create instances for both API keys if available
 const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
+const genAI2 = apiKey2 ? new GoogleGenerativeAI(apiKey2) : null;
+
+// Round-robin counter for load balancing between API keys
+let apiKeyCounter = 0;
+
+/**
+ * Get the appropriate Gemini instance based on load balancing
+ * Uses round-robin to distribute requests between API keys
+ */
+function getGeminiInstance() {
+  if (!genAI && !genAI2) {
+    return null;
+  }
+  
+  // If only one API key is available, use it
+  if (!genAI2) {
+    return genAI;
+  }
+  if (!genAI) {
+    return genAI2;
+  }
+  
+  // Round-robin between two API keys
+  apiKeyCounter = (apiKeyCounter + 1) % 2;
+  return apiKeyCounter === 0 ? genAI : genAI2;
+}
 
 // Cache for query results to reduce API calls
 const cache = new Map();
@@ -93,9 +121,15 @@ export async function findResearchersWithGemini(query = "") {
   }
 
   try {
+    const geminiInstance = getGeminiInstance();
+    if (!geminiInstance) {
+      console.warn("No Gemini API keys available for expert search");
+      return [];
+    }
+    
     // Use fastest model (flash is much faster than pro)
     // Use fastest and deterministic model
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+    const model = geminiInstance.getGenerativeModel({ model: "gemini-2.5-flash" });
 
     // Highly structured and specific system-style prompt
     const prompt = `

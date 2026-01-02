@@ -11,12 +11,15 @@ export function parseUrl(url) {
 
   try {
     const trimmedUrl = url.trim();
-    
+
     // Basic validation: URL should start with http:// or https://
-    if (!trimmedUrl.startsWith("http://") && !trimmedUrl.startsWith("https://")) {
+    if (
+      !trimmedUrl.startsWith("http://") &&
+      !trimmedUrl.startsWith("https://")
+    ) {
       return null;
     }
-    
+
     const urlObj = new URL(trimmedUrl);
 
     // Check for ClinicalTrials.gov URLs
@@ -37,7 +40,8 @@ export function parseUrl(url) {
         };
       }
       // Also check query params
-      const nctParam = urlObj.searchParams.get("term") || urlObj.searchParams.get("id");
+      const nctParam =
+        urlObj.searchParams.get("term") || urlObj.searchParams.get("id");
       if (nctParam && /NCT\d+/i.test(nctParam)) {
         return {
           type: "trial",
@@ -85,164 +89,182 @@ export function parseUrl(url) {
 }
 
 /**
- * Fetch trial data by NCT ID from ClinicalTrials.gov API
+ * Fetch trial data by NCT ID from ClinicalTrials.gov API v2
+ * Uses the direct endpoint: https://clinicaltrials.gov/api/v2/studies/{NCT_ID}
+ * Data structure: study.protocolSection.contactsLocationsModule.locations
  */
 export async function fetchTrialById(nctId) {
   try {
-    // Use the search API with the specific NCT ID as the search term
-    const url = `https://clinicaltrials.gov/api/v2/studies?query.term=${encodeURIComponent(nctId)}`;
-    const resp = await axios.get(url, { timeout: 15000 });
+    // Clean up NCT ID (ensure uppercase, remove whitespace)
+    const cleanNctId = nctId.trim().toUpperCase();
 
-    // The API returns studies array, find the one matching our NCT ID exactly
-    const studies = resp.data?.studies || [];
-    const study = studies.find((s) => {
-      const nctIdFromStudy = s.protocolSection?.identificationModule?.nctId || s.nctId;
-      return nctIdFromStudy && (nctIdFromStudy.toUpperCase() === nctId.toUpperCase());
-    });
+    // Use the direct endpoint for a specific trial
+    const url = `https://clinicaltrials.gov/api/v2/studies/${cleanNctId}`;
 
-    if (!study) {
-      // If not found in search results, try a more specific search
-      // Sometimes we need to search with the full NCT format
-      const altUrl = `https://clinicaltrials.gov/api/v2/studies?query.term=${encodeURIComponent(nctId.toUpperCase())}`;
-      const altResp = await axios.get(altUrl, { timeout: 15000 });
-      const altStudies = altResp.data?.studies || [];
-      const altStudy = altStudies.find((s) => {
-        const nctIdFromStudy = s.protocolSection?.identificationModule?.nctId || s.nctId;
-        return nctIdFromStudy && (nctIdFromStudy.toUpperCase() === nctId.toUpperCase());
-      });
-      if (!altStudy) return null;
-      const s = altStudy;
-      const protocolSection = s.protocolSection || {};
-      const identificationModule = protocolSection.identificationModule || {};
-      const statusModule = protocolSection.statusModule || {};
-      const conditionsModule = protocolSection.conditionsModule || {};
-      const eligibilityModule = protocolSection.eligibilityModule || {};
-      const designModule = protocolSection.designModule || {};
-      const descriptionModule = protocolSection.descriptionModule || {};
-      const contactsLocationsModule = s.contactsLocationsModule || {};
+    let resp;
+    try {
+      resp = await axios.get(url, { timeout: 15000 });
+    } catch (error) {
+      // If direct endpoint fails, fallback to search endpoint
+      if (error.response?.status === 404 || error.code === "ENOTFOUND") {
+        console.warn(
+          `Direct endpoint failed for ${cleanNctId}, trying search endpoint...`
+        );
+        const searchUrl = `https://clinicaltrials.gov/api/v2/studies?query.term=${encodeURIComponent(
+          cleanNctId
+        )}`;
+        resp = await axios.get(searchUrl, { timeout: 15000 });
 
-      // Extract all locations properly
-      const locations =
-        contactsLocationsModule.locations?.map((loc) => {
-          const parts = [loc.city, loc.state, loc.country].filter(Boolean);
-          return parts.join(", ");
-        }) || [];
+        const studies = resp.data?.studies || [];
+        const study = studies.find((s) => {
+          const nctIdFromStudy =
+            s.protocolSection?.identificationModule?.nctId || s.nctId;
+          return nctIdFromStudy && nctIdFromStudy.toUpperCase() === cleanNctId;
+        });
 
-      // Extract eligibility criteria comprehensively
-      const eligibility = {
-        criteria: eligibilityModule.eligibilityCriteria || "Not specified",
-        gender: eligibilityModule.gender || "All",
-        minimumAge: eligibilityModule.minimumAge || "Not specified",
-        maximumAge: eligibilityModule.maximumAge || "Not specified",
-        healthyVolunteers: eligibilityModule.healthyVolunteers || "Unknown",
-        population: eligibilityModule.studyPopulationDescription || "",
-      };
-
-      // Extract conditions
-      const conditions =
-        conditionsModule.conditions?.map((c) => c.name || c) || [];
-
-      // Extract contact info
-      const contacts =
-        contactsLocationsModule.centralContacts?.map((c) => ({
-          name: c.name || "",
-          email: c.email || "",
-          phone: c.phone || "",
-        })) || [];
-
-      // Extract design and phase
-      const phases = designModule.phases || [];
-      const phase = phases.length > 0 ? phases.join(", ") : "N/A";
-
-      const nctIdFinal = identificationModule.nctId || nctId.toUpperCase();
-      return {
-        id: nctIdFinal,
-        _id: nctIdFinal,
-        title:
-          identificationModule.officialTitle ||
-          identificationModule.briefTitle ||
-          "Clinical Trial",
-        status: statusModule.overallStatus || "Unknown",
-        phase,
-        conditions,
-        location: locations.join("; ") || "Not specified",
-        eligibility,
-        contacts,
-        description:
-          descriptionModule.briefSummary ||
-          descriptionModule.detailedDescription ||
-          "No description available.",
-        clinicalTrialsGovUrl: `https://clinicaltrials.gov/study/${nctIdFinal}`,
-      };
+        if (!study) return null;
+        return processStudyData(study, cleanNctId);
+      }
+      throw error;
     }
 
-    const s = study;
-    const protocolSection = s.protocolSection || {};
-    const identificationModule = protocolSection.identificationModule || {};
-    const statusModule = protocolSection.statusModule || {};
-    const conditionsModule = protocolSection.conditionsModule || {};
-    const eligibilityModule = protocolSection.eligibilityModule || {};
-    const designModule = protocolSection.designModule || {};
-    const descriptionModule = protocolSection.descriptionModule || {};
-    const contactsLocationsModule = s.contactsLocationsModule || {};
+    // For direct endpoint, the response structure might be different
+    // Check if it's wrapped in a studies array or is a single study object
+    let study;
+    if (resp.data?.protocolSection) {
+      // Direct endpoint returns single study object
+      study = resp.data;
+    } else if (resp.data?.studies && resp.data.studies.length > 0) {
+      // Sometimes it's wrapped in studies array
+      study = resp.data.studies[0];
+    } else {
+      return null;
+    }
 
-    // Extract all locations properly
-    const locations =
-      contactsLocationsModule.locations?.map((loc) => {
-        const parts = [loc.city, loc.state, loc.country].filter(Boolean);
-        return parts.join(", ");
-      }) || [];
-
-    // Extract eligibility criteria comprehensively
-    const eligibility = {
-      criteria: eligibilityModule.eligibilityCriteria || "Not specified",
-      gender: eligibilityModule.gender || "All",
-      minimumAge: eligibilityModule.minimumAge || "Not specified",
-      maximumAge: eligibilityModule.maximumAge || "Not specified",
-      healthyVolunteers: eligibilityModule.healthyVolunteers || "Unknown",
-      population: eligibilityModule.studyPopulationDescription || "",
-    };
-
-    // Extract conditions
-    const conditions =
-      conditionsModule.conditions?.map((c) => c.name || c) || [];
-
-    // Extract contact info
-    const contacts =
-      contactsLocationsModule.centralContacts?.map((c) => ({
-        name: c.name || "",
-        email: c.email || "",
-        phone: c.phone || "",
-      })) || [];
-
-    // Extract design and phase
-    const phases = designModule.phases || [];
-    const phase = phases.length > 0 ? phases.join(", ") : "N/A";
-
-    const nctIdFinal = identificationModule.nctId || nctId;
-    return {
-      id: nctIdFinal,
-      _id: nctIdFinal,
-      title:
-        identificationModule.officialTitle ||
-        identificationModule.briefTitle ||
-        "Clinical Trial",
-      status: statusModule.overallStatus || "Unknown",
-      phase,
-      conditions,
-      location: locations.join("; ") || "Not specified",
-      eligibility,
-      contacts,
-      description:
-        descriptionModule.briefSummary ||
-        descriptionModule.detailedDescription ||
-        "No description available.",
-      clinicalTrialsGovUrl: `https://clinicaltrials.gov/study/${nctIdFinal}`,
-    };
+    return processStudyData(study, cleanNctId);
   } catch (error) {
     console.error("Error fetching trial by ID:", error);
     return null;
   }
+}
+
+/**
+ * Process study data from ClinicalTrials.gov API v2 response
+ * Data structure: study.protocolSection.contactsLocationsModule.locations
+ */
+function processStudyData(study, nctId) {
+  const protocolSection = study.protocolSection || {};
+  const identificationModule = protocolSection.identificationModule || {};
+  const statusModule = protocolSection.statusModule || {};
+  const conditionsModule = protocolSection.conditionsModule || {};
+  const eligibilityModule = protocolSection.eligibilityModule || {};
+  const designModule = protocolSection.designModule || {};
+  const descriptionModule = protocolSection.descriptionModule || {};
+
+  // IMPORTANT: Use protocolSection.contactsLocationsModule
+  // Structure: protocolSection.contactsLocationsModule.locations[]
+  const contactsLocationsModule = protocolSection.contactsLocationsModule || {};
+
+  // Extract all locations with detailed information including facility names
+  // Locations structure: contactsLocationsModule.locations[]
+  const locations =
+    contactsLocationsModule.locations?.map((loc) => {
+      // Location object structure from API:
+      // loc.facility (facility name)
+      // loc.city, loc.state, loc.country, loc.zip
+      // loc.contact (object with name, email, phone)
+      // loc.status (recruitment status)
+      const facilityName = loc.facility || loc.name || "";
+      const city = loc.city || "";
+      const state = loc.state || "";
+      const country = loc.country || "";
+      const zip = loc.zip || "";
+
+      const parts = [city, state, country, zip].filter(Boolean);
+      const addressString = parts.join(", ");
+
+      // Contact info at location level
+      const locationContact = loc.contact || {};
+
+      return {
+        facility: facilityName,
+        address: addressString,
+        city: city,
+        state: state,
+        country: country,
+        zip: zip,
+        status: loc.status || loc.recruitmentStatus || "",
+        contactName: locationContact.name || loc.contactName || "",
+        contactEmail: locationContact.email || loc.contactEmail || "",
+        contactPhone: locationContact.phone || loc.contactPhone || "",
+        fullAddress: facilityName
+          ? `${facilityName}, ${addressString}`
+          : addressString,
+      };
+    }) || [];
+
+  // Extract eligibility criteria comprehensively
+  const eligibility = {
+    criteria: eligibilityModule.eligibilityCriteria || "Not specified",
+    gender: eligibilityModule.gender || "All",
+    minimumAge: eligibilityModule.minimumAge || "Not specified",
+    maximumAge: eligibilityModule.maximumAge || "Not specified",
+    healthyVolunteers: eligibilityModule.healthyVolunteers || "Unknown",
+    population: eligibilityModule.studyPopulationDescription || "",
+  };
+
+  // Extract conditions
+  const conditions = conditionsModule.conditions?.map((c) => c.name || c) || [];
+
+  // Extract contact info - both central contacts and overall contacts
+  // Structure: contactsLocationsModule.centralContacts[] and overallContacts[]
+  const centralContacts =
+    contactsLocationsModule.centralContacts?.map((c) => ({
+      name: c.name || "",
+      email: c.email || "",
+      phone: c.phone || "",
+      role: c.role || c.type || "Central Contact",
+    })) || [];
+
+  // Also extract overall study contacts if available
+  const overallContacts =
+    contactsLocationsModule.overallContacts?.map((c) => ({
+      name: c.name || "",
+      email: c.email || "",
+      phone: c.phone || "",
+      role: c.role || c.type || "Overall Contact",
+    })) || [];
+
+  // Combine all contacts, prioritizing central contacts
+  const contacts = [...centralContacts, ...overallContacts];
+
+  // Extract design and phase
+  const phases = designModule.phases || [];
+  const phase = phases.length > 0 ? phases.join(", ") : "N/A";
+
+  const nctIdFinal = identificationModule.nctId || nctId.toUpperCase();
+  return {
+    id: nctIdFinal,
+    _id: nctIdFinal,
+    title:
+      identificationModule.officialTitle ||
+      identificationModule.briefTitle ||
+      "Clinical Trial",
+    status: statusModule.overallStatus || "Unknown",
+    phase,
+    conditions,
+    locations, // Detailed locations array
+    location:
+      locations.map((l) => l.fullAddress || l.address).join("; ") ||
+      "Not specified", // Backward compatibility
+    eligibility,
+    contacts,
+    description:
+      descriptionModule.briefSummary ||
+      descriptionModule.detailedDescription ||
+      "No description available.",
+    clinicalTrialsGovUrl: `https://clinicaltrials.gov/study/${nctIdFinal}`,
+  };
 }
 
 /**
@@ -258,7 +280,10 @@ export async function fetchPublicationById(pmid) {
       retmode: "xml",
     });
     const xmlResp = await axios.get(`${efetchUrl}?${efetchParams}`, {
-      timeout: 15000,
+      timeout: 30000, // Increased timeout to prevent timeouts
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; CuraLink/1.0)',
+      },
     });
 
     // Parse XML
@@ -319,9 +344,12 @@ export async function fetchPublicationById(pmid) {
       const authorElements = authorList.getElementsByTagName("Author");
       for (let i = 0; i < authorElements.length; i++) {
         const author = authorElements[i];
-        const lastName = author.getElementsByTagName("LastName")[0]?.textContent || "";
-        const foreName = author.getElementsByTagName("ForeName")[0]?.textContent || "";
-        const initials = author.getElementsByTagName("Initials")[0]?.textContent || "";
+        const lastName =
+          author.getElementsByTagName("LastName")[0]?.textContent || "";
+        const foreName =
+          author.getElementsByTagName("ForeName")[0]?.textContent || "";
+        const initials =
+          author.getElementsByTagName("Initials")[0]?.textContent || "";
         if (lastName) {
           authors.push(
             foreName || initials
@@ -359,7 +387,8 @@ export async function fetchPublicationById(pmid) {
     const pubTypeList = article.getElementsByTagName("PublicationTypeList");
     const publicationTypes = [];
     if (pubTypeList.length > 0) {
-      const pubTypeElements = pubTypeList[0].getElementsByTagName("PublicationType");
+      const pubTypeElements =
+        pubTypeList[0].getElementsByTagName("PublicationType");
       for (let i = 0; i < pubTypeElements.length; i++) {
         publicationTypes.push(pubTypeElements[i].textContent || "");
       }
@@ -401,7 +430,8 @@ export async function fetchDataFromUrl(url) {
   if (!url || typeof url !== "string") {
     return {
       success: false,
-      error: "Invalid URL. Please provide a valid ClinicalTrials.gov or PubMed URL.",
+      error:
+        "Invalid URL. Please provide a valid ClinicalTrials.gov or PubMed URL.",
     };
   }
 
@@ -410,7 +440,8 @@ export async function fetchDataFromUrl(url) {
     if (!parsed) {
       return {
         success: false,
-        error: "Invalid URL. Please provide a ClinicalTrials.gov or PubMed URL.",
+        error:
+          "Invalid URL. Please provide a ClinicalTrials.gov or PubMed URL.",
       };
     }
 
@@ -455,4 +486,3 @@ export async function fetchDataFromUrl(url) {
     };
   }
 }
-

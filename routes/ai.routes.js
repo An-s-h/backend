@@ -6,6 +6,7 @@ import {
   generateTrialContactMessage,
   simplifyTitle,
   generateTrialDetails,
+  simplifyTrialSummary,
 } from "../services/summary.service.js";
 import { generateSummaryReport } from "../services/summaryReport.service.js";
 
@@ -122,6 +123,22 @@ router.post("/ai/trial-details", async (req, res) => {
   } catch (error) {
     console.error("Error generating trial details:", error);
     res.status(500).json({ error: "Failed to generate trial details" });
+  }
+});
+
+router.post("/ai/simplify-trial-summary", async (req, res) => {
+  try {
+    const { trial } = req.body || {};
+
+    if (!trial) {
+      return res.status(400).json({ error: "trial is required" });
+    }
+
+    const simplified = await simplifyTrialSummary(trial);
+    res.json({ simplifiedSummary: simplified });
+  } catch (error) {
+    console.error("Error simplifying trial summary:", error);
+    res.status(500).json({ error: "Failed to simplify trial summary" });
   }
 });
 
