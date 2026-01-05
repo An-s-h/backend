@@ -166,4 +166,33 @@ router.get("/admin/search/config", verifyAdmin, async (req, res) => {
   }
 });
 
+// Reset verification email limit for a user (admin only)
+router.post("/admin/users/:userId/reset-verification-email-limit", verifyAdmin, async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Reset the lastVerificationEmailSent timestamp
+    user.lastVerificationEmailSent = undefined;
+    await user.save();
+
+    return res.json({
+      success: true,
+      message: `Verification email limit reset for user ${user.email || userId}`,
+      user: {
+        userId: user._id.toString(),
+        email: user.email,
+        username: user.username,
+      },
+    });
+  } catch (error) {
+    console.error("Error resetting verification email limit:", error);
+    res.status(500).json({ error: "Failed to reset verification email limit" });
+  }
+});
+
 export default router;

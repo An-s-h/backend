@@ -2,9 +2,13 @@ import { Router } from "express";
 import { User } from "../models/User.js";
 import { Profile } from "../models/Profile.js";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
+import { sendVerificationEmail } from "../services/email.service.js";
+import { verifySession } from "../middleware/auth.js";
 
 const router = Router();
-const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key-change-in-production";
+const JWT_SECRET =
+  process.env.JWT_SECRET || "your-secret-key-change-in-production";
 
 // Generate JWT token
 function generateToken(userId) {
@@ -14,20 +18,31 @@ function generateToken(userId) {
 // POST /api/auth/register - Register new user
 router.post("/auth/register", async (req, res) => {
   const { username, email, password, role, medicalInterests } = req.body || {};
-  
-  if (!username || !email || !password || !["patient", "researcher"].includes(role)) {
-    return res.status(400).json({ error: "username, email, password, and role are required" });
+
+  if (
+    !username ||
+    !email ||
+    !password ||
+    !["patient", "researcher"].includes(role)
+  ) {
+    return res
+      .status(400)
+      .json({ error: "username, email, password, and role are required" });
   }
 
   if (password.length < 6) {
-    return res.status(400).json({ error: "Password must be at least 6 characters" });
+    return res
+      .status(400)
+      .json({ error: "Password must be at least 6 characters" });
   }
 
   try {
     // Check if user already exists
     const existingUser = await User.findOne({ email, role });
     if (existingUser) {
-      return res.status(400).json({ error: "User with this email and role already exists" });
+      return res
+        .status(400)
+        .json({ error: "User with this email and role already exists" });
     }
 
     // Create new user
@@ -50,7 +65,9 @@ router.post("/auth/register", async (req, res) => {
   } catch (error) {
     console.error("Registration error:", error);
     if (error.code === 11000) {
-      return res.status(400).json({ error: "Email already exists for this role" });
+      return res
+        .status(400)
+        .json({ error: "Email already exists for this role" });
     }
     return res.status(500).json({ error: "Failed to register user" });
   }
@@ -59,15 +76,17 @@ router.post("/auth/register", async (req, res) => {
 // POST /api/auth/login - Login with email and password
 router.post("/auth/login", async (req, res) => {
   const { email, password, role } = req.body || {};
-  
+
   if (!email || !password || !["patient", "researcher"].includes(role)) {
-    return res.status(400).json({ error: "email, password, and role are required" });
+    return res
+      .status(400)
+      .json({ error: "email, password, and role are required" });
   }
 
   try {
     // Find user by email and role
     const user = await User.findOne({ email, role });
-    
+
     if (!user) {
       return res.status(401).json({ error: "Invalid email or password" });
     }
@@ -95,7 +114,7 @@ router.post("/auth/login", async (req, res) => {
 // POST /api/auth/update-profile - Update user profile with medical interests/conditions
 router.post("/auth/update-profile", async (req, res) => {
   const { userId, medicalInterests } = req.body || {};
-  
+
   if (!userId) {
     return res.status(400).json({ error: "userId is required" });
   }
@@ -126,7 +145,7 @@ router.post("/auth/update-profile", async (req, res) => {
 router.put("/auth/update-user/:userId", async (req, res) => {
   const { userId } = req.params;
   const { username } = req.body || {};
-  
+
   if (!userId) {
     return res.status(400).json({ error: "userId is required" });
   }
@@ -141,11 +160,9 @@ router.put("/auth/update-user/:userId", async (req, res) => {
       return res.status(400).json({ error: "No fields to update" });
     }
 
-    const user = await User.findByIdAndUpdate(
-      userId,
-      updateData,
-      { new: true }
-    );
+    const user = await User.findByIdAndUpdate(userId, updateData, {
+      new: true,
+    });
 
     if (!user) {
       return res.status(404).json({ error: "User not found" });
@@ -174,12 +191,12 @@ router.put("/auth/update-user/:userId", async (req, res) => {
  * They must complete their profile first via /auth/complete-oauth-profile
  */
 router.post("/auth/oauth-sync", async (req, res) => {
-  const { 
-    auth0Id, 
-    email, 
-    name, 
-    picture, 
-    emailVerified, 
+  const {
+    auth0Id,
+    email,
+    name,
+    picture,
+    emailVerified,
     provider,
     // Optional onboarding data (patient)
     role,
@@ -204,19 +221,27 @@ router.post("/auth/oauth-sync", async (req, res) => {
     // First, try to find user by Auth0 ID
     let user = await User.findOne({ auth0Id });
     let isNewUser = false;
-    const hasOnboardingData = !!(role || conditions || location || gender || specialty || researchInterests);
+    const hasOnboardingData = !!(
+      role ||
+      conditions ||
+      location ||
+      gender ||
+      specialty ||
+      researchInterests
+    );
 
     if (!user) {
       // Try to find by email (user might have registered traditionally before)
       // We'll look for any user with this email
       const existingByEmail = await User.findOne({ email });
-      
+
       if (existingByEmail) {
         // Link OAuth to existing account
         existingByEmail.auth0Id = auth0Id;
         existingByEmail.oauthProvider = provider;
         existingByEmail.picture = picture || existingByEmail.picture;
-        existingByEmail.emailVerified = emailVerified || existingByEmail.emailVerified;
+        // Don't update emailVerified from OAuth - keep existing status or set to false
+        // existingByEmail.emailVerified = emailVerified || existingByEmail.emailVerified;
         existingByEmail.isOAuthUser = true;
         await existingByEmail.save();
         user = existingByEmail;
@@ -245,7 +270,7 @@ router.post("/auth/oauth-sync", async (req, res) => {
         // Sign-up flow: create new OAuth user with onboarding data
         isNewUser = true;
         const userRole = role || "patient"; // Default to patient if not specified
-        
+
         // Combine medical interests based on role
         let medicalInterests = [];
         if (userRole === "patient") {
@@ -256,14 +281,14 @@ router.post("/auth/oauth-sync", async (req, res) => {
             ...(researchInterests || []),
           ];
         }
-        
+
         user = await User.create({
           username: name || email.split("@")[0],
           email,
           auth0Id,
           oauthProvider: provider,
           picture,
-          emailVerified: emailVerified || false,
+          emailVerified: false, // Always start as unverified, even for OAuth users
           isOAuthUser: true,
           role: userRole,
           medicalInterests,
@@ -282,7 +307,14 @@ router.post("/auth/oauth-sync", async (req, res) => {
               location: location || {},
               gender: gender || undefined,
             };
-          } else if (userRole === "researcher" && (specialty || researchInterests || location || educationHistory || skills)) {
+          } else if (
+            userRole === "researcher" &&
+            (specialty ||
+              researchInterests ||
+              location ||
+              educationHistory ||
+              skills)
+          ) {
             profileData.researcher = {
               specialties: specialty ? [specialty] : [],
               interests: researchInterests || [],
@@ -309,7 +341,8 @@ router.post("/auth/oauth-sync", async (req, res) => {
       // User exists, update their info
       user.username = name || user.username;
       user.picture = picture || user.picture;
-      user.emailVerified = emailVerified || user.emailVerified;
+      // Don't update emailVerified from OAuth - keep existing status
+      // user.emailVerified = emailVerified || user.emailVerified;
       if (provider) user.oauthProvider = provider;
       await user.save();
     }
@@ -321,8 +354,8 @@ router.post("/auth/oauth-sync", async (req, res) => {
     const userResponse = user.toObject();
     delete userResponse.password;
 
-    return res.json({ 
-      user: userResponse, 
+    return res.json({
+      user: userResponse,
       token,
       isNewUser,
     });
@@ -339,7 +372,7 @@ router.post("/auth/oauth-sync", async (req, res) => {
  * Creates account if it doesn't exist (for sign-in flow)
  */
 router.post("/auth/complete-oauth-profile", async (req, res) => {
-  const { 
+  const {
     role,
     // Auth0 info for account creation (required if user doesn't exist)
     auth0Id,
@@ -356,10 +389,10 @@ router.post("/auth/complete-oauth-profile", async (req, res) => {
 
   try {
     let user;
-    
+
     // Try to get user from auth middleware first (existing user)
     const userId = req.user?.id || req.user?._id;
-    
+
     if (userId) {
       // User exists and is authenticated
       user = await User.findById(userId);
@@ -373,14 +406,15 @@ router.post("/auth/complete-oauth-profile", async (req, res) => {
       // No authenticated user - this is a new user from sign-in flow
       // We need Auth0 info to create the account
       if (!auth0Id || !email) {
-        return res.status(400).json({ 
-          error: "Auth0 information required to create account. Please sign in again." 
+        return res.status(400).json({
+          error:
+            "Auth0 information required to create account. Please sign in again.",
         });
       }
 
       // Check if user already exists (shouldn't happen, but safety check)
       user = await User.findOne({ auth0Id });
-      
+
       if (!user) {
         // Create new user account
         user = await User.create({
@@ -389,7 +423,7 @@ router.post("/auth/complete-oauth-profile", async (req, res) => {
           auth0Id,
           oauthProvider: provider,
           picture,
-          emailVerified: emailVerified || false,
+          emailVerified: false, // Always start as unverified
           isOAuthUser: true,
           role: role,
           medicalInterests: [],
@@ -404,13 +438,17 @@ router.post("/auth/complete-oauth-profile", async (req, res) => {
     // Create initial profile
     await Profile.findOneAndUpdate(
       { userId: user._id },
-      { 
-        $set: { 
-          userId: user._id, 
+      {
+        $set: {
+          userId: user._id,
           role,
-          ...(role === "patient" ? { patient: { conditions: [], location: {} } } : {}),
-          ...(role === "researcher" ? { researcher: { researchAreas: [], institution: "" } } : {}),
-        } 
+          ...(role === "patient"
+            ? { patient: { conditions: [], location: {} } }
+            : {}),
+          ...(role === "researcher"
+            ? { researcher: { researchAreas: [], institution: "" } }
+            : {}),
+        },
       },
       { upsert: true, new: true }
     );
@@ -422,7 +460,7 @@ router.post("/auth/complete-oauth-profile", async (req, res) => {
     const userResponse = user.toObject();
     delete userResponse.password;
 
-    return res.json({ 
+    return res.json({
       user: userResponse,
       token, // Return token so frontend can store it
     });
@@ -439,14 +477,283 @@ router.post("/session", async (req, res) => {
   if (!username || !["patient", "researcher"].includes(role)) {
     return res.status(400).json({ error: "username and role required" });
   }
-  return res.status(400).json({ error: "Please use /api/auth/register with email and password" });
+  return res
+    .status(400)
+    .json({ error: "Please use /api/auth/register with email and password" });
 });
 
 // POST /api/session/signin - Legacy endpoint, redirects to login
 router.post("/session/signin", async (req, res) => {
-  return res.status(400).json({ error: "Please use /api/auth/login with email and password" });
+  return res
+    .status(400)
+    .json({ error: "Please use /api/auth/login with email and password" });
 });
 
+// ============================================
+// EMAIL VERIFICATION ENDPOINTS
+// ============================================
+
+/**
+ * POST /api/auth/send-verification-email
+ * Send verification email to the authenticated user
+ */
+router.post(
+  "/auth/send-verification-email",
+  verifySession,
+  async (req, res) => {
+    try {
+      const user = req.user;
+
+      // Check if email is already verified
+      if (user.emailVerified) {
+        return res.status(400).json({ error: "Email is already verified" });
+      }
+
+      // Check if email was sent within the last 24 hours
+      if (user.lastVerificationEmailSent) {
+        const lastSentTime = new Date(user.lastVerificationEmailSent);
+        const now = new Date();
+        const hoursSinceLastSent = (now - lastSentTime) / (1000 * 60 * 60);
+
+        if (hoursSinceLastSent < 24) {
+          const hoursRemaining = Math.ceil(24 - hoursSinceLastSent);
+          return res.status(429).json({
+            error: `Please wait ${hoursRemaining} hour${
+              hoursRemaining !== 1 ? "s" : ""
+            } before requesting another verification email.`,
+            hoursRemaining,
+            canResendAt: new Date(lastSentTime.getTime() + 24 * 60 * 60 * 1000),
+          });
+        }
+      }
+
+      // Generate verification token
+      const verificationToken = crypto.randomBytes(32).toString("hex");
+      const tokenExpiry = new Date();
+      tokenExpiry.setHours(tokenExpiry.getHours() + 24); // Token expires in 24 hours
+
+      // Save token and update last sent time
+      user.emailVerificationToken = verificationToken;
+      user.emailVerificationTokenExpiry = tokenExpiry;
+      user.lastVerificationEmailSent = new Date();
+      await user.save();
+
+      // Send verification email
+      try {
+        await sendVerificationEmail(
+          user.email,
+          user.username,
+          verificationToken
+        );
+        return res.json({
+          message: "Verification email sent successfully",
+          email: user.email,
+        });
+      } catch (emailError) {
+        console.error("Error sending verification email:", emailError);
+        // Clear token if email sending fails
+        user.emailVerificationToken = undefined;
+        user.emailVerificationTokenExpiry = undefined;
+        await user.save();
+        return res.status(500).json({
+          error:
+            "Failed to send verification email. Please check email configuration.",
+        });
+      }
+    } catch (error) {
+      console.error("Send verification email error:", error);
+      return res
+        .status(500)
+        .json({ error: "Failed to send verification email" });
+    }
+  }
+);
+
+/**
+ * GET /api/auth/verify-email
+ * Verify email using token from query parameter
+ */
+router.get("/auth/verify-email", async (req, res) => {
+  let { token } = req.query;
+
+  if (!token) {
+    return res.status(400).json({ error: "Verification token is required" });
+  }
+
+  // Decode URL-encoded token
+  try {
+    token = decodeURIComponent(token);
+  } catch (e) {
+    // If decoding fails, use original token
+    console.log("Token decode failed, using original:", e);
+  }
+
+  try {
+    // First, find user with matching token (regardless of expiry or verification status)
+    const user = await User.findOne({
+      emailVerificationToken: token,
+    });
+
+    if (!user) {
+      // Token not found - could be invalid, expired and cleared, or already used
+      // Check if there are any recently verified users (within last 7 days)
+      // who might have used this token
+      // Since we can't match by token, we'll return invalid token message
+      // But first, let's check if we can find users who were verified recently
+      // and might have used this token (though we can't be 100% sure)
+
+      // For now, return invalid token - but we should improve this
+      // by keeping a record of used tokens or not clearing them immediately
+      return res.status(400).json({
+        error:
+          "Invalid verification token. Please request a new verification email.",
+        code: "INVALID_TOKEN",
+      });
+    }
+
+    // User found with this token - check verification status first
+    if (user.emailVerified) {
+      // Email is already verified - this token was already used
+      // Keep token for a bit longer (7 days) so we can detect re-clicks
+      // But if it's been more than 7 days since verification, we can clear it
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+      // Only clear if token expiry is very old (more than 7 days past original expiry)
+      // Otherwise keep it so we can show "already verified" message
+      if (
+        user.emailVerificationTokenExpiry &&
+        user.emailVerificationTokenExpiry < sevenDaysAgo
+      ) {
+        user.emailVerificationToken = undefined;
+        user.emailVerificationTokenExpiry = undefined;
+        await user.save();
+      }
+
+      return res.json({
+        message: "Your email is already verified.",
+        alreadyVerified: true,
+        user: {
+          _id: user._id,
+          email: user.email,
+          emailVerified: user.emailVerified,
+        },
+      });
+    }
+
+    // Email not verified yet - check if token is expired
+    if (
+      user.emailVerificationTokenExpiry &&
+      user.emailVerificationTokenExpiry <= new Date()
+    ) {
+      return res.status(400).json({
+        error:
+          "This verification link has expired. Please request a new verification email.",
+        code: "EXPIRED_TOKEN",
+        expired: true,
+      });
+    }
+
+    // Token is valid and email is not verified - verify the email
+    // IMPORTANT: Don't clear the token immediately - keep it for 7 days
+    // so if user clicks link again, we can detect it's already verified
+    user.emailVerified = true;
+    // Extend token expiry to 7 days from now so we can detect re-clicks
+    // This allows us to show "already verified" message if link is clicked again
+    const extendedExpiry = new Date();
+    extendedExpiry.setDate(extendedExpiry.getDate() + 7); // 7 days from now
+    user.emailVerificationTokenExpiry = extendedExpiry;
+    // Keep the token so we can find the user if they click the link again
+    // user.emailVerificationToken = undefined; // Don't clear - keep for detection
+    await user.save();
+
+    return res.json({
+      message: "Email verified successfully",
+      user: {
+        _id: user._id,
+        email: user.email,
+        emailVerified: user.emailVerified,
+      },
+    });
+  } catch (error) {
+    console.error("Email verification error:", error);
+    return res.status(500).json({ error: "Failed to verify email" });
+  }
+});
+
+/**
+ * GET /api/auth/check-email-status
+ * Check current user's email verification status
+ * Requires authentication token
+ */
+router.get("/auth/check-email-status", verifySession, async (req, res) => {
+  try {
+    const user = req.user;
+
+    // Check if verification email was sent recently
+    let emailSent = false;
+    let hoursRemaining = null;
+    let canResendAt = null;
+
+    if (user.lastVerificationEmailSent) {
+      const lastSentTime = new Date(user.lastVerificationEmailSent);
+      const now = new Date();
+      const hoursSinceLastSent = (now - lastSentTime) / (1000 * 60 * 60);
+
+      if (hoursSinceLastSent < 24) {
+        emailSent = true;
+        hoursRemaining = Math.ceil(24 - hoursSinceLastSent);
+        canResendAt = new Date(lastSentTime.getTime() + 24 * 60 * 60 * 1000);
+      }
+    }
+
+    return res.json({
+      emailVerified: user.emailVerified || false,
+      userId: user._id.toString(),
+      emailSent,
+      hoursRemaining,
+      canResendAt: canResendAt ? canResendAt.toISOString() : null,
+    });
+  } catch (error) {
+    console.error("Check email status error:", error);
+    return res.status(500).json({ error: "Failed to check email status" });
+  }
+});
+
+/**
+ * POST /api/auth/reset-verification-email-limit
+ * Reset the 24-hour limit for sending verification emails
+ * Allows user to request a new verification email immediately
+ * Requires authentication token
+ */
+router.post(
+  "/auth/reset-verification-email-limit",
+  verifySession,
+  async (req, res) => {
+    try {
+      const user = req.user;
+
+      // Check if email is already verified
+      if (user.emailVerified) {
+        return res.status(400).json({ error: "Email is already verified" });
+      }
+
+      // Reset the lastVerificationEmailSent timestamp
+      user.lastVerificationEmailSent = undefined;
+      await user.save();
+
+      return res.json({
+        message:
+          "Verification email limit reset successfully. You can now request a new verification email.",
+        success: true,
+      });
+    } catch (error) {
+      console.error("Reset verification email limit error:", error);
+      return res
+        .status(500)
+        .json({ error: "Failed to reset verification email limit" });
+    }
+  }
+);
+
 export default router;
-
-

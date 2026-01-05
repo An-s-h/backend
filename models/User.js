@@ -15,6 +15,11 @@ const userSchema = new mongoose.Schema(
     picture: { type: String }, // Profile picture URL from OAuth
     emailVerified: { type: Boolean, default: false },
     isOAuthUser: { type: Boolean, default: false },
+    
+    // Email verification fields
+    emailVerificationToken: { type: String, sparse: true, index: true },
+    emailVerificationTokenExpiry: { type: Date },
+    lastVerificationEmailSent: { type: Date }, // Track when last verification email was sent
   },
   { timestamps: true }
 );
