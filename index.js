@@ -18,6 +18,7 @@ import messagesRoutes from "./routes/messages.routes.js";
 import meetingRequestsRoutes from "./routes/meeting-requests.routes.js";
 import connectionRequestsRoutes from "./routes/connection-requests.routes.js";
 import adminRoutes from "./routes/admin.routes.js";
+import waitlistRoutes from "./routes/waitlist.routes.js";
 import { optionalSession } from "./middleware/auth.js";
 import { searchLimitMiddleware } from "./middleware/searchLimit.js";
 
@@ -29,7 +30,11 @@ app.use(
     origin: [
   "http://localhost:5173",
   "https://collabiora.vercel.app",
-  "https://collabiora-git-main-anshs-projects-d959a793.vercel.app"
+  "https://collabiora-git-main-anshs-projects-d959a793.vercel.app",
+  "https://collabioralandingpage.vercel.app",
+  "https://incredible-otter-249a24.netlify.app",
+  "https://www.collabiora.com",
+  "https://collabiora.com"
 ],
     credentials: true, // Allow cookies to be sent
   })
@@ -62,6 +67,7 @@ app.use("/api", messagesRoutes);
 app.use("/api", meetingRequestsRoutes);
 app.use("/api", connectionRequestsRoutes);
 app.use("/api", adminRoutes);
+app.use("/api", waitlistRoutes);
 
 const PORT = process.env.PORT || 5000;
 
