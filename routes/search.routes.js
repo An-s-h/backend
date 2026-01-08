@@ -42,9 +42,28 @@ router.get("/search/trials", async (req, res) => {
       }
     }
 
-    const { q, status, location, userId, conditions, keywords, userLocation } =
-      req.query;
-    const results = await searchClinicalTrials({ q, status, location });
+    const {
+      q,
+      status,
+      location,
+      phase,
+      userId,
+      conditions,
+      keywords,
+      userLocation,
+      eligibilitySex,
+      eligibilityAgeMin,
+      eligibilityAgeMax,
+    } = req.query;
+    const results = await searchClinicalTrials({
+      q,
+      status,
+      location,
+      phase,
+      eligibilitySex,
+      eligibilityAgeMin,
+      eligibilityAgeMax,
+    });
 
     // Increment search count for anonymous users after successful search
     if (!req.user) {

@@ -17,7 +17,63 @@ function getCache(key) {
   return item.value;
 }
 
-export async function searchClinicalTrials({ q = "", status, location } = {}) {
+// Filter trials by eligibility criteria (client-side filtering)
+function filterTrialsByEligibility(trials, filters) {
+  if (!filters || (!filters.eligibilitySex && !filters.eligibilityAgeMin && !filters.eligibilityAgeMax)) {
+    return trials;
+  }
+
+  return trials.filter((trial) => {
+    const eligibility = trial.eligibility || {};
+
+    // Filter by sex/gender
+    if (filters.eligibilitySex && filters.eligibilitySex !== "All") {
+      const trialGender = (eligibility.gender || "All").toLowerCase();
+      const filterGender = filters.eligibilitySex.toLowerCase();
+      if (trialGender !== "all" && trialGender !== filterGender) {
+        return false;
+      }
+    }
+
+    // Filter by age
+    if (filters.eligibilityAgeMin || filters.eligibilityAgeMax) {
+      const minAge = eligibility.minimumAge;
+      const maxAge = eligibility.maximumAge;
+      
+      // Parse age strings (e.g., "18 Years" -> 18)
+      const parseAge = (ageStr) => {
+        if (!ageStr || ageStr === "Not specified") return null;
+        const match = ageStr.match(/(\d+)/);
+        return match ? parseInt(match[1]) : null;
+      };
+
+      const trialMinAge = parseAge(minAge);
+      const trialMaxAge = parseAge(maxAge);
+      const filterMinAge = filters.eligibilityAgeMin ? parseInt(filters.eligibilityAgeMin) : null;
+      const filterMaxAge = filters.eligibilityAgeMax ? parseInt(filters.eligibilityAgeMax) : null;
+
+      // Check if age ranges overlap
+      if (filterMinAge !== null && trialMaxAge !== null && filterMinAge > trialMaxAge) {
+        return false;
+      }
+      if (filterMaxAge !== null && trialMinAge !== null && filterMaxAge < trialMinAge) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+}
+
+export async function searchClinicalTrials({
+  q = "",
+  status,
+  location,
+  phase,
+  eligibilitySex,
+  eligibilityAgeMin,
+  eligibilityAgeMax,
+} = {}) {
   // Extract only country from location (if location contains city and country, use only country)
   let countryOnly = null;
   if (location) {
@@ -33,9 +89,27 @@ export async function searchClinicalTrials({ q = "", status, location } = {}) {
     }
   }
 
-  const key = `ct:${q}:${status || ""}:${countryOnly || ""}`;
-  const cached = getCache(key);
-  if (cached) return cached;
+  // Build cache key including eligibility filters
+  const cacheKey = `ct:${q}:${status || ""}:${countryOnly || ""}:${phase || ""}:${eligibilitySex || ""}:${eligibilityAgeMin || ""}:${eligibilityAgeMax || ""}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    // Apply client-side filtering for eligibility and phase if needed
+    let filtered = filterTrialsByEligibility(cached, {
+      eligibilitySex,
+      eligibilityAgeMin,
+      eligibilityAgeMax,
+    });
+    // Filter by phase if specified
+    if (phase) {
+      filtered = filtered.filter((trial) => {
+        const trialPhase = trial.phase || "";
+        // Check if trial phase includes the requested phase
+        // Phases can be stored as "PHASE1", "PHASE2", "PHASE3", "PHASE4" or combinations like "PHASE1, PHASE2"
+        return trialPhase.toUpperCase().includes(phase.toUpperCase());
+      });
+    }
+    return filtered;
+  }
 
   const params = new URLSearchParams();
   if (q) params.set("query.term", q);
@@ -117,8 +191,26 @@ export async function searchClinicalTrials({ q = "", status, location } = {}) {
       };
     });
 
-    setCache(key, items);
-    return items;
+    setCache(cacheKey, items);
+    
+    // Apply eligibility filtering
+    let filteredItems = filterTrialsByEligibility(items, {
+      eligibilitySex,
+      eligibilityAgeMin,
+      eligibilityAgeMax,
+    });
+    
+    // Filter by phase if specified
+    if (phase) {
+      filteredItems = filteredItems.filter((trial) => {
+        const trialPhase = trial.phase || "";
+        // Check if trial phase includes the requested phase
+        // Phases can be stored as "PHASE1", "PHASE2", "PHASE3", "PHASE4" or combinations like "PHASE1, PHASE2"
+        return trialPhase.toUpperCase().includes(phase.toUpperCase());
+      });
+    }
+    
+    return filteredItems;
   } catch (e) {
     console.error("ClinicalTrials.gov API error:", e.message);
     return [];
