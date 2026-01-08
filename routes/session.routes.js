@@ -532,22 +532,31 @@ router.post(
       const tokenExpiry = new Date();
       tokenExpiry.setHours(tokenExpiry.getHours() + 24); // Token expires in 24 hours
 
-      // Save token and update last sent time
+      // Generate 6-digit OTP
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const otpExpiry = new Date();
+      otpExpiry.setMinutes(otpExpiry.getMinutes() + 15); // OTP expires in 15 minutes
+
+      // Save token, OTP and update last sent time
       user.emailVerificationToken = verificationToken;
       user.emailVerificationTokenExpiry = tokenExpiry;
+      user.emailVerificationOTP = otp;
+      user.emailVerificationOTPExpiry = otpExpiry;
       user.lastVerificationEmailSent = new Date();
       await user.save();
 
-      // Send verification email
+      // Send verification email with both link and OTP
       try {
         await sendVerificationEmail(
           user.email,
           user.username,
-          verificationToken
+          verificationToken,
+          otp
         );
         return res.json({
           message: "Verification email sent successfully",
           email: user.email,
+          otpExpiresAt: otpExpiry,
         });
       } catch (emailError) {
         console.error("Error sending verification email:", emailError);
@@ -678,6 +687,86 @@ router.get("/auth/verify-email", async (req, res) => {
   } catch (error) {
     console.error("Email verification error:", error);
     return res.status(500).json({ error: "Failed to verify email" });
+  }
+});
+
+/**
+ * POST /api/auth/verify-otp
+ * Verify email using 6-digit OTP code
+ */
+router.post("/auth/verify-otp", verifySession, async (req, res) => {
+  try {
+    const { otp } = req.body;
+    const user = req.user;
+
+    if (!otp) {
+      return res.status(400).json({ error: "OTP code is required" });
+    }
+
+    // Check if email is already verified
+    if (user.emailVerified) {
+      return res.json({
+        message: "Your email is already verified.",
+        alreadyVerified: true,
+        user: {
+          _id: user._id,
+          email: user.email,
+          emailVerified: user.emailVerified,
+        },
+      });
+    }
+
+    // Check if OTP exists and matches
+    if (!user.emailVerificationOTP) {
+      return res.status(400).json({
+        error: "No OTP found. Please request a new verification email.",
+        code: "NO_OTP",
+      });
+    }
+
+    if (user.emailVerificationOTP !== otp) {
+      return res.status(400).json({
+        error: "Invalid OTP code. Please try again.",
+        code: "INVALID_OTP",
+      });
+    }
+
+    // Check if OTP is expired
+    if (
+      user.emailVerificationOTPExpiry &&
+      user.emailVerificationOTPExpiry <= new Date()
+    ) {
+      return res.status(400).json({
+        error: "This OTP code has expired. Please request a new verification email.",
+        code: "EXPIRED_OTP",
+        expired: true,
+      });
+    }
+
+    // OTP is valid - verify the email
+    user.emailVerified = true;
+    // Clear OTP after successful verification
+    user.emailVerificationOTP = undefined;
+    user.emailVerificationOTPExpiry = undefined;
+    // Extend token expiry to 7 days from now so we can detect re-clicks
+    const extendedExpiry = new Date();
+    extendedExpiry.setDate(extendedExpiry.getDate() + 7);
+    if (user.emailVerificationTokenExpiry) {
+      user.emailVerificationTokenExpiry = extendedExpiry;
+    }
+    await user.save();
+
+    return res.json({
+      message: "Email verified successfully",
+      user: {
+        _id: user._id,
+        email: user.email,
+        emailVerified: user.emailVerified,
+      },
+    });
+  } catch (error) {
+    console.error("OTP verification error:", error);
+    return res.status(500).json({ error: "Failed to verify OTP" });
   }
 });
 

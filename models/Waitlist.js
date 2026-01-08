@@ -2,9 +2,19 @@ import mongoose from "mongoose";
 
 const waitlistSchema = new mongoose.Schema(
   {
-    name: {
+    firstName: {
       type: String,
       required: true,
+      trim: true
+    },
+    lastName: {
+      type: String,
+      required: true,
+      trim: true
+    },
+    name: {
+      type: String,
+      required: false,
       trim: true
     },
     email: { 
@@ -17,8 +27,13 @@ const waitlistSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ["patient", "researcher"],
+      enum: ["patient", "researcher", "caregiver"],
       required: false
+    },
+    country: {
+      type: String,
+      required: false,
+      trim: true
     },
     subscribedAt: { 
       type: Date, 

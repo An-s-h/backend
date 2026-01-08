@@ -134,13 +134,30 @@ router.get("/search/publications", async (req, res) => {
       }
     }
 
-    const { q, location, userId, conditions, keywords, userLocation } =
+    const { q, location, userId, conditions, keywords, userLocation, year } =
       req.query;
-    // For publications, add country to query string (e.g., "Oncology Canada")
+    // For publications, build query string
+    // The query may already contain field tags like [AU], [TI], etc. from advanced search
     let pubmedQuery = q || "";
-    if (location) {
-      pubmedQuery = `${q} ${location}`;
+    
+    // Add year filter if provided (for year range filtering)
+    if (year) {
+      const currentYear = new Date().getFullYear();
+      const cutoffYear = parseInt(year);
+      // Add publication date filter to query
+      if (pubmedQuery) {
+        pubmedQuery = `(${pubmedQuery}) AND (${cutoffYear}:${currentYear}[PDAT])`;
+      } else {
+        pubmedQuery = `${cutoffYear}:${currentYear}[PDAT]`;
+      }
     }
+    
+    // Add location (country) to query if provided and not already in advanced query
+    if (location && !pubmedQuery.includes("[") && !pubmedQuery.includes("]")) {
+      // Only add location if it's a simple query (not advanced search with field tags)
+      pubmedQuery = `${pubmedQuery} ${location}`.trim();
+    }
+    
     const results = await searchPubMed({ q: pubmedQuery });
 
     // Increment search count for anonymous users after successful search

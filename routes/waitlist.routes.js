@@ -6,11 +6,15 @@ const router = express.Router();
 // Add to waitlist
 router.post("/waitlist", async (req, res) => {
   try {
-    const { name, email, role } = req.body;
+    const { firstName, lastName, email, role, country } = req.body;
 
     // Validation
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: "Name is required" });
+    if (!firstName || !firstName.trim()) {
+      return res.status(400).json({ error: "First name is required" });
+    }
+
+    if (!lastName || !lastName.trim()) {
+      return res.status(400).json({ error: "Last name is required" });
     }
 
     if (!email || !email.trim()) {
@@ -21,6 +25,16 @@ router.post("/waitlist", async (req, res) => {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({ error: "Invalid email format" });
+    }
+
+    // Validate role if provided
+    if (
+      role &&
+      !["patient", "researcher", "caregiver"].includes(role.toLowerCase())
+    ) {
+      return res.status(400).json({
+        error: "Invalid role. Must be Patient, Researcher, or Caregiver",
+      });
     }
 
     // Check if email already exists
@@ -36,9 +50,12 @@ router.post("/waitlist", async (req, res) => {
 
     // Add to waitlist
     const waitlistEntry = new Waitlist({
-      name: name.trim(),
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      name: `${firstName.trim()} ${lastName.trim()}`, // Keep name for backward compatibility
       email: email.toLowerCase().trim(),
       ...(role && { role: role.toLowerCase() }),
+      ...(country && { country: country.trim() }),
     });
 
     await waitlistEntry.save();

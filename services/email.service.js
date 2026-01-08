@@ -16,12 +16,14 @@ const createTransporter = () => {
  * @param {string} email - Recipient email address
  * @param {string} username - Recipient username
  * @param {string} verificationToken - Email verification token
+ * @param {string} otp - 6-digit OTP code
  * @returns {Promise<Object>} - Result of sending email
  */
 export async function sendVerificationEmail(
   email,
   username,
-  verificationToken
+  verificationToken,
+  otp
 ) {
   try {
     const transporter = createTransporter();
@@ -53,7 +55,17 @@ export async function sendVerificationEmail(
             
             <p>Thank you for signing up for Collabiora. Please verify your email address to complete your registration and unlock all features.</p>
             
-            <div style="text-align: center; margin: 30px 0;">
+            <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; text-align: center;">
+              <p style="color: #333; font-size: 16px; font-weight: bold; margin-bottom: 10px;">Your Verification Code:</p>
+              <div style="background: #2F3C96; color: #fff; padding: 15px 30px; border-radius: 8px; display: inline-block; font-size: 32px; font-weight: bold; letter-spacing: 8px; font-family: 'Courier New', monospace;">
+                ${otp}
+              </div>
+              <p style="color: #666; font-size: 12px; margin-top: 10px;">This code expires in 15 minutes</p>
+            </div>
+            
+            <p style="color: #666; font-size: 14px; margin-top: 20px;">Or click the link below to verify:</p>
+            
+            <div style="text-align: center; margin: 20px 0;">
               <a href="${verificationLink}" 
                  style="display: inline-block; background: #2F3C96; color: #fff; padding: 12px 30px; text-decoration: none; border-radius: 5px; font-weight: bold;">
                 Verify Email Address
@@ -64,7 +76,7 @@ export async function sendVerificationEmail(
             <p style="color: #666; font-size: 12px; word-break: break-all;">${verificationLink}</p>
             
             <p style="color: #666; font-size: 14px; margin-top: 30px;">
-              This link will expire in 24 hours. If you didn't create an account with Collabiora, please ignore this email.
+              The verification link will expire in 24 hours. If you didn't create an account with Collabiora, please ignore this email.
             </p>
           </div>
           
@@ -77,11 +89,15 @@ export async function sendVerificationEmail(
       text: `
         Hello ${username}!
         
-        Thank you for signing up for Collabiora. Please verify your email address by clicking the link below:
+        Thank you for signing up for Collabiora. Please verify your email address.
         
+        Your Verification Code: ${otp}
+        (This code expires in 15 minutes)
+        
+        Or click the link below to verify:
         ${verificationLink}
         
-        This link will expire in 24 hours. If you didn't create an account with Collabiora, please ignore this email.
+        The verification link will expire in 24 hours. If you didn't create an account with Collabiora, please ignore this email.
       `,
     };
 
