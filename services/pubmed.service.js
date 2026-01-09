@@ -26,51 +26,111 @@ async function retryWithBackoff(fn, maxRetries = 3, initialDelay = 1000) {
       return await fn();
     } catch (error) {
       const isLastAttempt = attempt === maxRetries - 1;
-      const isTimeoutError = 
-        error.code === "ECONNABORTED" || 
+      const isTimeoutError =
+        error.code === "ECONNABORTED" ||
         error.message?.includes("timeout") ||
         error.message?.includes("exceeded");
-      
+
       if (isLastAttempt || !isTimeoutError) {
         throw error;
       }
-      
+
       // Exponential backoff: 1s, 2s, 4s
       const delay = initialDelay * Math.pow(2, attempt);
       console.log(
-        `PubMed request timeout, retrying in ${delay}ms... (attempt ${attempt + 1}/${maxRetries})`
+        `PubMed request timeout, retrying in ${delay}ms... (attempt ${
+          attempt + 1
+        }/${maxRetries})`
       );
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 }
 
-export async function searchPubMed({ q = "" } = {}) {
-  const key = `pm:${q}`;
+export async function searchPubMed({
+  q = "",
+  mindate = "",
+  maxdate = "",
+  page = 1,
+  pageSize = 9,
+} = {}) {
+  // Build cache key with all parameters
+  const key = `pm:${q}:${mindate}:${maxdate}:${page}:${pageSize}`;
   const cached = getCache(key);
   if (cached) return cached;
 
   try {
     // Step 1: Get PMIDs with retry logic and increased timeout
     const esearchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi`;
+
+    // Build search term - use default if no query provided
+    let searchTerm = q || "";
+
+    // Build date filter if provided
+    if (mindate || maxdate) {
+      // PubMed date format: YYYY/MM/DD
+      // If only YYYY/MM is provided, add day component
+      let dateMin = mindate || "1900/01/01";
+      let dateMax =
+        maxdate || new Date().toISOString().split("T")[0].replace(/-/g, "/");
+
+      // Ensure proper format - add day if only year/month provided
+      // mindate should start from first day of month
+      if (dateMin && dateMin.split("/").length === 2) {
+        dateMin = `${dateMin}/01`;
+      }
+      // maxdate should end at last day of month
+      if (dateMax && dateMax.split("/").length === 2) {
+        // Get last day of the month
+        const [year, month] = dateMax.split("/");
+        const lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
+        dateMax = `${dateMax}/${lastDay}`;
+      }
+
+      // PubMed date filter syntax - correct format is: YYYY/MM/DD:YYYY/MM/DD[dp]
+      // Using [dp] (Date of Publication) which is the standard PubMed date field
+      const dateFilter = `${dateMin}:${dateMax}[dp]`;
+
+      if (searchTerm) {
+        // Combine search term with date filter
+        searchTerm = `(${searchTerm}) AND (${dateFilter})`;
+      } else {
+        // Use only date filter - this will return all publications in the date range
+        searchTerm = dateFilter;
+      }
+    }
+
+    // If still no search term, use a default
+    if (!searchTerm) {
+      searchTerm = "oncology";
+    }
+
+    console.log("PubMed search term:", searchTerm);
+
+    // Calculate pagination offset
+    const retstart = (page - 1) * pageSize;
+
     const esearchParams = new URLSearchParams({
       db: "pubmed",
-      term: q || "oncology",
+      term: searchTerm,
       retmode: "json",
-      retmax: "9",
+      retmax: String(pageSize),
+      retstart: String(retstart),
     });
-    
+
     const idsResp = await retryWithBackoff(async () => {
       return await axios.get(`${esearchUrl}?${esearchParams}`, {
         timeout: 20000, // Increased from 10000 to 20000ms
         headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; CuraLink/1.0)',
+          "User-Agent": "Mozilla/5.0 (compatible; CuraLink/1.0)",
         },
       });
     });
-    
+
     const ids = idsResp.data?.esearchresult?.idlist || [];
-    if (ids.length === 0) return [];
+    const totalCount = parseInt(idsResp.data?.esearchresult?.count || "0", 10);
+
+    if (ids.length === 0) return { items: [], totalCount: 0, page, pageSize };
 
     // Step 2: Fetch detailed metadata with EFetch with retry logic and increased timeout
     const efetchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi`;
@@ -79,12 +139,12 @@ export async function searchPubMed({ q = "" } = {}) {
       id: ids.join(","),
       retmode: "xml",
     });
-    
+
     const xmlResp = await retryWithBackoff(async () => {
       return await axios.get(`${efetchUrl}?${efetchParams}`, {
         timeout: 30000, // Increased from 15000 to 30000ms
         headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; CuraLink/1.0)',
+          "User-Agent": "Mozilla/5.0 (compatible; CuraLink/1.0)",
         },
       });
     });
@@ -104,7 +164,7 @@ export async function searchPubMed({ q = "" } = {}) {
 
       const pmid = getText("PMID");
       const title = getText("ArticleTitle");
-      
+
       // Get full abstract - concatenate all AbstractText elements (structured abstracts have multiple sections)
       const abstractElements = article.getElementsByTagName("AbstractText");
       let abstract = "";
@@ -117,7 +177,7 @@ export async function searchPubMed({ q = "" } = {}) {
         });
         abstract = abstractParts.join("\n\n");
       }
-      
+
       const journal = getText("Title");
       const pubDateNode = article.getElementsByTagName("PubDate")[0];
       const pubYear =
@@ -126,10 +186,7 @@ export async function searchPubMed({ q = "" } = {}) {
         pubDateNode?.getElementsByTagName("Month")[0]?.textContent || "";
       const pubDay =
         pubDateNode?.getElementsByTagName("Day")[0]?.textContent || "";
-      const volume = getText("Volume");
-      const issue = getText("Issue");
-      const Pages = getText("MedlinePgn");
-      
+
       // Get DOI - check multiple possible locations
       let doi = "";
       const eLocationIds = article.getElementsByTagName("ELocationID");
@@ -150,7 +207,8 @@ export async function searchPubMed({ q = "" } = {}) {
         .map((a) => {
           const last = a.getElementsByTagName("LastName")[0]?.textContent || "";
           const fore = a.getElementsByTagName("ForeName")[0]?.textContent || "";
-          const initials = a.getElementsByTagName("Initials")[0]?.textContent || "";
+          const initials =
+            a.getElementsByTagName("Initials")[0]?.textContent || "";
           return `${fore} ${last}`.trim() || `${initials} ${last}`.trim();
         })
         .filter(Boolean);
@@ -158,22 +216,12 @@ export async function searchPubMed({ q = "" } = {}) {
       // Get keywords
       const keywords = getAllText("Keyword").filter(Boolean);
 
-      // Get MeSH terms
-      const meshTerms = Array.from(
-        article.getElementsByTagName("DescriptorName")
-      )
-        .map((term) => term.textContent || "")
-        .filter(Boolean);
-
       // Get publication type
       const publicationTypes = Array.from(
         article.getElementsByTagName("PublicationType")
       )
         .map((type) => type.textContent || "")
         .filter(Boolean);
-
-      // Get language
-      const language = getText("Language");
 
       // Get country
       const country = getText("Country");
@@ -185,6 +233,7 @@ export async function searchPubMed({ q = "" } = {}) {
         .map((aff) => aff.textContent || "")
         .filter(Boolean);
 
+      // Return cleaned publication data (removed: MeSH terms, ISBN, publisher, book, volume, pagination, language)
       return {
         pmid,
         title,
@@ -193,31 +242,37 @@ export async function searchPubMed({ q = "" } = {}) {
         month: pubMonth,
         day: pubDay,
         authors,
-        volume,
-        issue,
-        Pages,
         doi,
         abstract,
         keywords: keywords.length > 0 ? keywords : undefined,
-        meshTerms: meshTerms.length > 0 ? meshTerms : undefined,
-        publicationTypes: publicationTypes.length > 0 ? publicationTypes : undefined,
-        language: language || undefined,
+        publicationTypes:
+          publicationTypes.length > 0 ? publicationTypes : undefined,
         country: country || undefined,
         affiliations: affiliations.length > 0 ? affiliations : undefined,
         url: `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`,
       };
     });
 
-    setCache(key, items);
-    return items;
+    const result = {
+      items,
+      totalCount,
+      page,
+      pageSize,
+      hasMore: page * pageSize < totalCount,
+    };
+    setCache(key, result);
+    return result;
   } catch (e) {
     // More detailed error logging
     if (e.code === "ECONNABORTED" || e.message?.includes("timeout")) {
-      console.error("PubMed fetch error: timeout exceeded after retries", e.message);
+      console.error(
+        "PubMed fetch error: timeout exceeded after retries",
+        e.message
+      );
     } else {
       console.error("PubMed fetch error:", e.message);
     }
-    // Return empty array instead of throwing to prevent cascading failures
-    return [];
+    // Return empty result instead of throwing to prevent cascading failures
+    return { items: [], totalCount: 0, page: 1, pageSize: 9, hasMore: false };
   }
 }

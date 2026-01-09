@@ -153,31 +153,55 @@ router.get("/search/publications", async (req, res) => {
       }
     }
 
-    const { q, location, userId, conditions, keywords, userLocation, year } =
-      req.query;
+    const {
+      q,
+      location,
+      userId,
+      conditions,
+      keywords,
+      userLocation,
+      mindate,
+      maxdate,
+      page = "1",
+      pageSize = "9",
+    } = req.query;
+
+    // Log incoming search parameters for debugging
+    console.log("Publications search params:", {
+      q,
+      location,
+      mindate,
+      maxdate,
+      page,
+      pageSize,
+    });
+
     // For publications, build query string
     // The query may already contain field tags like [AU], [TI], etc. from advanced search
     let pubmedQuery = q || "";
-    
-    // Add year filter if provided (for year range filtering)
-    if (year) {
-      const currentYear = new Date().getFullYear();
-      const cutoffYear = parseInt(year);
-      // Add publication date filter to query
-      if (pubmedQuery) {
-        pubmedQuery = `(${pubmedQuery}) AND (${cutoffYear}:${currentYear}[PDAT])`;
-      } else {
-        pubmedQuery = `${cutoffYear}:${currentYear}[PDAT]`;
-      }
-    }
-    
+
     // Add location (country) to query if provided and not already in advanced query
     if (location && !pubmedQuery.includes("[") && !pubmedQuery.includes("]")) {
       // Only add location if it's a simple query (not advanced search with field tags)
       pubmedQuery = `${pubmedQuery} ${location}`.trim();
     }
-    
-    const results = await searchPubMed({ q: pubmedQuery });
+
+    const pubmedResult = await searchPubMed({
+      q: pubmedQuery,
+      mindate: mindate || "",
+      maxdate: maxdate || "",
+      page: parseInt(page, 10),
+      pageSize: parseInt(pageSize, 10),
+    });
+
+    console.log(
+      "PubMed result count:",
+      pubmedResult.totalCount,
+      "items:",
+      pubmedResult.items?.length
+    );
+
+    const results = pubmedResult.items || [];
 
     // Increment search count for anonymous users after successful search
     if (!req.user) {
@@ -237,13 +261,20 @@ router.get("/search/publications", async (req, res) => {
 
     res.json({
       results: resultsWithMatch,
+      totalCount: pubmedResult.totalCount || 0,
+      page: pubmedResult.page || 1,
+      pageSize: pubmedResult.pageSize || 10,
+      hasMore: pubmedResult.hasMore || false,
       ...(remaining !== null && { remaining }),
     });
   } catch (error) {
     console.error("Error searching publications:", error);
-    res
-      .status(500)
-      .json({ error: "Failed to search publications", results: [] });
+    res.status(500).json({
+      error: "Failed to search publications",
+      results: [],
+      totalCount: 0,
+      hasMore: false,
+    });
   }
 });
 
