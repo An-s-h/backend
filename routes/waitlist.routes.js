@@ -1,12 +1,14 @@
 import express from "express";
 import { Waitlist } from "../models/Waitlist.js";
+import { submitToHubSpot } from "../services/hubspot.service.js";
+import { getClientIP } from "../utils/ipThrottle.js";
 
 const router = express.Router();
 
 // Add to waitlist
 router.post("/waitlist", async (req, res) => {
   try {
-    const { firstName, lastName, email, role, country } = req.body;
+    const { firstName, lastName, email, role, country, hubspotCookie } = req.body;
 
     // Validation
     if (!firstName || !firstName.trim()) {
@@ -59,6 +61,27 @@ router.post("/waitlist", async (req, res) => {
     });
 
     await waitlistEntry.save();
+
+    // Get client IP address for HubSpot analytics
+    const clientIP = getClientIP(req);
+
+    // Submit to HubSpot (non-blocking - don't fail if HubSpot is down)
+    try {
+      await submitToHubSpot({
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        email: email.trim(),
+        role: role || undefined,
+        country: country || undefined,
+        hubspotCookie: hubspotCookie || undefined, // Pass HubSpot tracking cookie
+        ipAddress: clientIP || undefined, // Pass IP address for analytics
+      });
+      console.log("Successfully submitted to HubSpot:", email);
+    } catch (hubspotError) {
+      // Log error but don't fail the request
+      // The user has already been added to the waitlist
+      console.error("HubSpot submission failed (non-critical):", hubspotError.message);
+    }
 
     res.status(201).json({
       message: "Successfully added to waitlist",
