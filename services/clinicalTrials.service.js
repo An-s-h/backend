@@ -73,6 +73,8 @@ export async function searchClinicalTrials({
   eligibilitySex,
   eligibilityAgeMin,
   eligibilityAgeMax,
+  page = 1,
+  pageSize = 9,
 } = {}) {
   // Extract only country from location (if location contains city and country, use only country)
   let countryOnly = null;
@@ -108,7 +110,19 @@ export async function searchClinicalTrials({
         return trialPhase.toUpperCase().includes(phase.toUpperCase());
       });
     }
-    return filtered;
+    
+    // Apply pagination
+    const totalCount = filtered.length;
+    const startIndex = (page - 1) * pageSize;
+    const endIndex = startIndex + pageSize;
+    const paginatedItems = filtered.slice(startIndex, endIndex);
+    const hasMore = endIndex < totalCount;
+    
+    return {
+      items: paginatedItems,
+      totalCount,
+      hasMore,
+    };
   }
 
   const params = new URLSearchParams();
@@ -119,11 +133,40 @@ export async function searchClinicalTrials({
   if (countryOnly) {
     params.set("query.locn", countryOnly);
   }
+  // Request a larger page size from the API (max is typically 1000)
+  // We'll paginate on our side after fetching and filtering
+  params.set("pageSize", "1000");
   const url = `https://clinicaltrials.gov/api/v2/studies?${params.toString()}`;
 
   try {
     const resp = await axios.get(url, { timeout: 15000 });
-    const items = (resp.data?.studies || []).slice(0, 15).map((s) => {
+    let allStudies = resp.data?.studies || [];
+    
+    // Check if there are more pages (nextPageToken indicates more results)
+    let nextPageToken = resp.data?.nextPageToken;
+    let pageNum = 1;
+    const maxPages = 10; // Limit to prevent infinite loops, adjust as needed
+    
+    // Fetch additional pages if available
+    while (nextPageToken && pageNum < maxPages) {
+      const nextParams = new URLSearchParams(params);
+      nextParams.set("pageToken", nextPageToken);
+      const nextUrl = `https://clinicaltrials.gov/api/v2/studies?${nextParams.toString()}`;
+      
+      try {
+        const nextResp = await axios.get(nextUrl, { timeout: 15000 });
+        const nextStudies = nextResp.data?.studies || [];
+        allStudies = [...allStudies, ...nextStudies];
+        nextPageToken = nextResp.data?.nextPageToken;
+        pageNum++;
+      } catch (e) {
+        console.error("Error fetching next page:", e.message);
+        break;
+      }
+    }
+    
+    // Get all studies (don't limit here, we'll paginate after filtering)
+    const items = allStudies.map((s) => {
       const protocolSection = s.protocolSection || {};
       const identificationModule = protocolSection.identificationModule || {};
       const statusModule = protocolSection.statusModule || {};
@@ -210,9 +253,24 @@ export async function searchClinicalTrials({
       });
     }
     
-    return filteredItems;
+    // Apply pagination
+    const totalCount = filteredItems.length;
+    const startIndex = (page - 1) * pageSize;
+    const endIndex = startIndex + pageSize;
+    const paginatedItems = filteredItems.slice(startIndex, endIndex);
+    const hasMore = endIndex < totalCount;
+    
+    return {
+      items: paginatedItems,
+      totalCount,
+      hasMore,
+    };
   } catch (e) {
     console.error("ClinicalTrials.gov API error:", e.message);
-    return [];
+    return {
+      items: [],
+      totalCount: 0,
+      hasMore: false,
+    };
   }
 }

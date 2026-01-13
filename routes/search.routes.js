@@ -5,7 +5,19 @@ import { searchORCID } from "../services/orcid.service.js";
 import { findResearchersWithGemini } from "../services/geminiExperts.service.js";
 import { searchGoogleScholarPublications } from "../services/googleScholar.service.js";
 import { getExpertProfile } from "../services/expertProfile.service.js";
-import { fetchTrialById } from "../services/urlParser.service.js";
+import {
+  fetchTrialById,
+  fetchPublicationById,
+} from "../services/urlParser.service.js";
+import {
+  simplifyTrialDetails,
+  simplifyTrialTitle,
+} from "../services/trialSimplification.service.js";
+import {
+  simplifyPublicationDetails,
+  simplifyPublicationTitle,
+} from "../services/publicationSimplification.service.js";
+import { ReadItem } from "../models/ReadItem.js";
 import {
   calculateTrialMatch,
   calculatePublicationMatch,
@@ -54,8 +66,10 @@ router.get("/search/trials", async (req, res) => {
       eligibilitySex,
       eligibilityAgeMin,
       eligibilityAgeMax,
+      page = "1",
+      pageSize = "9",
     } = req.query;
-    const results = await searchClinicalTrials({
+    const result = await searchClinicalTrials({
       q,
       status,
       location,
@@ -63,12 +77,10 @@ router.get("/search/trials", async (req, res) => {
       eligibilitySex,
       eligibilityAgeMin,
       eligibilityAgeMax,
+      page: parseInt(page, 10),
+      pageSize: parseInt(pageSize, 10),
     });
-
-    // Increment search count for anonymous users after successful search
-    if (!req.user) {
-      await incrementSearchCount(req);
-    }
+    const results = result.items || [];
 
     // Build user profile for matching
     let userProfile = null;
@@ -114,10 +126,60 @@ router.get("/search/trials", async (req, res) => {
         })
       : results;
 
-    // Sort by match percentage (descending) and limit to 9
-    const sortedResults = resultsWithMatch
-      .sort((a, b) => (b.matchPercentage || 0) - (a.matchPercentage || 0))
-      .slice(0, 9);
+    // Sort by match percentage (descending)
+    const sortedResults = resultsWithMatch.sort(
+      (a, b) => (b.matchPercentage || 0) - (a.matchPercentage || 0)
+    );
+
+    // Simplify titles for all trials in parallel
+    // This adds simplified titles to each trial object
+    const resultsWithSimplifiedTitles = await Promise.all(
+      sortedResults.map(async (trial) => {
+        try {
+          const simplifiedTitle = await simplifyTrialTitle(trial);
+          return {
+            ...trial,
+            simplifiedTitle: simplifiedTitle,
+          };
+        } catch (error) {
+          // If title simplification fails, just use original title
+          console.error(
+            `Error simplifying title for trial ${trial.id}:`,
+            error
+          );
+          return {
+            ...trial,
+            simplifiedTitle: trial.title, // Fallback to original title
+          };
+        }
+      })
+    );
+
+    // Add read status for signed-in users
+    let resultsWithReadStatus = resultsWithSimplifiedTitles;
+    if (req.user && req.user._id) {
+      const trialIds = resultsWithSimplifiedTitles
+        .map((t) => t.id || t._id)
+        .filter(Boolean);
+      if (trialIds.length > 0) {
+        const readItems = await ReadItem.find({
+          userId: req.user._id,
+          type: "trial",
+          itemId: { $in: trialIds },
+        }).select("itemId");
+
+        const readItemIds = new Set(readItems.map((r) => r.itemId));
+        resultsWithReadStatus = resultsWithSimplifiedTitles.map((trial) => ({
+          ...trial,
+          isRead: readItemIds.has(trial.id || trial._id),
+        }));
+      }
+    }
+
+    // Increment search count for anonymous users only after results are successfully loaded and processed
+    if (!req.user) {
+      await incrementSearchCount(req);
+    }
 
     // Get remaining searches for anonymous users
     let remaining = null;
@@ -127,7 +189,9 @@ router.get("/search/trials", async (req, res) => {
     }
 
     res.json({
-      results: sortedResults,
+      results: resultsWithReadStatus,
+      totalCount: result.totalCount || resultsWithReadStatus.length,
+      hasMore: result.hasMore || false,
       ...(remaining !== null && { remaining }),
     });
   } catch (error) {
@@ -203,11 +267,6 @@ router.get("/search/publications", async (req, res) => {
 
     const results = pubmedResult.items || [];
 
-    // Increment search count for anonymous users after successful search
-    if (!req.user) {
-      await incrementSearchCount(req);
-    }
-
     // Build user profile for matching
     let userProfile = null;
     if (userId) {
@@ -252,6 +311,60 @@ router.get("/search/publications", async (req, res) => {
         })
       : results;
 
+    // Simplify titles for all publications in parallel
+    // This adds simplified titles to each publication object
+    const resultsWithSimplifiedTitles = await Promise.all(
+      resultsWithMatch.map(async (publication) => {
+        try {
+          const simplifiedTitle = await simplifyPublicationTitle(publication);
+          return {
+            ...publication,
+            simplifiedTitle: simplifiedTitle,
+          };
+        } catch (error) {
+          // If title simplification fails, just use original title
+          console.error(
+            `Error simplifying title for publication ${publication.pmid}:`,
+            error
+          );
+          return {
+            ...publication,
+            simplifiedTitle: publication.title, // Fallback to original title
+          };
+        }
+      })
+    );
+
+    // Add read status for signed-in users
+    let resultsWithReadStatus = resultsWithSimplifiedTitles;
+    if (req.user && req.user._id) {
+      const publicationIds = resultsWithSimplifiedTitles
+        .map((p) => p.pmid || p.id || p._id)
+        .filter(Boolean);
+      if (publicationIds.length > 0) {
+        const readItems = await ReadItem.find({
+          userId: req.user._id,
+          type: "publication",
+          itemId: { $in: publicationIds.map(String) },
+        }).select("itemId");
+
+        const readItemIds = new Set(readItems.map((r) => r.itemId));
+        resultsWithReadStatus = resultsWithSimplifiedTitles.map(
+          (publication) => ({
+            ...publication,
+            isRead: readItemIds.has(
+              String(publication.pmid || publication.id || publication._id)
+            ),
+          })
+        );
+      }
+    }
+
+    // Increment search count for anonymous users only after results are successfully loaded and processed
+    if (!req.user) {
+      await incrementSearchCount(req);
+    }
+
     // Get remaining searches for anonymous users
     let remaining = null;
     if (!req.user) {
@@ -260,7 +373,7 @@ router.get("/search/publications", async (req, res) => {
     }
 
     res.json({
-      results: resultsWithMatch,
+      results: resultsWithReadStatus,
       totalCount: pubmedResult.totalCount || 0,
       page: pubmedResult.page || 1,
       pageSize: pubmedResult.pageSize || 10,
@@ -615,6 +728,114 @@ router.get("/search/trial/:nctId", async (req, res) => {
     res.status(500).json({
       error: "Failed to fetch trial details",
       trial: null,
+    });
+  }
+});
+
+// Endpoint to fetch simplified trial details by NCT ID
+router.get("/search/trial/:nctId/simplified", async (req, res) => {
+  try {
+    const { nctId } = req.params;
+
+    if (!nctId || !nctId.trim()) {
+      return res.status(400).json({ error: "NCT ID is required" });
+    }
+
+    // Clean up NCT ID (remove whitespace, ensure uppercase)
+    const cleanNctId = nctId.trim().toUpperCase();
+
+    // Fetch detailed trial information
+    const trial = await fetchTrialById(cleanNctId);
+
+    if (!trial) {
+      return res.status(404).json({
+        error: `Trial with ID ${cleanNctId} not found`,
+        trial: null,
+      });
+    }
+
+    // Simplify trial details using AI
+    const simplifiedResult = await simplifyTrialDetails(trial);
+
+    res.json({
+      trial: simplifiedResult.trial,
+      simplified: simplifiedResult.simplified,
+    });
+  } catch (error) {
+    console.error("Error fetching simplified trial details:", error);
+    res.status(500).json({
+      error: "Failed to fetch simplified trial details",
+      trial: null,
+    });
+  }
+});
+
+// Endpoint to fetch detailed publication information by PMID
+router.get("/search/publication/:pmid", async (req, res) => {
+  try {
+    const { pmid } = req.params;
+
+    if (!pmid || !pmid.trim()) {
+      return res.status(400).json({ error: "PMID is required" });
+    }
+
+    // Clean up PMID (remove whitespace)
+    const cleanPmid = pmid.trim();
+
+    // Fetch detailed publication information
+    const publication = await fetchPublicationById(cleanPmid);
+
+    if (!publication) {
+      return res.status(404).json({
+        error: `Publication with ID ${cleanPmid} not found`,
+        publication: null,
+      });
+    }
+
+    res.json({ publication });
+  } catch (error) {
+    console.error("Error fetching publication details:", error);
+    res.status(500).json({
+      error: "Failed to fetch publication details",
+      publication: null,
+    });
+  }
+});
+
+// Endpoint to fetch simplified publication details by PMID
+router.get("/search/publication/:pmid/simplified", async (req, res) => {
+  try {
+    const { pmid } = req.params;
+
+    if (!pmid || !pmid.trim()) {
+      return res.status(400).json({ error: "PMID is required" });
+    }
+
+    // Clean up PMID (remove whitespace)
+    const cleanPmid = pmid.trim();
+
+    // Fetch detailed publication information
+    const publication = await fetchPublicationById(cleanPmid);
+
+    if (!publication) {
+      return res.status(404).json({
+        error: `Publication with ID ${cleanPmid} not found`,
+        publication: null,
+      });
+    }
+
+    // Simplify publication details using AI
+    const simplifiedResult = await simplifyPublicationDetails(publication);
+
+    res.json({
+      publication: simplifiedResult.publication,
+      simplified: simplifiedResult.simplified,
+    });
+  } catch (error) {
+    console.error("Error fetching simplified publication details:", error);
+    res.status(500).json({
+      error: "Failed to fetch simplified publication details",
+      publication: null,
     });
   }
 });
