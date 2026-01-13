@@ -104,7 +104,9 @@ router.get("/recommendations/:userId", async (req, res) => {
     } else if (profile?.role === "researcher") {
       // For researchers, use ALL interests (not just the first one)
       topics =
-        profile?.researcher?.interests || profile?.researcher?.specialties || [];
+        profile?.researcher?.interests ||
+        profile?.researcher?.specialties ||
+        [];
     }
 
     // For researchers with multiple interests, combine them for better search results
@@ -161,24 +163,37 @@ router.get("/recommendations/:userId", async (req, res) => {
     // Fetch all data in parallel for better performance
     // For trials, search with primary topic and filter for RECRUITING status only
     // Wrap each promise with error handling to prevent crashes
-    const [trials, publicationsResult, globalExperts] = await Promise.all([
-      searchClinicalTrials({ q: primaryTopic, location: locationForTrials, status: "RECRUITING" }).catch((error) => {
-        console.error("Error fetching clinical trials:", error);
-        return [];
-      }),
-      searchPubMed({ q: pubmedQuery }).catch((error) => {
-        console.error("Error fetching PubMed publications:", error);
-        return { items: [], totalCount: 0, page: 1, pageSize: 9, hasMore: false };
-      }),
-      // Fetch global experts using the same service as Experts.jsx
-      findResearchersWithGemini(globalExpertsQuery).catch((error) => {
-        console.error("Error fetching global experts:", error);
-        // Return empty array on error, don't fail the entire request
-        return [];
-      }),
-    ]);
+    const [trialsResult, publicationsResult, globalExperts] = await Promise.all(
+      [
+        searchClinicalTrials({
+          q: primaryTopic,
+          location: locationForTrials,
+          status: "RECRUITING",
+        }).catch((error) => {
+          console.error("Error fetching clinical trials:", error);
+          return { items: [], totalCount: 0, hasMore: false };
+        }),
+        searchPubMed({ q: pubmedQuery }).catch((error) => {
+          console.error("Error fetching PubMed publications:", error);
+          return {
+            items: [],
+            totalCount: 0,
+            page: 1,
+            pageSize: 9,
+            hasMore: false,
+          };
+        }),
+        // Fetch global experts using the same service as Experts.jsx
+        findResearchersWithGemini(globalExpertsQuery).catch((error) => {
+          console.error("Error fetching global experts:", error);
+          // Return empty array on error, don't fail the entire request
+          return [];
+        }),
+      ]
+    );
 
-    // Extract publications items from the result object
+    // Extract items from the result objects (both services return objects with items property)
+    const trials = trialsResult?.items || [];
     const publications = publicationsResult?.items || [];
 
     // Fetch local researchers (CuraLink Experts) instead of mocked experts
@@ -225,7 +240,7 @@ router.get("/recommendations/:userId", async (req, res) => {
     }
 
     // Calculate match percentages for all items
-    const trialsWithMatch = (trials || []).map((trial) => {
+    const trialsWithMatch = trials.map((trial) => {
       const match = calculateTrialMatch(trial, profile);
       return {
         ...trial,
