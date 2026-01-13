@@ -90,7 +90,7 @@ export async function submitToHubSpot(formData) {
 
   // Prepare the request body
   const context = {
-    pageUri: process.env.FRONTEND_URL || "https://your-landing-page.com",
+    pageUri: process.env.LANDING_PAGE_FRONTEND_URL || "https://your-landing-page.com",
     pageName: "Waitlist Form",
   };
 
