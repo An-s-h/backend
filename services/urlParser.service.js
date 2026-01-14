@@ -282,7 +282,7 @@ export async function fetchPublicationById(pmid) {
     const xmlResp = await axios.get(`${efetchUrl}?${efetchParams}`, {
       timeout: 30000, // Increased timeout to prevent timeouts
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; CuraLink/1.0)',
+        "User-Agent": "Mozilla/5.0 (compatible; CuraLink/1.0)",
       },
     });
 

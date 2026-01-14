@@ -24,6 +24,7 @@ import {
   calculateExpertMatch,
 } from "../services/matching.service.js";
 import { Profile } from "../models/Profile.js";
+import { User } from "../models/User.js";
 
 // Browser-based search limit system (strict 6 searches per device/browser)
 // Uses deviceId from localStorage (survives IP changes, proxies, browser restarts)
@@ -587,6 +588,210 @@ router.get("/search/experts", async (req, res) => {
 
     res.status(500).json({
       error: "Failed to search experts. Please try again later.",
+      results: [],
+    });
+  }
+});
+
+// New endpoint to search for experts on the platform (from database)
+router.get("/search/experts/platform", async (req, res) => {
+  try {
+    const {
+      researchArea = "",
+      diseaseOfInterest = "",
+      location,
+      userId,
+      conditions,
+      keywords,
+      userLocation,
+    } = req.query;
+
+    // Build query to find researchers
+    const query = { role: "researcher" };
+    
+    // Find all researcher profiles
+    const profiles = await Profile.find({ role: "researcher" })
+      .populate("userId", "username email medicalInterests")
+      .lean();
+
+    // Filter and map to expert format
+    let experts = profiles
+      .filter((p) => p.userId && p.researcher)
+      .map((profile) => {
+        const user = profile.userId;
+        const researcher = profile.researcher || {};
+        const locationObj = researcher.location || {};
+        
+        return {
+          _id: user._id || user.id,
+          id: user._id || user.id,
+          name: user.username || "Unknown Researcher",
+          email: user.email,
+          orcid: researcher.orcid || null,
+          orcidUrl: researcher.orcid
+            ? `https://orcid.org/${researcher.orcid}`
+            : null,
+          biography: researcher.bio || null,
+          location: locationObj.city && locationObj.country
+            ? `${locationObj.city}, ${locationObj.country}`
+            : locationObj.city || locationObj.country || null,
+          affiliation: researcher.institutionAffiliation || null,
+          currentPosition: researcher.institutionAffiliation || null,
+          researchInterests: researcher.interests || researcher.specialties || [],
+          specialties: researcher.specialties || [],
+          education: researcher.education
+            ? researcher.education
+                .map(
+                  (edu) =>
+                    `${edu.degree || ""} ${edu.field || ""} ${edu.institution || ""} ${edu.year || ""}`
+                )
+                .filter(Boolean)
+                .join(", ")
+            : null,
+          available: researcher.available || false,
+          isVerified: researcher.isVerified || false,
+          // Store raw location for filtering
+          _locationObj: locationObj,
+          // Store raw data for matching
+          _medicalInterests: user.medicalInterests || [],
+          _specialties: researcher.specialties || [],
+          _interests: researcher.interests || [],
+        };
+      });
+
+    // Apply search filters (if search terms provided)
+    // If no search terms, return all experts (browsing mode)
+    if (researchArea || diseaseOfInterest) {
+      const searchTerms = [
+        researchArea,
+        diseaseOfInterest,
+      ]
+        .filter(Boolean)
+        .map((term) => term.toLowerCase());
+
+      if (searchTerms.length > 0) {
+        experts = experts.filter((expert) => {
+          const searchableText = [
+            expert.name,
+            expert.biography,
+            expert.affiliation,
+            expert.location,
+            ...(expert.researchInterests || []),
+            ...(expert.specialties || []),
+            ...(expert._medicalInterests || []),
+            ...(expert._specialties || []),
+            ...(expert._interests || []),
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase();
+
+          return searchTerms.some((term) => searchableText.includes(term));
+        });
+      }
+    }
+
+    // Filter by location if provided
+    if (location) {
+      const locationLower = location.toLowerCase();
+      experts = experts.filter((expert) => {
+        if (!expert.location) return false;
+        return expert.location.toLowerCase().includes(locationLower);
+      });
+    }
+
+    // Build user profile for matching
+    let userProfile = null;
+    if (userId) {
+      const profile = await Profile.findOne({ userId }).lean();
+      if (profile) {
+        userProfile = profile;
+      }
+    } else if (conditions || keywords || userLocation) {
+      const locationObj = userLocation
+        ? typeof userLocation === "string"
+          ? JSON.parse(userLocation)
+          : userLocation
+        : null;
+      userProfile = {
+        patient: {
+          conditions: conditions
+            ? Array.isArray(conditions)
+              ? conditions
+              : [conditions]
+            : [],
+          keywords: keywords
+            ? Array.isArray(keywords)
+              ? keywords
+              : [keywords]
+            : [],
+          location: locationObj,
+        },
+      };
+    }
+
+    // Add research area and disease interest to user profile for enhanced matching
+    if (researchArea || diseaseOfInterest) {
+      if (!userProfile) {
+        userProfile = { patient: {} };
+      }
+      if (!userProfile.patient) {
+        userProfile.patient = {};
+      }
+
+      if (researchArea) {
+        if (!userProfile.patient.keywords) {
+          userProfile.patient.keywords = [];
+        }
+        if (!userProfile.patient.keywords.includes(researchArea)) {
+          userProfile.patient.keywords.push(researchArea);
+        }
+      }
+
+      if (diseaseOfInterest && diseaseOfInterest !== researchArea) {
+        if (!userProfile.patient.conditions) {
+          userProfile.patient.conditions = [];
+        }
+        if (!userProfile.patient.conditions.includes(diseaseOfInterest)) {
+          userProfile.patient.conditions.push(diseaseOfInterest);
+        }
+      }
+
+      userProfile.hasResearchArea = !!researchArea;
+      userProfile.hasDiseaseInterest = !!diseaseOfInterest;
+      userProfile.researchArea = researchArea;
+      userProfile.diseaseInterest = diseaseOfInterest;
+    }
+
+    // Calculate match percentages if user profile is available
+    const resultsWithMatch = userProfile
+      ? experts.map((expert) => {
+          const match = calculateExpertMatch(expert, userProfile);
+          return {
+            ...expert,
+            matchPercentage: match.matchPercentage,
+            matchExplanation: match.matchExplanation,
+          };
+        })
+      : experts;
+
+    // Sort by match percentage (descending), then by name
+    const sortedResults = resultsWithMatch.sort((a, b) => {
+      const aMatch = a.matchPercentage ?? -1;
+      const bMatch = b.matchPercentage ?? -1;
+      if (bMatch !== aMatch) {
+        return bMatch - aMatch;
+      }
+      return (a.name || "").localeCompare(b.name || "");
+    });
+
+    res.json({
+      results: sortedResults,
+    });
+  } catch (error) {
+    console.error("Error searching platform experts:", error);
+    res.status(500).json({
+      error: "Failed to search platform experts. Please try again later.",
       results: [],
     });
   }

@@ -19,7 +19,12 @@ function getCache(key) {
 
 // Filter trials by eligibility criteria (client-side filtering)
 function filterTrialsByEligibility(trials, filters) {
-  if (!filters || (!filters.eligibilitySex && !filters.eligibilityAgeMin && !filters.eligibilityAgeMax)) {
+  if (
+    !filters ||
+    (!filters.eligibilitySex &&
+      !filters.eligibilityAgeMin &&
+      !filters.eligibilityAgeMax)
+  ) {
     return trials;
   }
 
@@ -39,7 +44,7 @@ function filterTrialsByEligibility(trials, filters) {
     if (filters.eligibilityAgeMin || filters.eligibilityAgeMax) {
       const minAge = eligibility.minimumAge;
       const maxAge = eligibility.maximumAge;
-      
+
       // Parse age strings (e.g., "18 Years" -> 18)
       const parseAge = (ageStr) => {
         if (!ageStr || ageStr === "Not specified") return null;
@@ -49,14 +54,26 @@ function filterTrialsByEligibility(trials, filters) {
 
       const trialMinAge = parseAge(minAge);
       const trialMaxAge = parseAge(maxAge);
-      const filterMinAge = filters.eligibilityAgeMin ? parseInt(filters.eligibilityAgeMin) : null;
-      const filterMaxAge = filters.eligibilityAgeMax ? parseInt(filters.eligibilityAgeMax) : null;
+      const filterMinAge = filters.eligibilityAgeMin
+        ? parseInt(filters.eligibilityAgeMin)
+        : null;
+      const filterMaxAge = filters.eligibilityAgeMax
+        ? parseInt(filters.eligibilityAgeMax)
+        : null;
 
       // Check if age ranges overlap
-      if (filterMinAge !== null && trialMaxAge !== null && filterMinAge > trialMaxAge) {
+      if (
+        filterMinAge !== null &&
+        trialMaxAge !== null &&
+        filterMinAge > trialMaxAge
+      ) {
         return false;
       }
-      if (filterMaxAge !== null && trialMinAge !== null && filterMaxAge < trialMinAge) {
+      if (
+        filterMaxAge !== null &&
+        trialMinAge !== null &&
+        filterMaxAge < trialMinAge
+      ) {
         return false;
       }
     }
@@ -92,7 +109,11 @@ export async function searchClinicalTrials({
   }
 
   // Build cache key including eligibility filters
-  const cacheKey = `ct:${q}:${status || ""}:${countryOnly || ""}:${phase || ""}:${eligibilitySex || ""}:${eligibilityAgeMin || ""}:${eligibilityAgeMax || ""}`;
+  const cacheKey = `ct:${q}:${status || ""}:${countryOnly || ""}:${
+    phase || ""
+  }:${eligibilitySex || ""}:${eligibilityAgeMin || ""}:${
+    eligibilityAgeMax || ""
+  }`;
   const cached = getCache(cacheKey);
   if (cached) {
     // Apply client-side filtering for eligibility and phase if needed
@@ -110,14 +131,14 @@ export async function searchClinicalTrials({
         return trialPhase.toUpperCase().includes(phase.toUpperCase());
       });
     }
-    
+
     // Apply pagination
     const totalCount = filtered.length;
     const startIndex = (page - 1) * pageSize;
     const endIndex = startIndex + pageSize;
     const paginatedItems = filtered.slice(startIndex, endIndex);
     const hasMore = endIndex < totalCount;
-    
+
     return {
       items: paginatedItems,
       totalCount,
@@ -141,18 +162,18 @@ export async function searchClinicalTrials({
   try {
     const resp = await axios.get(url, { timeout: 15000 });
     let allStudies = resp.data?.studies || [];
-    
+
     // Check if there are more pages (nextPageToken indicates more results)
     let nextPageToken = resp.data?.nextPageToken;
     let pageNum = 1;
     const maxPages = 10; // Limit to prevent infinite loops, adjust as needed
-    
+
     // Fetch additional pages if available
     while (nextPageToken && pageNum < maxPages) {
       const nextParams = new URLSearchParams(params);
       nextParams.set("pageToken", nextPageToken);
       const nextUrl = `https://clinicaltrials.gov/api/v2/studies?${nextParams.toString()}`;
-      
+
       try {
         const nextResp = await axios.get(nextUrl, { timeout: 15000 });
         const nextStudies = nextResp.data?.studies || [];
@@ -164,7 +185,7 @@ export async function searchClinicalTrials({
         break;
       }
     }
-    
+
     // Get all studies (don't limit here, we'll paginate after filtering)
     const items = allStudies.map((s) => {
       const protocolSection = s.protocolSection || {};
@@ -235,14 +256,14 @@ export async function searchClinicalTrials({
     });
 
     setCache(cacheKey, items);
-    
+
     // Apply eligibility filtering
     let filteredItems = filterTrialsByEligibility(items, {
       eligibilitySex,
       eligibilityAgeMin,
       eligibilityAgeMax,
     });
-    
+
     // Filter by phase if specified
     if (phase) {
       filteredItems = filteredItems.filter((trial) => {
@@ -252,14 +273,14 @@ export async function searchClinicalTrials({
         return trialPhase.toUpperCase().includes(phase.toUpperCase());
       });
     }
-    
+
     // Apply pagination
     const totalCount = filteredItems.length;
     const startIndex = (page - 1) * pageSize;
     const endIndex = startIndex + pageSize;
     const paginatedItems = filteredItems.slice(startIndex, endIndex);
     const hasMore = endIndex < totalCount;
-    
+
     return {
       items: paginatedItems,
       totalCount,
