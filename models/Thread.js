@@ -2,7 +2,8 @@ import mongoose from "mongoose";
 
 const threadSchema = new mongoose.Schema(
   {
-    categoryId: { type: mongoose.Schema.Types.ObjectId, ref: "ForumCategory", required: true },
+    categoryId: { type: mongoose.Schema.Types.ObjectId, ref: "ForumCategory" },
+    communityId: { type: mongoose.Schema.Types.ObjectId, ref: "Community", index: true },
     authorUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     authorRole: { type: String, enum: ["patient", "researcher"], required: true },
     title: { type: String, required: true },

@@ -25,6 +25,7 @@ import {
 } from "../services/matching.service.js";
 import { Profile } from "../models/Profile.js";
 import { User } from "../models/User.js";
+import { parseQuery } from "../utils/queryParser.js";
 
 // Browser-based search limit system (strict 6 searches per device/browser)
 // Uses deviceId from localStorage (survives IP changes, proxies, browser restarts)
@@ -70,6 +71,14 @@ router.get("/search/trials", async (req, res) => {
       page = "1",
       pageSize = "9",
     } = req.query;
+
+    // Fetch a larger batch to sort by match percentage before pagination
+    // This ensures results are sorted across all pages, not just within each page
+    const requestedPage = parseInt(page, 10);
+    const requestedPageSize = parseInt(pageSize, 10);
+    // Fetch up to 500 results for sorting (covers ~83 pages with 6 results per page)
+    const batchSize = Math.min(500, Math.max(100, requestedPageSize * 50));
+
     const result = await searchClinicalTrials({
       q,
       status,
@@ -78,10 +87,10 @@ router.get("/search/trials", async (req, res) => {
       eligibilitySex,
       eligibilityAgeMin,
       eligibilityAgeMax,
-      page: parseInt(page, 10),
-      pageSize: parseInt(pageSize, 10),
+      page: 1, // Always fetch from page 1 for the batch
+      pageSize: batchSize, // Fetch larger batch for sorting
     });
-    const results = result.items || [];
+    const allResults = result.items || [];
 
     // Build user profile for matching
     let userProfile = null;
@@ -117,7 +126,7 @@ router.get("/search/trials", async (req, res) => {
 
     // Calculate match percentages if user profile is available
     const resultsWithMatch = userProfile
-      ? results.map((trial) => {
+      ? allResults.map((trial) => {
           const match = calculateTrialMatch(trial, userProfile);
           return {
             ...trial,
@@ -125,14 +134,14 @@ router.get("/search/trials", async (req, res) => {
             matchExplanation: match.matchExplanation,
           };
         })
-      : results;
+      : allResults;
 
-    // Sort by match percentage (descending)
+    // Sort by match percentage (descending - highest first) before pagination
     const sortedResults = resultsWithMatch.sort(
-      (a, b) => (b.matchPercentage || 0) - (a.matchPercentage || 0)
+      (a, b) => (b.matchPercentage || -1) - (a.matchPercentage || -1)
     );
 
-    // Simplify titles for all trials in parallel
+    // Simplify titles for all trials in parallel (only for the batch we fetched)
     // This adds simplified titles to each trial object
     const resultsWithSimplifiedTitles = await Promise.all(
       sortedResults.map(async (trial) => {
@@ -156,10 +165,18 @@ router.get("/search/trials", async (req, res) => {
       })
     );
 
-    // Add read status for signed-in users
-    let resultsWithReadStatus = resultsWithSimplifiedTitles;
+    // Paginate the sorted results
+    const startIndex = (requestedPage - 1) * requestedPageSize;
+    const endIndex = startIndex + requestedPageSize;
+    const paginatedResults = resultsWithSimplifiedTitles.slice(
+      startIndex,
+      endIndex
+    );
+
+    // Add read status for signed-in users (only for paginated results to reduce DB queries)
+    let resultsWithReadStatus = paginatedResults;
     if (req.user && req.user._id) {
-      const trialIds = resultsWithSimplifiedTitles
+      const trialIds = paginatedResults
         .map((t) => t.id || t._id)
         .filter(Boolean);
       if (trialIds.length > 0) {
@@ -170,7 +187,7 @@ router.get("/search/trials", async (req, res) => {
         }).select("itemId");
 
         const readItemIds = new Set(readItems.map((r) => r.itemId));
-        resultsWithReadStatus = resultsWithSimplifiedTitles.map((trial) => ({
+        resultsWithReadStatus = paginatedResults.map((trial) => ({
           ...trial,
           isRead: readItemIds.has(trial.id || trial._id),
         }));
@@ -189,10 +206,17 @@ router.get("/search/trials", async (req, res) => {
       remaining = limitCheck.remaining;
     }
 
+    // Calculate if there are more results
+    // Note: We're only showing results from the batch we fetched, so hasMore is based on batch size
+    const hasMore = endIndex < resultsWithSimplifiedTitles.length;
+
     res.json({
       results: resultsWithReadStatus,
-      totalCount: result.totalCount || resultsWithReadStatus.length,
-      hasMore: result.hasMore || false,
+      totalCount: Math.min(
+        result.totalCount || 0,
+        resultsWithSimplifiedTitles.length
+      ), // Use batch size as total count for pagination purposes
+      hasMore: hasMore,
       ...(remaining !== null && { remaining }),
     });
   } catch (error) {
@@ -243,7 +267,8 @@ router.get("/search/publications", async (req, res) => {
 
     // For publications, build query string
     // The query may already contain field tags like [AU], [TI], etc. from advanced search
-    let pubmedQuery = q || "";
+    // Parse query to handle Google Scholar operators and minus sign NOT
+    let pubmedQuery = q ? parseQuery(q) : "";
 
     // Add location (country) to query if provided and not already in advanced query
     if (location && !pubmedQuery.includes("[") && !pubmedQuery.includes("]")) {
@@ -251,22 +276,29 @@ router.get("/search/publications", async (req, res) => {
       pubmedQuery = `${pubmedQuery} ${location}`.trim();
     }
 
+    // Fetch a larger batch to sort by match percentage before pagination
+    // This ensures results are sorted across all pages, not just within each page
+    const requestedPage = parseInt(page, 10);
+    const requestedPageSize = parseInt(pageSize, 10);
+    // Fetch up to 500 results for sorting (covers ~83 pages with 6 results per page)
+    const batchSize = Math.min(500, Math.max(100, requestedPageSize * 50));
+
     const pubmedResult = await searchPubMed({
       q: pubmedQuery,
       mindate: mindate || "",
       maxdate: maxdate || "",
-      page: parseInt(page, 10),
-      pageSize: parseInt(pageSize, 10),
+      page: 1, // Always fetch from page 1 for the batch
+      pageSize: batchSize, // Fetch larger batch for sorting
     });
 
     console.log(
       "PubMed result count:",
       pubmedResult.totalCount,
-      "items:",
+      "items fetched:",
       pubmedResult.items?.length
     );
 
-    const results = pubmedResult.items || [];
+    const allResults = pubmedResult.items || [];
 
     // Build user profile for matching
     let userProfile = null;
@@ -302,7 +334,7 @@ router.get("/search/publications", async (req, res) => {
 
     // Calculate match percentages if user profile is available
     const resultsWithMatch = userProfile
-      ? results.map((publication) => {
+      ? allResults.map((publication) => {
           const match = calculatePublicationMatch(publication, userProfile);
           return {
             ...publication,
@@ -310,12 +342,17 @@ router.get("/search/publications", async (req, res) => {
             matchExplanation: match.matchExplanation,
           };
         })
-      : results;
+      : allResults;
 
-    // Simplify titles for all publications in parallel
+    // Sort by match percentage (descending - highest first) before pagination
+    const sortedResults = resultsWithMatch.sort(
+      (a, b) => (b.matchPercentage || -1) - (a.matchPercentage || -1)
+    );
+
+    // Simplify titles for all publications in parallel (only for the batch we fetched)
     // This adds simplified titles to each publication object
     const resultsWithSimplifiedTitles = await Promise.all(
-      resultsWithMatch.map(async (publication) => {
+      sortedResults.map(async (publication) => {
         try {
           const simplifiedTitle = await simplifyPublicationTitle(publication);
           return {
@@ -336,10 +373,18 @@ router.get("/search/publications", async (req, res) => {
       })
     );
 
-    // Add read status for signed-in users
-    let resultsWithReadStatus = resultsWithSimplifiedTitles;
+    // Paginate the sorted results
+    const startIndex = (requestedPage - 1) * requestedPageSize;
+    const endIndex = startIndex + requestedPageSize;
+    const paginatedResults = resultsWithSimplifiedTitles.slice(
+      startIndex,
+      endIndex
+    );
+
+    // Add read status for signed-in users (only for paginated results to reduce DB queries)
+    let resultsWithReadStatus = paginatedResults;
     if (req.user && req.user._id) {
-      const publicationIds = resultsWithSimplifiedTitles
+      const publicationIds = paginatedResults
         .map((p) => p.pmid || p.id || p._id)
         .filter(Boolean);
       if (publicationIds.length > 0) {
@@ -350,14 +395,12 @@ router.get("/search/publications", async (req, res) => {
         }).select("itemId");
 
         const readItemIds = new Set(readItems.map((r) => r.itemId));
-        resultsWithReadStatus = resultsWithSimplifiedTitles.map(
-          (publication) => ({
-            ...publication,
-            isRead: readItemIds.has(
-              String(publication.pmid || publication.id || publication._id)
-            ),
-          })
-        );
+        resultsWithReadStatus = paginatedResults.map((publication) => ({
+          ...publication,
+          isRead: readItemIds.has(
+            String(publication.pmid || publication.id || publication._id)
+          ),
+        }));
       }
     }
 
@@ -373,12 +416,19 @@ router.get("/search/publications", async (req, res) => {
       remaining = limitCheck.remaining;
     }
 
+    // Calculate if there are more results
+    // Note: We're only showing results from the batch we fetched, so hasMore is based on batch size
+    const hasMore = endIndex < resultsWithSimplifiedTitles.length;
+
     res.json({
       results: resultsWithReadStatus,
-      totalCount: pubmedResult.totalCount || 0,
-      page: pubmedResult.page || 1,
-      pageSize: pubmedResult.pageSize || 10,
-      hasMore: pubmedResult.hasMore || false,
+      totalCount: Math.min(
+        pubmedResult.totalCount || 0,
+        resultsWithSimplifiedTitles.length
+      ), // Use batch size as total count for pagination purposes
+      page: requestedPage,
+      pageSize: requestedPageSize,
+      hasMore: hasMore,
       ...(remaining !== null && { remaining }),
     });
   } catch (error) {

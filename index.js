@@ -10,7 +10,9 @@ import recommendationsRoutes from "./routes/recommendations.routes.js";
 import favoritesRoutes from "./routes/favorites.routes.js";
 import readItemsRoutes from "./routes/readItems.routes.js";
 import forumsRoutes from "./routes/forums.routes.js";
+import communitiesRoutes from "./routes/communities.routes.js";
 import { ForumCategory } from "./models/ForumCategory.js";
+import { Community } from "./models/Community.js";
 import trialsRoutes from "./routes/trials.routes.js";
 import aiRoutes from "./routes/ai.routes.js";
 import insightsRoutes from "./routes/insights.routes.js";
@@ -59,8 +61,9 @@ app.use("/api", profileRoutes);
 app.use("/api", searchRoutes);
 app.use("/api", recommendationsRoutes);
 app.use("/api", favoritesRoutes);
-app.use("/api", forumsRoutes);
 app.use("/api", readItemsRoutes);
+app.use("/api", forumsRoutes);
+app.use("/api", communitiesRoutes);
 app.use("/api", trialsRoutes);
 app.use("/api", aiRoutes);
 app.use("/api", insightsRoutes);
@@ -94,6 +97,28 @@ async function start() {
       { upsert: true }
     );
   }
+
+  // Seed default communities
+  const defaultCommunities = [
+    { name: "General Health", slug: "general-health", description: "Discuss general health topics, wellness tips, and healthy lifestyle choices", icon: "🏥", color: "#2F3C96", tags: ["health", "wellness", "lifestyle", "general"], isOfficial: true },
+    { name: "Cancer Support", slug: "cancer-support", description: "A supportive community for cancer patients, survivors, and caregivers", icon: "🎗️", color: "#E91E63", tags: ["cancer", "oncology", "support", "treatment"], isOfficial: true },
+    { name: "Mental Health", slug: "mental-health", description: "Open discussions about mental health, coping strategies, and emotional wellbeing", icon: "🧠", color: "#9C27B0", tags: ["mental health", "anxiety", "depression", "therapy", "wellbeing"], isOfficial: true },
+    { name: "Diabetes Management", slug: "diabetes-management", description: "Tips, experiences, and support for managing diabetes", icon: "💉", color: "#2196F3", tags: ["diabetes", "blood sugar", "insulin", "diet"], isOfficial: true },
+    { name: "Heart Health", slug: "heart-health", description: "Discussions about cardiovascular health, heart conditions, and prevention", icon: "❤️", color: "#F44336", tags: ["heart", "cardiovascular", "blood pressure", "cholesterol"], isOfficial: true },
+    { name: "Nutrition & Diet", slug: "nutrition-diet", description: "Share recipes, nutrition tips, and dietary advice", icon: "🥗", color: "#4CAF50", tags: ["nutrition", "diet", "food", "healthy eating"], isOfficial: true },
+    { name: "Fitness & Exercise", slug: "fitness-exercise", description: "Workout routines, fitness tips, and exercise motivation", icon: "💪", color: "#FF9800", tags: ["fitness", "exercise", "workout", "strength"], isOfficial: true },
+    { name: "Clinical Trials", slug: "clinical-trials", description: "Information and discussions about participating in clinical trials", icon: "🔬", color: "#673AB7", tags: ["clinical trials", "research", "studies", "participation"], isOfficial: true },
+    { name: "Chronic Pain", slug: "chronic-pain", description: "Support and management strategies for chronic pain conditions", icon: "🩹", color: "#795548", tags: ["chronic pain", "pain management", "fibromyalgia", "arthritis"], isOfficial: true },
+    { name: "Autoimmune Conditions", slug: "autoimmune-conditions", description: "Community for those dealing with autoimmune diseases", icon: "🛡️", color: "#00BCD4", tags: ["autoimmune", "lupus", "rheumatoid", "multiple sclerosis"], isOfficial: true },
+  ];
+  for (const c of defaultCommunities) {
+    await Community.updateOne(
+      { slug: c.slug },
+      { $setOnInsert: c },
+      { upsert: true }
+    );
+  }
+
   app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 }
 

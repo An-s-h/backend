@@ -224,6 +224,7 @@ export async function generateTrialSummary(trial, patientContext = {}) {
     // Fallback without AI
     return {
       title: trial.title || "Untitled Trial",
+      trialNumber: trial.id || trial._id || "Not specified",
       phase: trial.phase || "Not specified",
       condition: Array.isArray(trial.conditions)
         ? trial.conditions.join(", ")
@@ -295,6 +296,7 @@ Return ONLY valid JSON, no markdown formatting.`;
 
     return {
       title: trial.title || "Untitled Trial",
+      trialNumber: trial.id || trial._id || "Not specified",
       phase: trial.phase || "Not specified",
       condition: Array.isArray(trial.conditions)
         ? trial.conditions.join(", ")
@@ -322,6 +324,7 @@ Return ONLY valid JSON, no markdown formatting.`;
     // Fallback
     return {
       title: trial.title || "Untitled Trial",
+      trialNumber: trial.id || trial._id || "Not specified",
       phase: trial.phase || "Not specified",
       condition: Array.isArray(trial.conditions)
         ? trial.conditions.join(", ")

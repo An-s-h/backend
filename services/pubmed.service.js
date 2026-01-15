@@ -1,5 +1,11 @@
 import axios from "axios";
 import { DOMParser } from "xmldom";
+import {
+  parseQuery,
+  hasDateFilter,
+  extractDateRangeFromQuery,
+  removeDateFilterFromQuery,
+} from "../utils/queryParser.js";
 
 const cache = new Map();
 const TTL_MS = 1000 * 60 * 5;
@@ -63,11 +69,14 @@ export async function searchPubMed({
     // Step 1: Get PMIDs with retry logic and increased timeout
     const esearchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi`;
 
-    // Build search term - use default if no query provided
-    let searchTerm = q || "";
+    // Parse query to handle Google Scholar operators and minus sign NOT
+    let searchTerm = q ? parseQuery(q) : "";
 
-    // Build date filter if provided
-    if (mindate || maxdate) {
+    // Check if query already contains date filter [dp] tag
+    const queryHasDateFilter = hasDateFilter(searchTerm);
+
+    // Build date filter if provided and not already in query
+    if (!queryHasDateFilter && (mindate || maxdate)) {
       // PubMed date format: YYYY/MM/DD
       // If only YYYY/MM is provided, add day component
       let dateMin = mindate || "1900/01/01";
@@ -98,6 +107,18 @@ export async function searchPubMed({
         // Use only date filter - this will return all publications in the date range
         searchTerm = dateFilter;
       }
+    } else if (queryHasDateFilter) {
+      // Query already has date filter, but we might need to merge with provided dates
+      // For now, we'll use the date filter from the query
+      // In the future, we could extract and merge date ranges
+      const extractedDate = extractDateRangeFromQuery(searchTerm);
+      if (extractedDate && (mindate || maxdate)) {
+        // Merge date ranges - use the more restrictive range
+        // This is a simple implementation - could be enhanced
+        console.log(
+          "Query contains date filter, using query date filter over parameters"
+        );
+      }
     }
 
     // If still no search term, use a default
@@ -105,7 +126,7 @@ export async function searchPubMed({
       searchTerm = "oncology";
     }
 
-    console.log("PubMed search term:", searchTerm);
+    console.log("PubMed search term (parsed):", searchTerm);
 
     // Calculate pagination offset
     const retstart = (page - 1) * pageSize;
