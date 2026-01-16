@@ -131,10 +131,17 @@ export async function generatePublicationSummary(
   publication,
   patientContext = {}
 ) {
+  // Use DOI as reference number for publications
+  const referenceNumber = publication.doi || null;
+
+  // Check if we already have a simplified title
+  let displayTitle = publication.simplifiedTitle || null;
+
   if (!genAI) {
-    // Fallback without AI
+    // Fallback without AI - use existing simplified title or original
     return {
-      title: publication.title || "Untitled",
+      title: displayTitle || publication.title || "Untitled",
+      referenceNumber,
       authors: Array.isArray(publication.authors)
         ? publication.authors.join(", ")
         : publication.authors || "Unknown",
@@ -149,8 +156,10 @@ export async function generatePublicationSummary(
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
+    // Updated prompt to also generate simplified title if needed
     const prompt = `Summarize this medical publication for a doctor. Return a JSON object:
 {
+  "simplifiedTitle": "A simplified, easy-to-understand version of the title (10-15 words max, plain language a high school student could understand)",
   "keyFinding": "1-2 sentence key finding summary",
   "clinicalRelevance": "What does this mean clinically for the patient?",
   "evidenceLevel": "Case study / Phase 1 / RCT / Meta-analysis / Review / etc."
@@ -185,8 +194,12 @@ Return ONLY valid JSON, no markdown formatting.`;
 
     const summary = JSON.parse(jsonText);
 
+    // Use existing simplified title, or the AI-generated one, or fall back to original
+    const finalTitle = displayTitle || summary.simplifiedTitle || publication.title || "Untitled";
+
     return {
-      title: publication.title || "Untitled",
+      title: finalTitle,
+      referenceNumber,
       authors: Array.isArray(publication.authors)
         ? publication.authors.join(", ")
         : publication.authors || "Unknown",
@@ -203,7 +216,8 @@ Return ONLY valid JSON, no markdown formatting.`;
     console.error("Error generating publication summary:", error);
     // Fallback
     return {
-      title: publication.title || "Untitled",
+      title: displayTitle || publication.title || "Untitled",
+      referenceNumber,
       authors: Array.isArray(publication.authors)
         ? publication.authors.join(", ")
         : publication.authors || "Unknown",
@@ -220,11 +234,18 @@ Return ONLY valid JSON, no markdown formatting.`;
  * Generate clinical trial summary using Gemini AI
  */
 export async function generateTrialSummary(trial, patientContext = {}) {
+  // Use NCT ID as reference number for clinical trials
+  const referenceNumber = trial.id || trial._id || null;
+
+  // Check if we already have a simplified title
+  let displayTitle = trial.simplifiedTitle || trial.simplifiedDetails?.title || null;
+
   if (!genAI) {
-    // Fallback without AI
+    // Fallback without AI - use existing simplified title or original
     return {
-      title: trial.title || "Untitled Trial",
-      trialNumber: trial.id || trial._id || "Not specified",
+      title: displayTitle || trial.title || "Untitled Trial",
+      referenceNumber,
+      trialNumber: referenceNumber || "Not specified",
       phase: trial.phase || "Not specified",
       condition: Array.isArray(trial.conditions)
         ? trial.conditions.join(", ")
@@ -248,8 +269,10 @@ export async function generateTrialSummary(trial, patientContext = {}) {
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
 
+    // Updated prompt to also generate simplified title if needed
     const prompt = `Create a doctor-friendly summary of this clinical trial. Return a JSON object:
 {
+  "simplifiedTitle": "A simplified, easy-to-understand version of the trial title (10-15 words max, plain language a high school student could understand)",
   "intervention": "Main intervention/treatment being tested",
   "eligibilitySnapshot": {
     "age": "Age range (e.g., '18-70')",
@@ -294,9 +317,13 @@ Return ONLY valid JSON, no markdown formatting.`;
 
     const summary = JSON.parse(jsonText);
 
+    // Use existing simplified title, or the AI-generated one, or fall back to original
+    const finalTitle = displayTitle || summary.simplifiedTitle || trial.title || "Untitled Trial";
+
     return {
-      title: trial.title || "Untitled Trial",
-      trialNumber: trial.id || trial._id || "Not specified",
+      title: finalTitle,
+      referenceNumber,
+      trialNumber: referenceNumber || "Not specified",
       phase: trial.phase || "Not specified",
       condition: Array.isArray(trial.conditions)
         ? trial.conditions.join(", ")
@@ -323,8 +350,9 @@ Return ONLY valid JSON, no markdown formatting.`;
     console.error("Error generating trial summary:", error);
     // Fallback
     return {
-      title: trial.title || "Untitled Trial",
-      trialNumber: trial.id || trial._id || "Not specified",
+      title: displayTitle || trial.title || "Untitled Trial",
+      referenceNumber,
+      trialNumber: referenceNumber || "Not specified",
       phase: trial.phase || "Not specified",
       condition: Array.isArray(trial.conditions)
         ? trial.conditions.join(", ")
