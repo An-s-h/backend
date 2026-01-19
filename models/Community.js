@@ -8,7 +8,7 @@ const communitySchema = new mongoose.Schema(
     icon: { type: String, default: "💬" }, // Emoji or icon identifier
     color: { type: String, default: "#2F3C96" }, // Brand color
     coverImage: { type: String, default: "" },
-    tags: [{ type: String }], // For interest matching
+    tags: [{ type: String }], // MeSH terminology tags for recommendations
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     isOfficial: { type: Boolean, default: false }, // Official CuraLink communities
     isPrivate: { type: Boolean, default: false },

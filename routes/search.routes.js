@@ -26,6 +26,7 @@ import {
 import { Profile } from "../models/Profile.js";
 import { User } from "../models/User.js";
 import { parseQuery } from "../utils/queryParser.js";
+import { extractBiomarkers } from "../services/medicalTerminology.service.js";
 
 // Browser-based search limit system (strict 6 searches per device/browser)
 // Uses deviceId from localStorage (survives IP changes, proxies, browser restarts)
@@ -72,6 +73,51 @@ router.get("/search/trials", async (req, res) => {
       pageSize = "9",
     } = req.query;
 
+    // Layer 3: Extract biomarkers from conditions/keywords if provided
+    // Only extract if conditions are actually provided (medical interests enabled)
+    let biomarkers = [];
+    
+    // Extract biomarkers from query params (for non-signed-in users)
+    if (conditions) {
+      const conditionsStr = Array.isArray(conditions) 
+        ? conditions.join(" ") 
+        : conditions;
+      const conditionBiomarkers = extractBiomarkers(conditionsStr);
+      biomarkers = [...biomarkers, ...conditionBiomarkers];
+    }
+    if (keywords) {
+      const keywordsStr = Array.isArray(keywords) 
+        ? keywords.join(" ") 
+        : keywords;
+      const keywordBiomarkers = extractBiomarkers(keywordsStr);
+      biomarkers = [...biomarkers, ...keywordBiomarkers];
+    }
+    
+    // Extract biomarkers from user profile if userId is provided (signed-in users)
+    // We'll fetch the profile here and reuse it later for matching
+    let userProfile = null;
+    if (userId) {
+      userProfile = await Profile.findOne({ userId }).lean();
+      if (userProfile) {
+        const profileConditions = userProfile.patient?.conditions || [];
+        const profileKeywords = userProfile.patient?.keywords || [];
+        const profileConditionsStr = profileConditions.join(" ");
+        const profileKeywordsStr = profileKeywords.join(" ");
+        
+        if (profileConditionsStr) {
+          const profileBiomarkers = extractBiomarkers(profileConditionsStr);
+          biomarkers = [...biomarkers, ...profileBiomarkers];
+        }
+        if (profileKeywordsStr) {
+          const profileKeywordBiomarkers = extractBiomarkers(profileKeywordsStr);
+          biomarkers = [...biomarkers, ...profileKeywordBiomarkers];
+        }
+      }
+    }
+    
+    // Remove duplicates
+    biomarkers = [...new Set(biomarkers)];
+
     // Fetch a larger batch to sort by match percentage before pagination
     // This ensures results are sorted across all pages, not just within each page
     const requestedPage = parseInt(page, 10);
@@ -87,41 +133,40 @@ router.get("/search/trials", async (req, res) => {
       eligibilitySex,
       eligibilityAgeMin,
       eligibilityAgeMax,
+      biomarkers, // Layer 3: Pass extracted biomarkers
       page: 1, // Always fetch from page 1 for the batch
       pageSize: batchSize, // Fetch larger batch for sorting
     });
     const allResults = result.items || [];
 
-    // Build user profile for matching
-    let userProfile = null;
-    if (userId) {
-      // Fetch user profile from database
-      const profile = await Profile.findOne({ userId }).lean();
-      if (profile) {
-        userProfile = profile;
+    // Build user profile for matching (reuse if already fetched for biomarkers)
+    if (!userProfile) {
+      if (userId) {
+        // Fetch user profile from database (shouldn't happen if biomarkers extraction already fetched it)
+        userProfile = await Profile.findOne({ userId }).lean();
+      } else if (conditions || keywords || userLocation) {
+        // Build profile from query params
+        const locationObj = userLocation
+          ? typeof userLocation === "string"
+            ? JSON.parse(userLocation)
+            : userLocation
+          : null;
+        userProfile = {
+          patient: {
+            conditions: conditions
+              ? Array.isArray(conditions)
+                ? conditions
+                : [conditions]
+              : [],
+            keywords: keywords
+              ? Array.isArray(keywords)
+                ? keywords
+                : [keywords]
+              : [],
+            location: locationObj,
+          },
+        };
       }
-    } else if (conditions || keywords || userLocation) {
-      // Build profile from query params
-      const locationObj = userLocation
-        ? typeof userLocation === "string"
-          ? JSON.parse(userLocation)
-          : userLocation
-        : null;
-      userProfile = {
-        patient: {
-          conditions: conditions
-            ? Array.isArray(conditions)
-              ? conditions
-              : [conditions]
-            : [],
-          keywords: keywords
-            ? Array.isArray(keywords)
-              ? keywords
-              : [keywords]
-            : [],
-          location: locationObj,
-        },
-      };
     }
 
     // Calculate match percentages if user profile is available

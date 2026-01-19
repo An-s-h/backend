@@ -1,6 +1,7 @@
 import { Router } from "express";
 import mongoose from "mongoose";
 import { Community } from "../models/Community.js";
+import { Subcategory } from "../models/Subcategory.js";
 import { CommunityMembership } from "../models/CommunityMembership.js";
 import { Thread } from "../models/Thread.js";
 import { Reply } from "../models/Reply.js";
@@ -290,7 +291,7 @@ router.get("/communities/user/:userId/following", async (req, res) => {
 router.get("/communities/:communityId/threads", async (req, res) => {
   try {
     const { communityId } = req.params;
-    const { sort = "recent", page = 1, limit = 20 } = req.query;
+    const { sort = "recent", page = 1, limit = 20, subcategoryId } = req.query;
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
@@ -301,9 +302,15 @@ router.get("/communities/:communityId/threads", async (req, res) => {
       // Will sort by vote score after aggregation
     }
 
-    const threads = await Thread.find({ communityId })
+    let query = { communityId };
+    if (subcategoryId) {
+      query.subcategoryId = subcategoryId;
+    }
+
+    const threads = await Thread.find(query)
       .populate("authorUserId", "username email")
       .populate("communityId", "name slug icon color")
+      .populate("subcategoryId", "name slug")
       .sort(sortOption)
       .skip(skip)
       .limit(parseInt(limit))
@@ -331,7 +338,7 @@ router.get("/communities/:communityId/threads", async (req, res) => {
       threadsWithData.sort((a, b) => b.voteScore - a.voteScore);
     }
 
-    const total = await Thread.countDocuments({ communityId });
+    const total = await Thread.countDocuments(query);
 
     res.json({
       threads: threadsWithData,
@@ -620,7 +627,7 @@ router.get("/communities/search/threads", async (req, res) => {
 router.post("/communities/:communityId/threads", async (req, res) => {
   try {
     const { communityId } = req.params;
-    const { authorUserId, authorRole, title, body } = req.body;
+    const { authorUserId, authorRole, title, body, subcategoryId, tags } = req.body;
 
     if (!authorUserId || !authorRole || !title || !body) {
       return res.status(400).json({
@@ -633,17 +640,33 @@ router.post("/communities/:communityId/threads", async (req, res) => {
       return res.status(404).json({ error: "Community not found" });
     }
 
+    // Validate subcategory if provided
+    if (subcategoryId) {
+      const subcategory = await Subcategory.findOne({
+        _id: subcategoryId,
+        parentCommunityId: communityId,
+      });
+      if (!subcategory) {
+        return res.status(404).json({
+          error: "Subcategory not found or does not belong to this community",
+        });
+      }
+    }
+
     const thread = await Thread.create({
       communityId,
       categoryId: communityId, // For backward compatibility
+      subcategoryId: subcategoryId || null,
       authorUserId,
       authorRole,
       title,
       body,
+      tags: tags || [],
     });
 
     const populatedThread = await Thread.findById(thread._id)
       .populate("communityId", "name slug icon color")
+      .populate("subcategoryId", "name slug")
       .populate("authorUserId", "username email")
       .lean();
 
@@ -757,6 +780,187 @@ router.post("/communities", async (req, res) => {
   } catch (error) {
     console.error("Error creating community:", error);
     res.status(500).json({ error: "Failed to create community" });
+  }
+});
+
+// Seed default subcategories for communities
+router.post("/communities/:communityId/subcategories/seed", async (req, res) => {
+  try {
+    const { communityId } = req.params;
+
+    const community = await Community.findById(communityId);
+    if (!community) {
+      return res.status(404).json({ error: "Community not found" });
+    }
+
+    // Define default subcategories for each community type
+    const defaultSubcategories = {
+      "cancer-support": [
+        { name: "Breast Cancer", tags: ["Breast Neoplasms", "Mammary Neoplasms", "Treatment", "Chemotherapy"] },
+        { name: "Lung Cancer", tags: ["Lung Neoplasms", "Carcinoma", "Radiotherapy", "Prognosis"] },
+        { name: "Prostate Cancer", tags: ["Prostatic Neoplasms", "Oncology", "Treatment Outcome"] },
+        { name: "Pancreatic Cancer", tags: ["Pancreatic Neoplasms", "Carcinoma", "Metastasis"] },
+        { name: "Colon Cancer", tags: ["Colonic Neoplasms", "Colorectal Neoplasms", "Screening"] },
+        { name: "Skin Cancer", tags: ["Skin Neoplasms", "Melanoma", "Diagnosis"] },
+        { name: "Ovarian Cancer", tags: ["Ovarian Neoplasms", "Gynecologic Neoplasms", "Treatment"] },
+        { name: "Blood Cancer", tags: ["Hematologic Neoplasms", "Leukemia", "Lymphoma", "Therapy"] },
+        { name: "Brain Cancer", tags: ["Brain Neoplasms", "Glioma", "Treatment Outcome"] },
+        { name: "Cancer Survivors", tags: ["Cancer Survivors", "Quality of Life", "Rehabilitation"] },
+      ],
+      "mental-health": [
+        { name: "Anxiety", tags: ["Anxiety Disorders", "Treatment", "Therapy", "Coping"] },
+        { name: "Depression", tags: ["Depressive Disorder", "Major Depressive Disorder", "Treatment Outcome"] },
+        { name: "Bipolar Disorder", tags: ["Bipolar Disorder", "Mood Disorders", "Pharmacological Therapy"] },
+        { name: "PTSD", tags: ["Stress Disorders, Post-Traumatic", "Trauma", "Treatment"] },
+        { name: "OCD", tags: ["Obsessive-Compulsive Disorder", "Therapy", "Behavior Therapy"] },
+        { name: "Schizophrenia", tags: ["Schizophrenia", "Psychotic Disorders", "Treatment"] },
+        { name: "Eating Disorders", tags: ["Feeding and Eating Disorders", "Anorexia", "Bulimia"] },
+        { name: "ADHD", tags: ["Attention Deficit Disorder with Hyperactivity", "Treatment"] },
+        { name: "Addiction", tags: ["Substance-Related Disorders", "Rehabilitation", "Recovery"] },
+        { name: "Self-Care & Coping", tags: ["Coping Behavior", "Self Care", "Quality of Life"] },
+      ],
+      "diabetes-management": [
+        { name: "Type 1 Diabetes", tags: ["Diabetes Mellitus, Type 1", "Insulin", "Treatment"] },
+        { name: "Type 2 Diabetes", tags: ["Diabetes Mellitus, Type 2", "Treatment", "Blood Glucose"] },
+        { name: "Insulin Management", tags: ["Insulin", "Blood Glucose Monitoring", "Hypoglycemia"] },
+        { name: "Diet & Nutrition", tags: ["Diet", "Nutrition", "Carbohydrates", "Blood Glucose"] },
+        { name: "Exercise", tags: ["Exercise", "Physical Activity", "Blood Glucose Control"] },
+        { name: "Complications", tags: ["Diabetic Complications", "Neuropathy", "Retinopathy"] },
+        { name: "Pregnancy & Diabetes", tags: ["Diabetes, Gestational", "Pregnancy Complications"] },
+        { name: "Technology & Devices", tags: ["Blood Glucose Self-Monitoring", "Insulin Infusion Systems"] },
+        { name: "Mental Health", tags: ["Quality of Life", "Coping", "Mental Health"] },
+        { name: "Research & Studies", tags: ["Clinical Trials", "Research", "Treatment Outcome"] },
+      ],
+      "heart-health": [
+        { name: "Coronary Artery Disease", tags: ["Coronary Artery Disease", "Atherosclerosis", "Treatment"] },
+        { name: "Heart Failure", tags: ["Heart Failure", "Treatment", "Prognosis"] },
+        { name: "Arrhythmia", tags: ["Arrhythmias, Cardiac", "Atrial Fibrillation", "Treatment"] },
+        { name: "High Blood Pressure", tags: ["Hypertension", "Blood Pressure", "Treatment"] },
+        { name: "Cholesterol", tags: ["Cholesterol", "Hypercholesterolemia", "Treatment"] },
+        { name: "Heart Attack", tags: ["Myocardial Infarction", "Treatment", "Rehabilitation"] },
+        { name: "Stroke", tags: ["Stroke", "Cerebrovascular Disorders", "Treatment"] },
+        { name: "Congenital Heart Disease", tags: ["Heart Defects, Congenital", "Treatment"] },
+        { name: "Cardiac Rehabilitation", tags: ["Cardiac Rehabilitation", "Exercise", "Recovery"] },
+        { name: "Prevention", tags: ["Primary Prevention", "Lifestyle", "Risk Factors"] },
+      ],
+      "general-health": [
+        { name: "Preventive Care", tags: ["Preventive Medicine", "Health Promotion", "Screening"] },
+        { name: "Nutrition", tags: ["Nutrition", "Diet", "Healthy Eating"] },
+        { name: "Fitness", tags: ["Exercise", "Physical Fitness", "Physical Activity"] },
+        { name: "Sleep", tags: ["Sleep", "Sleep Disorders", "Quality of Life"] },
+        { name: "Stress Management", tags: ["Stress", "Coping Behavior", "Mental Health"] },
+        { name: "Women's Health", tags: ["Women's Health", "Reproductive Health"] },
+        { name: "Men's Health", tags: ["Men's Health", "Health Promotion"] },
+        { name: "Aging", tags: ["Aging", "Geriatrics", "Quality of Life"] },
+        { name: "Vaccinations", tags: ["Vaccination", "Immunization", "Prevention"] },
+        { name: "Wellness", tags: ["Health Promotion", "Wellness", "Quality of Life"] },
+      ],
+      "nutrition-diet": [
+        { name: "Weight Management", tags: ["Obesity", "Weight Loss", "Diet"] },
+        { name: "Healthy Eating", tags: ["Nutrition", "Diet", "Healthy Diet"] },
+        { name: "Allergies & Intolerances", tags: ["Food Hypersensitivity", "Celiac Disease", "Diet"] },
+        { name: "Plant-Based Diets", tags: ["Diet, Vegetarian", "Nutrition"] },
+        { name: "Keto & Low-Carb", tags: ["Diet", "Ketogenic Diet", "Carbohydrates"] },
+        { name: "Mediterranean Diet", tags: ["Diet, Mediterranean", "Nutrition"] },
+        { name: "Meal Planning", tags: ["Nutrition", "Diet", "Meal Planning"] },
+        { name: "Supplements", tags: ["Dietary Supplements", "Vitamins", "Nutrition"] },
+        { name: "Cooking Tips", tags: ["Cooking", "Nutrition", "Diet"] },
+        { name: "Research", tags: ["Nutrition Research", "Clinical Trials", "Treatment Outcome"] },
+      ],
+      "fitness-exercise": [
+        { name: "Cardio Workouts", tags: ["Exercise", "Cardiovascular Fitness", "Physical Activity"] },
+        { name: "Strength Training", tags: ["Exercise", "Resistance Training", "Muscle Strength"] },
+        { name: "Yoga & Flexibility", tags: ["Yoga", "Exercise", "Flexibility"] },
+        { name: "Running", tags: ["Running", "Exercise", "Physical Fitness"] },
+        { name: "Weight Training", tags: ["Weight Lifting", "Exercise", "Muscle Strength"] },
+        { name: "Rehabilitation", tags: ["Rehabilitation", "Exercise Therapy", "Recovery"] },
+        { name: "Injury Prevention", tags: ["Athletic Injuries", "Prevention", "Exercise"] },
+        { name: "Sports Nutrition", tags: ["Sports Nutrition", "Nutrition", "Exercise"] },
+        { name: "Aging & Fitness", tags: ["Aging", "Exercise", "Physical Fitness"] },
+        { name: "Research", tags: ["Exercise Research", "Clinical Trials", "Treatment Outcome"] },
+      ],
+      "clinical-trials": [
+        { name: "Finding Trials", tags: ["Clinical Trials", "Research", "Recruitment"] },
+        { name: "Participant Experience", tags: ["Clinical Trials", "Patient Participation", "Quality of Life"] },
+        { name: "Safety & Ethics", tags: ["Clinical Trials", "Safety", "Ethics"] },
+        { name: "Trial Results", tags: ["Clinical Trials", "Treatment Outcome", "Research"] },
+        { name: "Cancer Trials", tags: ["Clinical Trials", "Neoplasms", "Oncology"] },
+        { name: "Rare Diseases", tags: ["Clinical Trials", "Rare Diseases", "Research"] },
+        { name: "Pediatric Trials", tags: ["Clinical Trials", "Pediatrics", "Research"] },
+        { name: "Treatment Options", tags: ["Clinical Trials", "Treatment", "Therapy"] },
+        { name: "Trial Phases", tags: ["Clinical Trials", "Research Design", "Treatment Outcome"] },
+        { name: "Advocacy", tags: ["Clinical Trials", "Patient Advocacy", "Research"] },
+      ],
+      "chronic-pain": [
+        { name: "Back Pain", tags: ["Back Pain", "Pain Management", "Treatment"] },
+        { name: "Arthritis", tags: ["Arthritis", "Pain", "Treatment"] },
+        { name: "Fibromyalgia", tags: ["Fibromyalgia", "Chronic Pain", "Treatment"] },
+        { name: "Neuropathic Pain", tags: ["Neuralgia", "Pain", "Treatment"] },
+        { name: "Pain Medications", tags: ["Analgesics", "Pain Management", "Pharmacological Therapy"] },
+        { name: "Alternative Therapies", tags: ["Complementary Therapies", "Pain Management"] },
+        { name: "Physical Therapy", tags: ["Physical Therapy", "Pain Management", "Rehabilitation"] },
+        { name: "Mental Health", tags: ["Chronic Pain", "Mental Health", "Coping"] },
+        { name: "Lifestyle Management", tags: ["Chronic Pain", "Quality of Life", "Self Care"] },
+        { name: "Research", tags: ["Chronic Pain", "Clinical Trials", "Treatment Outcome"] },
+      ],
+      "autoimmune-conditions": [
+        { name: "Rheumatoid Arthritis", tags: ["Arthritis, Rheumatoid", "Autoimmune Diseases", "Treatment"] },
+        { name: "Lupus", tags: ["Lupus Erythematosus, Systemic", "Autoimmune Diseases", "Treatment"] },
+        { name: "Multiple Sclerosis", tags: ["Multiple Sclerosis", "Autoimmune Diseases", "Treatment"] },
+        { name: "Type 1 Diabetes", tags: ["Diabetes Mellitus, Type 1", "Autoimmune Diseases", "Treatment"] },
+        { name: "Psoriasis", tags: ["Psoriasis", "Autoimmune Diseases", "Treatment"] },
+        { name: "Crohn's Disease", tags: ["Crohn Disease", "Inflammatory Bowel Diseases", "Treatment"] },
+        { name: "Hashimoto's", tags: ["Hashimoto Disease", "Autoimmune Diseases", "Thyroid Diseases"] },
+        { name: "Sjögren's Syndrome", tags: ["Sjogren's Syndrome", "Autoimmune Diseases", "Treatment"] },
+        { name: "Treatment Options", tags: ["Autoimmune Diseases", "Treatment", "Therapy"] },
+        { name: "Lifestyle & Coping", tags: ["Autoimmune Diseases", "Quality of Life", "Coping"] },
+      ],
+    };
+
+    const communitySubcategories = defaultSubcategories[community.slug] || [];
+    if (communitySubcategories.length === 0) {
+      return res.json({
+        ok: true,
+        message: "No default subcategories defined for this community",
+        subcategories: [],
+      });
+    }
+
+    const created = [];
+    for (const subcat of communitySubcategories) {
+      const slug = subcat.name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/(^-|-$)/g, "");
+
+      const existing = await Subcategory.findOne({
+        parentCommunityId: communityId,
+        slug,
+      });
+
+      if (!existing) {
+        const newSubcategory = await Subcategory.create({
+          name: subcat.name,
+          slug,
+          description: "",
+          parentCommunityId: communityId,
+          tags: subcat.tags || [],
+          isOfficial: true,
+        });
+        created.push(newSubcategory);
+      }
+    }
+
+    invalidateCache(`communities:${communityId}`);
+
+    res.json({
+      ok: true,
+      message: `Created ${created.length} subcategories`,
+      subcategories: created,
+    });
+  } catch (error) {
+    console.error("Error seeding subcategories:", error);
+    res.status(500).json({ error: "Failed to seed subcategories" });
   }
 });
 
@@ -875,6 +1079,269 @@ router.post("/communities/seed", async (req, res) => {
   } catch (error) {
     console.error("Error seeding communities:", error);
     res.status(500).json({ error: "Failed to seed communities" });
+  }
+});
+
+// ============================================
+// SUBCATEGORY ROUTES
+// ============================================
+
+// Get subcategories for a community
+router.get("/communities/:communityId/subcategories", async (req, res) => {
+  try {
+    const { communityId } = req.params;
+    const { search } = req.query;
+
+    let query = { parentCommunityId: communityId };
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: "i" } },
+        { description: { $regex: search, $options: "i" } },
+        { tags: { $elemMatch: { $regex: search, $options: "i" } } },
+      ];
+    }
+
+    const subcategories = await Subcategory.find(query)
+      .sort({ name: 1 })
+      .lean();
+
+    // Get thread counts for each subcategory
+    const subcategoryIds = subcategories.map((s) => s._id);
+    const threadCounts = await Thread.aggregate([
+      { $match: { subcategoryId: { $in: subcategoryIds } } },
+      { $group: { _id: "$subcategoryId", count: { $sum: 1 } } },
+    ]);
+    const threadCountMap = {};
+    threadCounts.forEach((item) => {
+      threadCountMap[item._id.toString()] = item.count;
+    });
+
+    const subcategoriesWithData = subcategories.map((subcategory) => ({
+      ...subcategory,
+      threadCount: threadCountMap[subcategory._id.toString()] || 0,
+    }));
+
+    res.json({ subcategories: subcategoriesWithData });
+  } catch (error) {
+    console.error("Error fetching subcategories:", error);
+    res.status(500).json({ error: "Failed to fetch subcategories" });
+  }
+});
+
+// Get a single subcategory by ID or slug
+router.get("/subcategories/:idOrSlug", async (req, res) => {
+  try {
+    const { idOrSlug } = req.params;
+    const { communityId } = req.query;
+
+    let subcategory;
+    if (mongoose.Types.ObjectId.isValid(idOrSlug)) {
+      subcategory = await Subcategory.findById(idOrSlug)
+        .populate("parentCommunityId", "name slug icon color")
+        .lean();
+    } else {
+      const query = { slug: idOrSlug };
+      if (communityId) {
+        query.parentCommunityId = communityId;
+      }
+      subcategory = await Subcategory.findOne(query)
+        .populate("parentCommunityId", "name slug icon color")
+        .lean();
+    }
+
+    if (!subcategory) {
+      return res.status(404).json({ error: "Subcategory not found" });
+    }
+
+    // Get thread count
+    const threadCount = await Thread.countDocuments({
+      subcategoryId: subcategory._id,
+    });
+
+    res.json({
+      subcategory: {
+        ...subcategory,
+        threadCount,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching subcategory:", error);
+    res.status(500).json({ error: "Failed to fetch subcategory" });
+  }
+});
+
+// Create a subcategory (users can create subcategories)
+router.post("/communities/:communityId/subcategories", async (req, res) => {
+  try {
+    const { communityId } = req.params;
+    const { name, description, tags, createdBy } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: "name is required" });
+    }
+
+    // Check if community exists
+    const community = await Community.findById(communityId);
+    if (!community) {
+      return res.status(404).json({ error: "Community not found" });
+    }
+
+    // Generate slug from name
+    const slug = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "");
+
+    // Check if similar subcategory already exists (duplicate checking)
+    const existing = await Subcategory.findOne({
+      parentCommunityId: communityId,
+      $or: [
+        { slug },
+        {
+          name: { $regex: new RegExp(`^${name.trim()}$`, "i") },
+        },
+        // Check for similar names (normalized)
+        {
+          name: {
+            $regex: new RegExp(
+              name
+                .trim()
+                .toLowerCase()
+                .replace(/[^a-z0-9]/g, ".*"),
+              "i"
+            ),
+          },
+        },
+      ],
+    });
+
+    if (existing) {
+      // Redirect user to existing subcategory
+      return res.status(409).json({
+        error: "A similar subcategory already exists",
+        existingSubcategory: existing,
+        redirect: true,
+      });
+    }
+
+    // Validate name length
+    if (name.trim().length < 2) {
+      return res.status(400).json({
+        error: "Subcategory name must be at least 2 characters",
+      });
+    }
+
+    if (name.trim().length > 100) {
+      return res.status(400).json({
+        error: "Subcategory name must be less than 100 characters",
+      });
+    }
+
+    const subcategory = await Subcategory.create({
+      name: name.trim(),
+      slug,
+      description: description?.trim() || "",
+      parentCommunityId: communityId,
+      tags: tags || [], // MeSH terminology tags
+      createdBy,
+      isOfficial: false,
+    });
+
+    invalidateCache(`communities:${communityId}`);
+
+    res.json({
+      ok: true,
+      subcategory,
+      message: "Subcategory created successfully",
+    });
+  } catch (error) {
+    if (error.code === 11000) {
+      // Duplicate key error
+      return res.status(409).json({
+        error: "A subcategory with this name already exists in this community",
+      });
+    }
+    console.error("Error creating subcategory:", error);
+    res.status(500).json({ error: "Failed to create subcategory" });
+  }
+});
+
+// Get MeSH terminology suggestions for tags (placeholder - would integrate with MeSH API)
+router.get("/mesh/suggestions", async (req, res) => {
+  try {
+    const { term } = req.query;
+
+    if (!term || term.trim().length < 2) {
+      return res.json({ suggestions: [] });
+    }
+
+    // Placeholder for MeSH API integration
+    // In production, this would call the MeSH API:
+    // https://id.nlm.nih.gov/mesh/query?label={term}
+    // For now, return common medical terms based on the query
+
+    const commonMeSHTerms = {
+      cancer: [
+        "Neoplasms",
+        "Carcinoma",
+        "Oncology",
+        "Tumor",
+        "Metastasis",
+        "Chemotherapy",
+        "Radiotherapy",
+      ],
+      treatment: [
+        "Therapy",
+        "Treatment",
+        "Medical Treatment",
+        "Pharmacological Therapy",
+        "Surgical Procedures",
+      ],
+      symptoms: [
+        "Signs and Symptoms",
+        "Pain",
+        "Fatigue",
+        "Side Effects",
+        "Adverse Effects",
+      ],
+      outcomes: [
+        "Treatment Outcome",
+        "Patient Outcome Assessment",
+        "Prognosis",
+        "Survival Rate",
+      ],
+      diagnosis: [
+        "Diagnosis",
+        "Diagnostic Imaging",
+        "Laboratory Techniques and Procedures",
+        "Biopsy",
+      ],
+    };
+
+    const normalizedTerm = term.toLowerCase().trim();
+    let suggestions = [];
+
+    // Simple keyword matching for common terms
+    for (const [key, values] of Object.entries(commonMeSHTerms)) {
+      if (normalizedTerm.includes(key) || key.includes(normalizedTerm)) {
+        suggestions = [...suggestions, ...values];
+      }
+    }
+
+    // Filter suggestions by term match
+    if (suggestions.length === 0) {
+      suggestions = Object.values(commonMeSHTerms)
+        .flat()
+        .filter((t) => t.toLowerCase().includes(normalizedTerm));
+    }
+
+    // Remove duplicates and limit to 10
+    suggestions = [...new Set(suggestions)].slice(0, 10);
+
+    res.json({ suggestions });
+  } catch (error) {
+    console.error("Error fetching MeSH suggestions:", error);
+    res.status(500).json({ error: "Failed to fetch MeSH suggestions" });
   }
 });
 
