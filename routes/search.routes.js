@@ -5,6 +5,7 @@ import { searchORCID } from "../services/orcid.service.js";
 import { findResearchersWithGemini } from "../services/geminiExperts.service.js";
 import { searchGoogleScholarPublications } from "../services/googleScholar.service.js";
 import { getExpertProfile } from "../services/expertProfile.service.js";
+import { searchVerifiedExpertsV2 } from "../services/expertDiscoveryV2.service.js";
 import {
   fetchTrialById,
   fetchPublicationById,
@@ -26,7 +27,11 @@ import {
 import { Profile } from "../models/Profile.js";
 import { User } from "../models/User.js";
 import { parseQuery } from "../utils/queryParser.js";
-import { extractBiomarkers } from "../services/medicalTerminology.service.js";
+import {
+  extractBiomarkers,
+  expandQueryWithSynonyms,
+  mapToMeSHTerminology,
+} from "../services/medicalTerminology.service.js";
 
 // Browser-based search limit system (strict 6 searches per device/browser)
 // Uses deviceId from localStorage (survives IP changes, proxies, browser restarts)
@@ -39,6 +44,204 @@ import {
 } from "../middleware/searchLimit.js";
 
 const router = Router();
+
+const PUBLICATION_STOP_WORDS = new Set([
+  "the",
+  "a",
+  "an",
+  "and",
+  "or",
+  "but",
+  "in",
+  "on",
+  "at",
+  "to",
+  "for",
+  "of",
+  "with",
+  "by",
+]);
+
+function tokenizeForRelevance(text = "") {
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, " ")
+    .split(/\s+/)
+    .filter((term) => term.length > 2 && !PUBLICATION_STOP_WORDS.has(term));
+}
+
+function buildATMQuery(rawQuery = "") {
+  const hasFieldTags = /\[[A-Za-z]{2,}\]/.test(rawQuery || "");
+  const parsedQuery = rawQuery ? parseQuery(rawQuery) : "";
+  const atmParts = [];
+
+  if (rawQuery && !hasFieldTags) {
+    const meshMapped = mapToMeSHTerminology(rawQuery);
+    const synonymExpanded = expandQueryWithSynonyms(rawQuery);
+
+    if (meshMapped && meshMapped !== rawQuery) {
+      atmParts.push(`${meshMapped} [MH]`);
+    }
+    if (synonymExpanded && synonymExpanded !== rawQuery) {
+      atmParts.push(synonymExpanded);
+    }
+  }
+
+  const atmQuery =
+    atmParts.length > 0
+      ? [parsedQuery || rawQuery, ...atmParts]
+          .filter(Boolean)
+          .map((p) => `(${p})`)
+          .join(" OR ")
+      : parsedQuery || rawQuery;
+
+  // Build a term list for relevance scoring
+  // Only use original query terms (not expanded synonyms) for relevance scoring
+  // This matches trials backend approach - we want to score against what user actually typed
+  const queryTerms = tokenizeForRelevance(rawQuery);
+
+  return {
+    pubmedQuery: atmQuery,
+    queryTerms: queryTerms,
+    rawQueryLower: (rawQuery || "").toLowerCase().trim(),
+    hasFieldTags,
+  };
+}
+
+function countTermHits(term, text = "") {
+  if (!term || !text) return 0;
+  const safe = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`\\b${safe}\\b`, "gi");
+  const matches = text.match(regex);
+  return matches ? matches.length : 0;
+}
+
+function calculatePublicationRelevanceSignals(pub, queryMeta) {
+  if (!queryMeta?.queryTerms?.length) {
+    return {
+      queryRelevanceScore: 0,
+      queryMatchCount: 0,
+      queryTermCount: 0,
+      significantTermMatches: 0,
+      recencyWeight: 0,
+      hasNctLink: false,
+    };
+  }
+
+  const title = (pub.title || "").toLowerCase();
+  const abstract = (pub.abstract || "").toLowerCase();
+  const keywords = Array.isArray(pub.keywords)
+    ? pub.keywords.join(" ").toLowerCase()
+    : "";
+  const searchText = `${title} ${abstract} ${keywords}`;
+
+  const hasNctLink =
+    /nct\d{8}/i.test(pub.abstract || "") ||
+    /nct\d{8}/i.test(pub.title || "") ||
+    /nct\d{8}/i.test(keywords);
+
+  const nowYear = new Date().getFullYear();
+  const pubYear = parseInt(pub.year, 10);
+  const yearsOld =
+    Number.isInteger(pubYear) && pubYear > 1800 ? nowYear - pubYear : null;
+  const recencyWeight =
+    yearsOld === null
+      ? 0.2
+      : yearsOld <= 2
+      ? 1
+      : yearsOld <= 5
+      ? 0.7
+      : yearsOld <= 10
+      ? 0.4
+      : 0.15;
+
+  // Check for exact phrase match first (highest priority) - like trials backend
+  const exactPhraseMatch =
+    queryMeta.rawQueryLower && searchText.includes(queryMeta.rawQueryLower);
+
+  let matchCount = 0;
+  let significantTermMatches = 0;
+
+  if (exactPhraseMatch) {
+    // If exact phrase matches, count all terms as matched
+    matchCount = queryMeta.queryTerms.length;
+    significantTermMatches = queryMeta.queryTerms.length;
+  } else {
+    // Use word boundaries for more precise matching to avoid false positives
+    // Match trials backend approach exactly
+    for (const term of queryMeta.queryTerms) {
+      // Use word boundary regex to match whole words only
+      const termRegex = new RegExp(
+        `\\b${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+        "i"
+      );
+      if (termRegex.test(searchText)) {
+        matchCount++;
+        // Consider it significant if it appears in title or keywords (not just abstract)
+        if (termRegex.test(title) || termRegex.test(keywords)) {
+          significantTermMatches++;
+        }
+      }
+    }
+  }
+
+  const termCount = queryMeta.queryTerms.length;
+
+  // Calculate relevance score with stricter weighting (matching trials backend):
+  // - Exact phrase match = 1.0 (perfect match)
+  // - All terms match in title/keywords = 0.95+ (high relevance)
+  // - Most terms match in title/keywords = 0.85+ (good relevance)
+  // - All terms match but only in abstract = 0.5-0.7 (lower relevance - may be false positive)
+  // - Partial matches = much lower scores
+  let queryRelevanceScore = 0;
+  if (exactPhraseMatch) {
+    queryRelevanceScore = 1.0;
+  } else if (termCount > 0) {
+    const allTermsMatch = matchCount === termCount;
+    const significantRatio = significantTermMatches / termCount;
+    const matchRatio = matchCount / termCount;
+
+    if (allTermsMatch && significantRatio >= 0.6) {
+      // All terms matched and at least 60% are in title/keywords - very relevant
+      queryRelevanceScore = 0.85 + significantRatio * 0.15; // 0.94 - 1.0
+    } else if (allTermsMatch && significantRatio >= 0.4) {
+      // All terms matched and at least 40% in title/keywords - good relevance
+      queryRelevanceScore = 0.75 + significantRatio * 0.1; // 0.79 - 0.85
+    } else if (allTermsMatch && significantRatio > 0) {
+      // All terms matched but mostly in abstract - moderate relevance (may filter later)
+      queryRelevanceScore = 0.5 + significantRatio * 0.2; // 0.5 - 0.7
+    } else if (allTermsMatch) {
+      // All terms matched but NONE in title/keywords - likely false positive
+      queryRelevanceScore = 0.3; // Very low score
+    } else if (matchRatio >= 0.75) {
+      // Most terms (75%+) matched
+      queryRelevanceScore = 0.5 + significantRatio * 0.3; // 0.5 - 0.8
+    } else if (matchRatio >= 0.5) {
+      // Half or more terms matched
+      queryRelevanceScore = 0.3 + significantRatio * 0.3; // 0.3 - 0.6
+    } else {
+      // Less than half matched - low relevance
+      queryRelevanceScore = matchRatio * 0.5; // 0.0 - 0.25
+    }
+
+    // Add small boosts for recency and NCT linkage (but don't override strict relevance)
+    if (queryRelevanceScore >= 0.5) {
+      // Only boost if already relevant
+      const recencyBoost = recencyWeight * 0.05; // Small boost for recent papers
+      const nctBoost = hasNctLink ? 0.05 : 0; // Small boost for NCT linkage
+      queryRelevanceScore = Math.min(1.0, queryRelevanceScore + recencyBoost + nctBoost);
+    }
+  }
+
+  return {
+    queryRelevanceScore,
+    queryMatchCount: matchCount,
+    queryTermCount: termCount,
+    significantTermMatches,
+    recencyWeight,
+    hasNctLink,
+  };
+}
 
 router.get("/search/trials", async (req, res) => {
   try {
@@ -310,13 +513,12 @@ router.get("/search/publications", async (req, res) => {
       pageSize,
     });
 
-    // For publications, build query string
-    // The query may already contain field tags like [AU], [TI], etc. from advanced search
-    // Parse query to handle Google Scholar operators and minus sign NOT
-    let pubmedQuery = q ? parseQuery(q) : "";
+    // Build query with ATM-style expansion (MeSH + synonyms) unless user forces field tags
+    const atmQueryMeta = buildATMQuery(q || "");
+    let pubmedQuery = atmQueryMeta.pubmedQuery;
 
     // Add location (country) to query if provided and not already in advanced query
-    if (location && !pubmedQuery.includes("[") && !pubmedQuery.includes("]")) {
+    if (location && !atmQueryMeta.hasFieldTags) {
       // Only add location if it's a simple query (not advanced search with field tags)
       pubmedQuery = `${pubmedQuery} ${location}`.trim();
     }
@@ -389,10 +591,62 @@ router.get("/search/publications", async (req, res) => {
         })
       : allResults;
 
-    // Sort by match percentage (descending - highest first) before pagination
-    const sortedResults = resultsWithMatch.sort(
-      (a, b) => (b.matchPercentage || -1) - (a.matchPercentage || -1)
-    );
+    // Calculate query relevance score for each publication (PRIMARY ranking factor)
+    // This ensures results match what the user actually searched for (matching trials backend)
+    let scoredResults;
+    if (q) {
+      scoredResults = resultsWithMatch.map((publication) => {
+        const signals = calculatePublicationRelevanceSignals(
+          publication,
+          atmQueryMeta
+        );
+        return { ...publication, ...signals };
+      });
+    } else {
+      // If no query, set relevance to 0 (will be sorted by other factors)
+      scoredResults = resultsWithMatch.map((publication) => ({
+        ...publication,
+        queryRelevanceScore: 0,
+        queryMatchCount: 0,
+        queryTermCount: 0,
+        significantTermMatches: 0,
+        recencyWeight: 0,
+        hasNctLink: false,
+      }));
+    }
+
+    // Filter out results with very low query relevance (likely false positives)
+    // Only keep results that have at least 0.5 relevance or exact phrase match (matching trials backend)
+    if (q) {
+      scoredResults = scoredResults.filter((publication) => {
+        const relevance = publication.queryRelevanceScore || 0;
+        // Keep if: exact phrase match (1.0), or relevance >= 0.5, or no query provided
+        return relevance >= 0.5 || relevance === 1.0;
+      });
+    }
+
+    // Layer 5: Rank by query relevance FIRST, then other factors
+    // Sort priority: Query relevance > NCT linkage > recency > profile match (matching trials backend)
+    const sortedResults = scoredResults.sort((a, b) => {
+      // First: Query relevance (PRIMARY - most important)
+      const aQuery = a.queryRelevanceScore || 0;
+      const bQuery = b.queryRelevanceScore || 0;
+      // Use tighter threshold - 0.05 for more precise sorting (matching trials backend)
+      if (Math.abs(bQuery - aQuery) > 0.05) return bQuery - aQuery; // Significant difference
+
+      // Second: NCT linkage (boost for publications linking to clinical trials)
+      const aNct = a.hasNctLink ? 1 : 0;
+      const bNct = b.hasNctLink ? 1 : 0;
+      if (bNct !== aNct) return bNct - aNct;
+
+      // Third: Recency (recent publications get slight boost)
+      const aRecency = a.recencyWeight || 0;
+      const bRecency = b.recencyWeight || 0;
+      if (Math.abs(bRecency - aRecency) > 0.1) return bRecency - aRecency;
+
+      // Fourth: Profile match percentage (user's conditions/keywords match)
+      return (b.matchPercentage || -1) - (a.matchPercentage || -1);
+    });
 
     // Simplify titles for all publications in parallel (only for the batch we fetched)
     // This adds simplified titles to each publication object
@@ -887,6 +1141,58 @@ router.get("/search/experts/platform", async (req, res) => {
     console.error("Error searching platform experts:", error);
     res.status(500).json({
       error: "Failed to search platform experts. Please try again later.",
+      results: [],
+    });
+  }
+});
+
+// New pipeline: verified experts (Gemini candidate names -> OpenAlex + Semantic Scholar verification -> metric scoring)
+router.get("/search/experts/v2", async (req, res) => {
+  try {
+    // Check search limit for anonymous users (browser-based deviceId)
+    if (!req.user) {
+      const limitCheck = await checkSearchLimit(req);
+      if (!limitCheck.canSearch) {
+        return res.status(429).json({
+          error:
+            limitCheck.message ||
+            "You've used all your free searches! Sign in to continue searching.",
+          remaining: 0,
+          results: [],
+          showSignUpPrompt: limitCheck.showSignUpPrompt,
+        });
+      }
+    }
+
+    const { q = "", location, limit = "10" } = req.query;
+    const parsedLimit = Math.max(5, Math.min(10, parseInt(limit, 10) || 10));
+
+    const results = await searchVerifiedExpertsV2({
+      q,
+      location,
+      limit: parsedLimit,
+    });
+
+    // Increment search count for anonymous users after successful search
+    if (!req.user) {
+      await incrementSearchCount(req);
+    }
+
+    // Get remaining searches for anonymous users
+    let remaining = null;
+    if (!req.user) {
+      const limitCheck = await checkSearchLimit(req);
+      remaining = limitCheck.remaining;
+    }
+
+    return res.json({
+      results,
+      ...(remaining !== null && { remaining }),
+    });
+  } catch (error) {
+    console.error("Error searching experts (v2):", error);
+    return res.status(500).json({
+      error: "Failed to search verified experts. Please try again later.",
       results: [],
     });
   }

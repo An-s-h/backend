@@ -175,7 +175,11 @@ async function findAssociatedTrials(expertName, researchInterests) {
   try {
     // Search for trials related to their research interests
     const query = researchInterests.slice(0, 2).join(" ") || expertName;
-    const trials = await searchClinicalTrials({ q: query, limit: 5 });
+    const result = await searchClinicalTrials({ q: query, pageSize: 5 });
+
+    // searchClinicalTrials returns { items, totalCount, hasMore }
+    // Extract the items array
+    const trials = result?.items || [];
 
     // Filter trials that might be related (simple keyword matching)
     const expertNameLower = expertName.toLowerCase();

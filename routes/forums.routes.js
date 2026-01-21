@@ -49,6 +49,20 @@ function invalidateCache(pattern) {
   }
 }
 
+// Normalize condition tags coming from queries/bodies
+function normalizeConditions(input) {
+  if (!input) return [];
+  const list = Array.isArray(input)
+    ? input
+    : String(input)
+        .split(",")
+        .map((item) => item.trim());
+  return list
+    .map((item) => item?.trim())
+    .filter(Boolean)
+    .slice(0, 10); // avoid excessively long payloads
+}
+
 // Get all categories with thread counts
 router.get("/forums/categories", async (_req, res) => {
   const cacheKey = "forums:categories";
@@ -83,14 +97,24 @@ router.get("/forums/categories", async (_req, res) => {
 
 // Get threads with populated data
 router.get("/forums/threads", async (req, res) => {
-  const { categoryId } = req.query;
-  const cacheKey = `forums:threads:${categoryId || "all"}`;
+  const { categoryId, condition } = req.query;
+  const normalizedConditions = normalizeConditions(condition);
+  const conditionKey =
+    normalizedConditions.length > 0
+      ? normalizedConditions.join("|").toLowerCase()
+      : "all";
+  const cacheKey = `forums:threads:${categoryId || "all"}:${conditionKey}`;
   const cached = getCache(cacheKey);
   if (cached) {
     return res.json({ threads: cached });
   }
 
-  const q = categoryId ? { categoryId } : {};
+  const q = {
+    ...(categoryId ? { categoryId } : {}),
+    ...(normalizedConditions.length > 0
+      ? { conditions: { $in: normalizedConditions } }
+      : {}),
+  };
   const threads = await Thread.find(q)
     .populate("categoryId", "name slug")
     .populate("authorUserId", "username email")
@@ -201,18 +225,27 @@ router.get("/forums/threads/:threadId", async (req, res) => {
 
 // Create new thread
 router.post("/forums/threads", async (req, res) => {
-  const { categoryId, authorUserId, authorRole, title, body } = req.body || {};
+  const {
+    categoryId,
+    authorUserId,
+    authorRole,
+    title,
+    body,
+    conditions,
+  } = req.body || {};
   if (!categoryId || !authorUserId || !authorRole || !title || !body) {
     return res.status(400).json({
       error: "categoryId, authorUserId, authorRole, title, body required",
     });
   }
+  const normalizedConditions = normalizeConditions(conditions);
   const thread = await Thread.create({
     categoryId,
     authorUserId,
     authorRole,
     title,
     body,
+    conditions: normalizedConditions,
   });
 
   const populatedThread = await Thread.findById(thread._id)
@@ -256,8 +289,7 @@ router.post("/forums/threads", async (req, res) => {
   }
 
   // Invalidate thread list cache for this category
-  invalidateCache(`forums:threads:${categoryId}`);
-  invalidateCache("forums:threads:all");
+  invalidateCache("forums:threads:");
   // Also invalidate categories cache to update thread counts
   invalidateCache("forums:categories");
 

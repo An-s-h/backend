@@ -49,6 +49,20 @@ function invalidateCache(pattern) {
   }
 }
 
+// Normalize condition tags from query/body
+function normalizeConditions(input) {
+  if (!input) return [];
+  const list = Array.isArray(input)
+    ? input
+    : String(input)
+        .split(",")
+        .map((item) => item.trim());
+  return list
+    .map((item) => item?.trim())
+    .filter(Boolean)
+    .slice(0, 10);
+}
+
 // ============================================
 // COMMUNITY ROUTES
 // ============================================
@@ -291,7 +305,13 @@ router.get("/communities/user/:userId/following", async (req, res) => {
 router.get("/communities/:communityId/threads", async (req, res) => {
   try {
     const { communityId } = req.params;
-    const { sort = "recent", page = 1, limit = 20, subcategoryId } = req.query;
+    const {
+      sort = "recent",
+      page = 1,
+      limit = 20,
+      subcategoryId,
+      condition,
+    } = req.query;
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
@@ -302,7 +322,14 @@ router.get("/communities/:communityId/threads", async (req, res) => {
       // Will sort by vote score after aggregation
     }
 
-    let query = { communityId };
+    const normalizedConditions = normalizeConditions(condition);
+
+    let query = {
+      communityId,
+      ...(normalizedConditions.length > 0
+        ? { conditions: { $in: normalizedConditions } }
+        : {}),
+    };
     if (subcategoryId) {
       query.subcategoryId = subcategoryId;
     }
@@ -627,7 +654,15 @@ router.get("/communities/search/threads", async (req, res) => {
 router.post("/communities/:communityId/threads", async (req, res) => {
   try {
     const { communityId } = req.params;
-    const { authorUserId, authorRole, title, body, subcategoryId, tags } = req.body;
+    const {
+      authorUserId,
+      authorRole,
+      title,
+      body,
+      subcategoryId,
+      tags,
+      conditions,
+    } = req.body;
 
     if (!authorUserId || !authorRole || !title || !body) {
       return res.status(400).json({
@@ -653,6 +688,8 @@ router.post("/communities/:communityId/threads", async (req, res) => {
       }
     }
 
+    const normalizedConditions = normalizeConditions(conditions);
+
     const thread = await Thread.create({
       communityId,
       categoryId: communityId, // For backward compatibility
@@ -662,6 +699,7 @@ router.post("/communities/:communityId/threads", async (req, res) => {
       title,
       body,
       tags: tags || [],
+      conditions: normalizedConditions,
     });
 
     const populatedThread = await Thread.findById(thread._id)
@@ -788,6 +826,13 @@ router.post("/communities/:communityId/subcategories/seed", async (req, res) => 
   try {
     const { communityId } = req.params;
 
+    // Prevent mongoose CastError on invalid ObjectId
+    if (!mongoose.Types.ObjectId.isValid(communityId)) {
+      return res.status(400).json({
+        error: "Invalid communityId",
+      });
+    }
+
     const community = await Community.findById(communityId);
     if (!community) {
       return res.status(404).json({ error: "Community not found" });
@@ -832,6 +877,12 @@ router.post("/communities/:communityId/subcategories/seed", async (req, res) => 
         { name: "Research & Studies", tags: ["Clinical Trials", "Research", "Treatment Outcome"] },
       ],
       "heart-health": [
+        // Patient-friendly Cardiology subcategories
+        { name: "Symptoms", tags: ["Chest Pain", "Dyspnea", "Palpitations", "Dizziness"] },
+        { name: "Monitoring", tags: ["Blood Pressure", "Heart Rate", "Electrocardiography", "ECG"] },
+        { name: "Treatment", tags: ["Beta-Blockers", "Statins", "Anticoagulants", "Stents"] },
+        { name: "Lifestyle", tags: ["Diet, Sodium-Restricted", "Exercise", "Stress Reduction", "Lifestyle"] },
+        { name: "Recovery", tags: ["Cardiac Rehabilitation", "Myocardial Infarction", "Recovery of Function"] },
         { name: "Coronary Artery Disease", tags: ["Coronary Artery Disease", "Atherosclerosis", "Treatment"] },
         { name: "Heart Failure", tags: ["Heart Failure", "Treatment", "Prognosis"] },
         { name: "Arrhythmia", tags: ["Arrhythmias, Cardiac", "Atrial Fibrillation", "Treatment"] },
@@ -880,6 +931,11 @@ router.post("/communities/:communityId/subcategories/seed", async (req, res) => 
         { name: "Research", tags: ["Exercise Research", "Clinical Trials", "Treatment Outcome"] },
       ],
       "clinical-trials": [
+        // Cancer research / trials patient-friendly subcategories
+        { name: "Enrollment", tags: ["Clinical Trials", "Patient Selection", "Recruitment"] },
+        { name: "Trial Phases", tags: ["Clinical Trials, Phase I", "Clinical Trials, Phase II", "Clinical Trials, Phase III"] },
+        { name: "Concerns", tags: ["Informed Consent", "Placebos", "Adverse Effects"] },
+        { name: "Experience", tags: ["Patient Participation", "Follow-Up Studies", "Monitoring"] },
         { name: "Finding Trials", tags: ["Clinical Trials", "Research", "Recruitment"] },
         { name: "Participant Experience", tags: ["Clinical Trials", "Patient Participation", "Quality of Life"] },
         { name: "Safety & Ethics", tags: ["Clinical Trials", "Safety", "Ethics"] },
