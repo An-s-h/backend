@@ -21,6 +21,7 @@ import meetingRequestsRoutes from "./routes/meeting-requests.routes.js";
 import connectionRequestsRoutes from "./routes/connection-requests.routes.js";
 import adminRoutes from "./routes/admin.routes.js";
 import waitlistRoutes from "./routes/waitlist.routes.js";
+import uploadRoutes from "./routes/upload.routes.js";
 import { optionalSession } from "./middleware/auth.js";
 import { searchLimitMiddleware } from "./middleware/searchLimit.js";
 import { ForumCategory } from "./models/ForumCategory.js";
@@ -85,6 +86,7 @@ app.use("/api", meetingRequestsRoutes);
 app.use("/api", connectionRequestsRoutes);
 app.use("/api", adminRoutes);
 app.use("/api", waitlistRoutes);
+app.use("/api", uploadRoutes);
 
 const PORT = process.env.PORT || 5000;
 

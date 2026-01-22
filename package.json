@@ -17,14 +17,18 @@
     "@google/generative-ai": "^0.21.0",
     "axios": "^1.13.1",
     "bcryptjs": "^3.0.3",
+    "cloudinary": "^2.9.0",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
     "dom-parser": "^1.1.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "jsdom": "^27.0.1",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.19.2",
+    "multer": "^2.0.2",
     "nodemailer": "^7.0.12",
+    "xml2js": "^0.6.2",
     "xmldom": "^0.6.0"
   },
   "devDependencies": {

@@ -213,6 +213,18 @@ router.post("/posts", verifySession, async (req, res) => {
         .json({ error: "postType must be 'patient' or 'researcher'" });
     }
 
+    // Role-based validation: patients can only post in patient posts, researchers can only post in researcher posts
+    if (authorRole === "patient" && postType !== "patient") {
+      return res.status(403).json({ 
+        error: "Patients can only create posts in patient posts" 
+      });
+    }
+    if (authorRole === "researcher" && postType !== "researcher") {
+      return res.status(403).json({ 
+        error: "Researchers can only create posts in researcher posts" 
+      });
+    }
+
     // Validate community if provided
     if (communityId) {
       const community = await Community.findById(communityId);
