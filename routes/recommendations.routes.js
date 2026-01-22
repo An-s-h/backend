@@ -37,13 +37,39 @@ function setRecommendationsCache(userId, value) {
   // Cleanup old cache entries if cache gets too large (prevent memory leaks)
   if (recommendationsCache.size > 100) {
     const now = Date.now();
+    const keysToDelete = [];
     for (const [k, v] of recommendationsCache.entries()) {
       if (now > v.expires) {
-        recommendationsCache.delete(k);
+        keysToDelete.push(k);
       }
+    }
+    // Delete expired entries
+    keysToDelete.forEach((k) => recommendationsCache.delete(k));
+    
+    // If still too large, remove oldest entries (FIFO)
+    if (recommendationsCache.size > 100) {
+      const entries = Array.from(recommendationsCache.entries());
+      entries.sort((a, b) => a[1].expires - b[1].expires);
+      const toRemove = entries.slice(0, entries.length - 100);
+      toRemove.forEach(([k]) => recommendationsCache.delete(k));
     }
   }
 }
+
+// Periodic cleanup of expired cache entries (every 10 minutes)
+setInterval(() => {
+  const now = Date.now();
+  const keysToDelete = [];
+  for (const [k, v] of recommendationsCache.entries()) {
+    if (now > v.expires) {
+      keysToDelete.push(k);
+    }
+  }
+  keysToDelete.forEach((k) => recommendationsCache.delete(k));
+  if (keysToDelete.length > 0) {
+    console.log(`Cleaned up ${keysToDelete.length} expired cache entries`);
+  }
+}, 1000 * 60 * 10); // Every 10 minutes
 
 // Get all researchers (for dashboards)
 router.get("/researchers", async (req, res) => {
