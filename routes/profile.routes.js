@@ -1,4 +1,5 @@
 import { Router } from "express";
+import mongoose from "mongoose";
 import { Profile } from "../models/Profile.js";
 import { User } from "../models/User.js";
 import { Thread } from "../models/Thread.js";
@@ -201,6 +202,106 @@ router.get("/curalink-expert/profile/:userId", async (req, res) => {
     // Add forums to profile data
     profileData.forums = formattedForums;
     profileData.totalForums = formattedForums.length;
+
+    // Fetch forums where expert has participated (replied to)
+    // Convert userId to ObjectId for proper matching (handle both string and ObjectId)
+    let userIdObjectId;
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      userIdObjectId = new mongoose.Types.ObjectId(userId);
+    } else {
+      userIdObjectId = userId; // Fallback if not valid ObjectId
+    }
+
+    // Find all replies by this expert
+    const expertReplies = await Reply.find({ 
+      $or: [
+        { authorUserId: userIdObjectId },
+        { authorUserId: userId } // Also try string version for compatibility
+      ]
+    })
+      .select("threadId")
+      .lean();
+
+    // Get unique thread IDs
+    const participatedThreadIds = [
+      ...new Set(expertReplies.map((reply) => reply.threadId.toString())),
+    ];
+
+    // If no replies found, set empty array
+    if (participatedThreadIds.length === 0) {
+      profileData.participatedForums = [];
+      profileData.totalParticipatedForums = 0;
+    } else {
+      // Convert thread IDs to ObjectIds for query
+      const threadObjectIds = participatedThreadIds
+        .filter(id => mongoose.Types.ObjectId.isValid(id))
+        .map(id => new mongoose.Types.ObjectId(id));
+
+      // Fetch threads where expert has participated (INCLUDE all forums where they replied, even if they created them)
+      const participatedForums = threadObjectIds.length > 0 ? await Thread.find({
+        _id: { $in: threadObjectIds },
+      })
+        .populate("categoryId", "name slug")
+        .populate("authorUserId", "username email")
+        .sort({ createdAt: -1 })
+        .limit(20)
+        .lean() : [];
+
+      // Get reply counts for participated forums
+      const participatedForumIds = participatedForums.map((f) => f._id);
+      const participatedReplyCounts = participatedForumIds.length > 0 ? await Reply.aggregate([
+        { $match: { threadId: { $in: participatedForumIds } } },
+        { $group: { _id: "$threadId", count: { $sum: 1 } } },
+      ]) : [];
+
+      const participatedCountMap = {};
+      participatedReplyCounts.forEach((item) => {
+        participatedCountMap[item._id.toString()] = item.count;
+      });
+
+      // Get count of expert's replies in each participated forum
+      const expertReplyCounts = participatedForumIds.length > 0 ? await Reply.aggregate([
+        {
+          $match: {
+            threadId: { $in: participatedForumIds },
+            $or: [
+              { authorUserId: userIdObjectId },
+              { authorUserId: userId } // Also try string version for compatibility
+            ]
+          },
+        },
+        { $group: { _id: "$threadId", count: { $sum: 1 } } },
+      ]) : [];
+
+      const expertReplyCountMap = {};
+      expertReplyCounts.forEach((item) => {
+        expertReplyCountMap[item._id.toString()] = item.count;
+      });
+
+      // Format participated forums for frontend
+      const formattedParticipatedForums = participatedForums.map((forum) => ({
+        _id: forum._id,
+        categoryId: forum.categoryId?._id || forum.categoryId,
+        categoryName: forum.categoryId?.name || "Uncategorized",
+        authorUserId: forum.authorUserId?._id || forum.authorUserId,
+        authorUsername: forum.authorUserId?.username || "Unknown",
+        title: forum.title,
+        body: forum.body,
+        upvotes: forum.upvotes?.length || 0,
+        downvotes: forum.downvotes?.length || 0,
+        voteScore: (forum.upvotes?.length || 0) - (forum.downvotes?.length || 0),
+        replyCount: participatedCountMap[forum._id.toString()] || 0,
+        expertReplyCount: expertReplyCountMap[forum._id.toString()] || 0, // Number of replies by this expert
+        isCreator: forum.authorUserId?._id?.toString() === userId || forum.authorUserId?.toString() === userId, // Whether expert created this forum
+        viewCount: forum.viewCount || 0,
+        createdAt: forum.createdAt,
+        updatedAt: forum.updatedAt,
+      }));
+
+      // Add participated forums to profile data
+      profileData.participatedForums = formattedParticipatedForums;
+      profileData.totalParticipatedForums = formattedParticipatedForums.length;
+    }
 
     res.json({ profile: profileData });
   } catch (error) {

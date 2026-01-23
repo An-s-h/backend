@@ -20,7 +20,7 @@ router.post('/upload', verifySession, uploadMultiple, async (req, res) => {
 
       let result;
       if (isImage) {
-        result = await uploadImage(file.buffer, 'posts/images');
+        result = await uploadImage(file.buffer, 'posts/images', file.originalname, file.mimetype);
         uploadedFiles.push({
           type: 'image',
           url: result.secure_url,
@@ -29,7 +29,7 @@ router.post('/upload', verifySession, uploadMultiple, async (req, res) => {
           publicId: result.public_id,
         });
       } else if (isPDF) {
-        result = await uploadFile(file.buffer, 'posts/files', file.originalname);
+        result = await uploadFile(file.buffer, 'posts/files', file.originalname, file.mimetype);
         uploadedFiles.push({
           type: 'file',
           url: result.secure_url,

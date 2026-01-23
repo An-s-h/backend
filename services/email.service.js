@@ -30,8 +30,8 @@ export async function sendVerificationEmail(
     const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
     const verificationLink = `${frontendUrl}/verify-email?token=${verificationToken}`;
 
-    // Logo URL - adjust path based on your setup
-    const logoUrl = `https://res.cloudinary.com/dtgmjvfms/image/upload/logo_mh2rpv.png`; // or logo1.png, logo2.png based on which one you want
+    // Logo URL - configure via environment variable (should be S3 URL)
+    const logoUrl = process.env.LOGO_URL || `https://res.cloudinary.com/dtgmjvfms/image/upload/logo_mh2rpv.png`;
 
     const mailOptions = {
       from: `"Collabiora" <${process.env.GMAIL_USER}>`,
