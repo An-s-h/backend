@@ -24,8 +24,9 @@ let apiKeyCounter = 0;
 /**
  * Get the appropriate Gemini instance based on load balancing
  * Uses round-robin to distribute requests between API keys
+ * @param {boolean} preferAlternate - If true, use the alternate key (for fallback)
  */
-function getGeminiInstance() {
+function getGeminiInstance(preferAlternate = false) {
   if (!genAI && !genAI2) {
     return null;
   }
@@ -38,9 +39,57 @@ function getGeminiInstance() {
     return genAI2;
   }
 
+  // If preferAlternate is true, use the alternate key (for fallback on error)
+  if (preferAlternate) {
+    const alternateKey = apiKeyCounter === 0 ? genAI2 : genAI;
+    return alternateKey;
+  }
+
   // Round-robin between two API keys
   apiKeyCounter = (apiKeyCounter + 1) % 2;
   return apiKeyCounter === 0 ? genAI : genAI2;
+}
+
+/**
+ * Retry helper with exponential backoff and API key fallback
+ */
+async function retryWithBackoff(fn, maxRetries = 3, initialDelay = 1000) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      const isLastAttempt = attempt === maxRetries - 1;
+      const errorMessage = error.message || String(error);
+      // Check multiple possible locations for status code
+      const errorStatus = error.status || error.statusCode || error.code || 
+                         (error.response?.status) || 
+                         (error.errorDetails?.status);
+      const isOverloadError =
+        errorMessage?.includes("overloaded") ||
+        errorMessage?.includes("503") ||
+        errorMessage?.includes("Service Unavailable") ||
+        errorStatus === 503;
+      const isRateLimitError = 
+        errorMessage?.includes("429") ||
+        errorMessage?.includes("rate limit") ||
+        errorMessage?.includes("quota") ||
+        errorMessage?.includes("exceeded") ||
+        errorStatus === 429;
+
+      if (isLastAttempt || (!isOverloadError && !isRateLimitError)) {
+        throw error;
+      }
+
+      // Exponential backoff: 1s, 2s, 4s
+      const delay = initialDelay * Math.pow(2, attempt);
+      console.log(
+        `Gemini ${isRateLimitError ? 'rate limited' : 'overloaded'}, retrying in ${delay}ms... (attempt ${
+          attempt + 1
+        }/${maxRetries})`
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
 }
 export async function summarizeText(text, type = "general", simplify = false) {
   if (!text)
@@ -57,8 +106,12 @@ export async function summarizeText(text, type = "general", simplify = false) {
       : fallback;
   }
 
+  let geminiInstance = null;
+  let attemptWithAlternate = false;
+  let modelName = "gemini-2.5-flash-lite"; // Default model, can fallback to gemini-2.5-flash
+  
   try {
-    const geminiInstance = getGeminiInstance();
+    geminiInstance = getGeminiInstance(false);
     if (!geminiInstance) {
       // Fallback if no API keys available
       const clean = String(text).replace(/\s+/g, " ").trim();
@@ -70,8 +123,9 @@ export async function summarizeText(text, type = "general", simplify = false) {
         : fallback;
     }
 
-    const model = geminiInstance.getGenerativeModel({
-      model: "gemini-2.5-flash-lite",
+    // Try gemini-2.5-flash-lite first, but can fallback to gemini-2.5-flash if overloaded
+    let model = geminiInstance.getGenerativeModel({
+      model: modelName,
     });
 
     // For publications, generate structured summary
@@ -112,7 +166,46 @@ Publication content: ${text.substring(0, 2000)}
 
 Return ONLY valid JSON, no markdown formatting. Use appropriate technical and scientific terminology.`;
 
-      const result = await model.generateContent(prompt);
+      let result;
+      try {
+        result = await retryWithBackoff(async () => {
+          return await model.generateContent(prompt);
+        });
+    } catch (firstError) {
+      // If we have two API keys and first one failed, try the alternate
+      if (genAI && genAI2 && !attemptWithAlternate) {
+        const errorMessage = firstError.message || String(firstError);
+        const errorStatus = firstError.status || firstError.statusCode || firstError.code ||
+                           (firstError.response?.status) || (firstError.errorDetails?.status);
+        const isRetryableError = 
+          errorMessage?.includes("429") ||
+          errorMessage?.includes("503") ||
+          errorMessage?.includes("rate limit") ||
+          errorMessage?.includes("quota") ||
+          errorMessage?.includes("overloaded") ||
+          errorMessage?.includes("Service Unavailable") ||
+          errorStatus === 429 ||
+          errorStatus === 503;
+        
+        if (isRetryableError) {
+          attemptWithAlternate = true;
+          geminiInstance = getGeminiInstance(true);
+          // Try alternate model if flash-lite is overloaded
+          const alternateModelName = modelName === "gemini-2.5-flash-lite" ? "gemini-2.5-flash" : "gemini-2.5-flash-lite";
+          model = geminiInstance.getGenerativeModel({
+            model: alternateModelName,
+          });
+          result = await retryWithBackoff(async () => {
+            return await model.generateContent(prompt);
+          });
+        } else {
+          throw firstError;
+        }
+      } else {
+        throw firstError;
+      }
+    }
+      
       let responseText = result.response.text().trim();
 
       // Clean markdown if present
@@ -137,9 +230,50 @@ Return ONLY valid JSON, no markdown formatting. Use appropriate technical and sc
       ? "You are explaining medical information to a patient. Use very simple, everyday words. Avoid medical jargon. Keep sentences short (max 15 words each). Write 3-4 friendly sentences that focus on what matters most to patients. Use words like 'they found', 'this means', 'you might' instead of technical terms."
       : "Summarize the following medical content in 3-4 sentences using appropriate technical and scientific terminology for researchers. Focus on key findings, methodology, and clinical relevance.";
 
-    const result = await model.generateContent(
-      `${languageInstruction}: ${text}`
-    );
+    let result;
+    try {
+      result = await retryWithBackoff(async () => {
+        return await model.generateContent(
+          `${languageInstruction}: ${text}`
+        );
+      });
+    } catch (firstError) {
+      // If we have two API keys and first one failed, try the alternate
+      if (genAI && genAI2 && !attemptWithAlternate) {
+        const errorMessage = firstError.message || String(firstError);
+        const errorStatus = firstError.status || firstError.statusCode || firstError.code ||
+                           (firstError.response?.status) || (firstError.errorDetails?.status);
+        const isRetryableError = 
+          errorMessage?.includes("429") ||
+          errorMessage?.includes("503") ||
+          errorMessage?.includes("rate limit") ||
+          errorMessage?.includes("quota") ||
+          errorMessage?.includes("overloaded") ||
+          errorMessage?.includes("Service Unavailable") ||
+          errorStatus === 429 ||
+          errorStatus === 503;
+        
+        if (isRetryableError) {
+          attemptWithAlternate = true;
+          geminiInstance = getGeminiInstance(true);
+          // Try alternate model if flash-lite is overloaded
+          const alternateModelName = modelName === "gemini-2.5-flash-lite" ? "gemini-2.5-flash" : "gemini-2.5-flash-lite";
+          model = geminiInstance.getGenerativeModel({
+            model: alternateModelName,
+          });
+          result = await retryWithBackoff(async () => {
+            return await model.generateContent(
+              `${languageInstruction}: ${text}`
+            );
+          });
+        } else {
+          throw firstError;
+        }
+      } else {
+        throw firstError;
+      }
+    }
+    
     return result.response.text();
   } catch (e) {
     console.error("AI summary error:", e);

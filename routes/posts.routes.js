@@ -1,6 +1,7 @@
 import { Router } from "express";
 import mongoose from "mongoose";
 import { Post } from "../models/Post.js";
+import { Comment } from "../models/Comment.js";
 import { User } from "../models/User.js";
 import { Profile } from "../models/Profile.js";
 import { Community } from "../models/Community.js";
@@ -403,6 +404,199 @@ router.post("/posts/:id/like", verifySession, async (req, res) => {
   } catch (error) {
     console.error("Error toggling like:", error);
     res.status(500).json({ error: "Failed to toggle like" });
+  }
+});
+
+// Get comments for a post
+router.get("/posts/:id/comments", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.query;
+
+    const post = await Post.findById(id);
+    if (!post) {
+      return res.status(404).json({ error: "Post not found" });
+    }
+
+    // Get all comments for this post
+    const comments = await Comment.find({ postId: id })
+      .populate("authorUserId", "username email picture")
+      .sort({ createdAt: 1 })
+      .lean();
+
+    // Build comment tree (handle nested comments)
+    const buildCommentTree = (parentId = null) => {
+      return comments
+        .filter((comment) => {
+          const parent = comment.parentCommentId
+            ? comment.parentCommentId.toString()
+            : null;
+          return parent === parentId;
+        })
+        .map((comment) => {
+          const isLiked = userId
+            ? comment.likes?.some(
+                (likeId) => likeId.toString() === userId.toString()
+              )
+            : false;
+
+          return {
+            ...comment,
+            isLiked,
+            likeCount: comment.likes?.length || 0,
+            children: buildCommentTree(comment._id.toString()),
+          };
+        });
+    };
+
+    const commentTree = buildCommentTree();
+
+    res.json({
+      ok: true,
+      comments: commentTree,
+      commentCount: comments.length,
+    });
+  } catch (error) {
+    console.error("Error fetching comments:", error);
+    res.status(500).json({ error: "Failed to fetch comments" });
+  }
+});
+
+// Create comment on a post
+router.post("/posts/:id/comments", verifySession, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { content, parentCommentId } = req.body;
+    const authorUserId = req.user._id;
+    const authorRole = req.user.role;
+
+    if (!content || !content.trim()) {
+      return res.status(400).json({ error: "Content is required" });
+    }
+
+    const post = await Post.findById(id);
+    if (!post) {
+      return res.status(404).json({ error: "Post not found" });
+    }
+
+    // If replying to another comment, check if it exists
+    if (parentCommentId) {
+      const parentComment = await Comment.findById(parentCommentId);
+      if (!parentComment) {
+        return res.status(404).json({ error: "Parent comment not found" });
+      }
+    }
+
+    // Create comment
+    const comment = await Comment.create({
+      postId: id,
+      parentCommentId: parentCommentId || null,
+      authorUserId,
+      authorRole,
+      content: content.trim(),
+    });
+
+    // Update post reply count
+    await Post.findByIdAndUpdate(id, { $inc: { replyCount: 1 } });
+
+    // Populate comment with author info
+    const populatedComment = await Comment.findById(comment._id)
+      .populate("authorUserId", "username email picture")
+      .lean();
+
+    // Invalidate cache
+    invalidateCache("posts:");
+
+    res.status(201).json({
+      ok: true,
+      comment: {
+        ...populatedComment,
+        isLiked: false,
+        likeCount: 0,
+        children: [],
+      },
+    });
+  } catch (error) {
+    console.error("Error creating comment:", error);
+    res.status(500).json({ error: "Failed to create comment" });
+  }
+});
+
+// Like/Unlike comment
+router.post("/posts/:postId/comments/:commentId/like", verifySession, async (req, res) => {
+  try {
+    const { commentId } = req.params;
+    const userId = req.user._id;
+
+    const comment = await Comment.findById(commentId);
+    if (!comment) {
+      return res.status(404).json({ error: "Comment not found" });
+    }
+
+    const isLiked = comment.likes.some(
+      (likeId) => likeId.toString() === userId.toString()
+    );
+
+    if (isLiked) {
+      // Unlike
+      comment.likes = comment.likes.filter(
+        (likeId) => likeId.toString() !== userId.toString()
+      );
+    } else {
+      // Like
+      comment.likes.push(userId);
+    }
+
+    await comment.save();
+
+    res.json({
+      ok: true,
+      isLiked: !isLiked,
+      likeCount: comment.likes.length,
+    });
+  } catch (error) {
+    console.error("Error toggling comment like:", error);
+    res.status(500).json({ error: "Failed to toggle comment like" });
+  }
+});
+
+// Delete comment (only author can delete)
+router.delete("/posts/:postId/comments/:commentId", verifySession, async (req, res) => {
+  try {
+    const { postId, commentId } = req.params;
+    const userId = req.user._id;
+
+    const comment = await Comment.findById(commentId);
+    if (!comment) {
+      return res.status(404).json({ error: "Comment not found" });
+    }
+
+    // Check if user is the author
+    if (comment.authorUserId.toString() !== userId.toString()) {
+      return res.status(403).json({ error: "Not authorized to delete this comment" });
+    }
+
+    // Count child comments before deleting
+    const childCount = await Comment.countDocuments({ parentCommentId: commentId });
+
+    // Delete the comment and all its children
+    await Comment.deleteMany({
+      $or: [
+        { _id: commentId },
+        { parentCommentId: commentId }
+      ]
+    });
+
+    // Update post reply count
+    await Post.findByIdAndUpdate(postId, { $inc: { replyCount: -(1 + childCount) } });
+
+    // Invalidate cache
+    invalidateCache("posts:");
+
+    res.json({ ok: true, message: "Comment deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting comment:", error);
+    res.status(500).json({ error: "Failed to delete comment" });
   }
 });
 

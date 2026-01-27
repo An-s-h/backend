@@ -14,6 +14,7 @@ const patientSchema = new mongoose.Schema(
     location: locationSchema,
     keywords: [{ type: String }],
     gender: String,
+    age: Number, // Optional age field
   },
   { _id: false }
 );
@@ -39,6 +40,7 @@ const researcherSchema = new mongoose.Schema(
     bio: String,
     location: locationSchema,
     gender: String,
+    age: Number, // Optional age field
     isVerified: { type: Boolean, default: false },
     // New fields for enhanced researcher profile
     education: [educationSchema],

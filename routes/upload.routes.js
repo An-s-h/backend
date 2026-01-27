@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { verifySession } from '../middleware/auth.js';
-import { uploadMultiple } from '../middleware/upload.js';
+import { uploadMultiple, uploadSingle } from '../middleware/upload.js';
 import { uploadImage, uploadFile } from '../services/upload.service.js';
 
 const router = Router();
@@ -50,6 +50,36 @@ router.post('/upload', verifySession, uploadMultiple, async (req, res) => {
   } catch (error) {
     console.error('Error uploading files:', error);
     res.status(500).json({ error: 'Failed to upload files', details: error.message });
+  }
+});
+
+// Upload profile picture
+router.post('/upload/profile-picture', verifySession, uploadSingle, async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    if (!req.file.mimetype.startsWith('image/')) {
+      return res.status(400).json({ error: 'File must be an image' });
+    }
+
+    // Upload to S3 in profile-pictures folder
+    const result = await uploadImage(
+      req.file.buffer,
+      'profile-pictures',
+      req.file.originalname,
+      req.file.mimetype
+    );
+
+    res.json({
+      ok: true,
+      url: result.url,
+      key: result.key,
+    });
+  } catch (error) {
+    console.error('Error uploading profile picture:', error);
+    res.status(500).json({ error: 'Failed to upload profile picture', details: error.message });
   }
 });
 

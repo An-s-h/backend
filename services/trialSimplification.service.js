@@ -20,6 +20,10 @@ const genAI2 = apiKey2 ? new GoogleGenerativeAI(apiKey2) : null;
 // Round-robin counter for load balancing between API keys
 let apiKeyCounter = 0;
 
+// Cache for simplified titles (in-memory)
+const titleCache = new Map();
+const CACHE_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours
+
 /**
  * Get the appropriate Gemini instance based on load balancing
  * Uses round-robin to distribute requests between API keys
@@ -49,6 +53,18 @@ function getGeminiInstance() {
 export async function simplifyTrialTitle(trial) {
   if (!trial || !trial.title) {
     return trial?.title || "";
+  }
+
+  // Skip simplification for short titles (already simple enough)
+  if (trial.title.length <= 80) {
+    return trial.title;
+  }
+
+  // Check cache first
+  const cacheKey = trial.title.toLowerCase().trim();
+  const cached = titleCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < CACHE_EXPIRY) {
+    return cached.simplifiedTitle;
   }
 
   const geminiInstance = getGeminiInstance();
@@ -82,14 +98,152 @@ Return ONLY the simplified title, nothing else. No quotes, no explanations, just
 
     // If the response is too long or seems wrong, fallback to original
     if (simplifiedTitle.length > 200 || simplifiedTitle.length < 5) {
-      return trial.title;
+      simplifiedTitle = trial.title;
     }
+
+    // Cache the result
+    titleCache.set(cacheKey, {
+      simplifiedTitle,
+      timestamp: Date.now(),
+    });
 
     return simplifiedTitle;
   } catch (error) {
     console.error("Error simplifying trial title:", error);
     // Fallback: return original title
     return trial.title;
+  }
+}
+
+/**
+ * Batch simplify multiple trial titles in a single API call
+ * This is much faster than calling simplifyTrialTitle individually
+ * @param {Array} trials - Array of trial objects with title property
+ * @returns {Promise<Array>} - Array of simplified titles in same order
+ */
+export async function batchSimplifyTrialTitles(trials) {
+  if (!trials || trials.length === 0) {
+    return [];
+  }
+
+  // Filter out trials that don't need simplification
+  const trialsToSimplify = trials.filter(
+    (trial) => trial && trial.title && trial.title.length > 80
+  );
+
+  // If no trials need simplification, return original titles
+  if (trialsToSimplify.length === 0) {
+    return trials.map((t) => t?.title || "");
+  }
+
+  // Check cache for all titles first
+  const results = new Map();
+  const uncachedTrials = [];
+
+  for (const trial of trialsToSimplify) {
+    const cacheKey = trial.title.toLowerCase().trim();
+    const cached = titleCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < CACHE_EXPIRY) {
+      results.set(trial.title, cached.simplifiedTitle);
+    } else {
+      uncachedTrials.push(trial);
+    }
+  }
+
+  // If all were cached, return immediately
+  if (uncachedTrials.length === 0) {
+    return trials.map((t) => {
+      if (!t || !t.title) return "";
+      if (t.title.length <= 80) return t.title;
+      return results.get(t.title) || t.title;
+    });
+  }
+
+  const geminiInstance = getGeminiInstance();
+  if (!geminiInstance) {
+    // Fallback: return original titles
+    return trials.map((t) => t?.title || "");
+  }
+
+  try {
+    const model = geminiInstance.getGenerativeModel({
+      model: "gemini-2.5-flash-lite",
+    });
+
+    // Build batch prompt with all titles (limit to reasonable size)
+    const titlesList = uncachedTrials
+      .map((t, i) => `${i + 1}. ${t.title}`)
+      .join("\n");
+
+    const prompt = `Simplify these ${uncachedTrials.length} clinical trial titles into plain, easy-to-understand language. Keep each simplified title short (10-15 words max). Use simple words and avoid medical jargon.
+
+${titlesList}
+
+Return ONLY a numbered list (1-${uncachedTrials.length}), one simplified title per line, in the same order. No quotes, no explanations. Format:
+1. [simplified title 1]
+2. [simplified title 2]`;
+
+    const result = await model.generateContent(prompt, {
+      generationConfig: {
+        maxOutputTokens: Math.min(50 * uncachedTrials.length, 1500), // Reduced from 100 to 50 per title
+        temperature: 0.5, // Reduced from 0.7 for faster, more consistent responses
+      },
+    });
+
+    let responseText = result.response.text().trim();
+
+    // Parse the numbered list response
+    const lines = responseText.split("\n").filter((line) => line.trim());
+    const simplifiedTitles = [];
+
+    for (let i = 0; i < uncachedTrials.length; i++) {
+      let simplifiedTitle = "";
+      
+      // Try to find the corresponding line (handle various formats)
+      const line = lines.find((l) => {
+        const match = l.match(/^\d+[\.\)]\s*(.+)$/);
+        if (match) {
+          const num = parseInt(l.match(/^\d+/)[0]);
+          return num === i + 1;
+        }
+        return false;
+      });
+
+      if (line) {
+        const match = line.match(/^\d+[\.\)]\s*(.+)$/);
+        simplifiedTitle = match ? match[1].trim() : line.replace(/^\d+[\.\)]\s*/, "").trim();
+      } else if (lines[i]) {
+        // Fallback: use line by index
+        simplifiedTitle = lines[i].replace(/^\d+[\.\)]\s*/, "").trim();
+      }
+
+      // Clean up quotes
+      simplifiedTitle = simplifiedTitle.replace(/^["']|["']$/g, "").trim();
+
+      // Validate and cache
+      if (simplifiedTitle.length > 200 || simplifiedTitle.length < 5) {
+        simplifiedTitle = uncachedTrials[i].title;
+      }
+
+      const cacheKey = uncachedTrials[i].title.toLowerCase().trim();
+      titleCache.set(cacheKey, {
+        simplifiedTitle,
+        timestamp: Date.now(),
+      });
+
+      results.set(uncachedTrials[i].title, simplifiedTitle);
+    }
+
+    // Return results in original order
+    return trials.map((t) => {
+      if (!t || !t.title) return "";
+      if (t.title.length <= 80) return t.title;
+      return results.get(t.title) || t.title;
+    });
+  } catch (error) {
+    console.error("Error batch simplifying trial titles:", error);
+    // Fallback: return original titles
+    return trials.map((t) => t?.title || "");
   }
 }
 

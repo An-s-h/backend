@@ -4,15 +4,18 @@ import bcrypt from "bcryptjs";
 const userSchema = new mongoose.Schema(
   {
     username: { type: String, required: true, index: true },
+    handle: { type: String, sparse: true, index: true }, // Unique username/handle for profile URLs
     email: { type: String, required: true, index: true },
     password: { type: String, required: false }, // Optional for OAuth users
     role: { type: String, enum: ["patient", "researcher"], default: "patient" },
     medicalInterests: [{ type: String }], // Conditions for patients, interests for researchers
+    nameHidden: { type: Boolean, default: false }, // Hide name from others, show only handle
+    age: { type: Number }, // Optional age field
 
     // OAuth fields
     auth0Id: { type: String, sparse: true, index: true }, // Auth0 user ID (sub)
     oauthProvider: { type: String }, // google-oauth2, windowslive, etc.
-    picture: { type: String }, // Profile picture URL from OAuth
+    picture: { type: String }, // Profile picture URL from OAuth or S3
     emailVerified: { type: Boolean, default: false },
     isOAuthUser: { type: Boolean, default: false },
 
@@ -31,6 +34,9 @@ userSchema.index({ email: 1, role: 1 }, { unique: true });
 
 // Index for Auth0 ID lookup
 userSchema.index({ auth0Id: 1 }, { sparse: true });
+
+// Unique index for handle (username)
+userSchema.index({ handle: 1 }, { unique: true, sparse: true });
 
 // Hash password before saving (only if password exists and is modified)
 userSchema.pre("save", async function (next) {

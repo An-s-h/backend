@@ -13,6 +13,7 @@ import {
 import {
   simplifyTrialDetails,
   simplifyTrialTitle,
+  batchSimplifyTrialTitles,
 } from "../services/trialSimplification.service.js";
 import {
   simplifyPublicationDetails,
@@ -389,42 +390,35 @@ router.get("/search/trials", async (req, res) => {
       (a, b) => (b.matchPercentage || -1) - (a.matchPercentage || -1)
     );
 
-    // Simplify titles for all trials in parallel (only for the batch we fetched)
-    // This adds simplified titles to each trial object
-    const resultsWithSimplifiedTitles = await Promise.all(
-      sortedResults.map(async (trial) => {
-        try {
-          const simplifiedTitle = await simplifyTrialTitle(trial);
-          return {
-            ...trial,
-            simplifiedTitle: simplifiedTitle,
-          };
-        } catch (error) {
-          // If title simplification fails, just use original title
-          console.error(
-            `Error simplifying title for trial ${trial.id}:`,
-            error
-          );
-          return {
-            ...trial,
-            simplifiedTitle: trial.title, // Fallback to original title
-          };
-        }
-      })
-    );
-
-    // Paginate the sorted results
+    // Paginate FIRST, then simplify only the titles that will be shown to the user
+    // This is much faster than simplifying all trials in the batch
     const startIndex = (requestedPage - 1) * requestedPageSize;
     const endIndex = startIndex + requestedPageSize;
-    const paginatedResults = resultsWithSimplifiedTitles.slice(
-      startIndex,
-      endIndex
-    );
+    const paginatedResults = sortedResults.slice(startIndex, endIndex);
+
+    // Simplify titles only for the paginated results (much faster!)
+    // This adds simplified titles to each trial object
+    let resultsWithSimplifiedTitles;
+    try {
+      // Use batch processing for much better performance - only for paginated results
+      const simplifiedTitles = await batchSimplifyTrialTitles(paginatedResults);
+      resultsWithSimplifiedTitles = paginatedResults.map((trial, index) => ({
+        ...trial,
+        simplifiedTitle: simplifiedTitles[index] || trial.title,
+      }));
+    } catch (error) {
+      // If batch simplification fails, fallback to original titles
+      console.error("Error batch simplifying titles:", error);
+      resultsWithSimplifiedTitles = paginatedResults.map((trial) => ({
+        ...trial,
+        simplifiedTitle: trial.title,
+      }));
+    }
 
     // Add read status for signed-in users (only for paginated results to reduce DB queries)
-    let resultsWithReadStatus = paginatedResults;
+    let resultsWithReadStatus = resultsWithSimplifiedTitles;
     if (req.user && req.user._id) {
-      const trialIds = paginatedResults
+      const trialIds = resultsWithSimplifiedTitles
         .map((t) => t.id || t._id)
         .filter(Boolean);
       if (trialIds.length > 0) {
@@ -435,7 +429,7 @@ router.get("/search/trials", async (req, res) => {
         }).select("itemId");
 
         const readItemIds = new Set(readItems.map((r) => r.itemId));
-        resultsWithReadStatus = paginatedResults.map((trial) => ({
+        resultsWithReadStatus = resultsWithSimplifiedTitles.map((trial) => ({
           ...trial,
           isRead: readItemIds.has(trial.id || trial._id),
         }));
@@ -456,13 +450,13 @@ router.get("/search/trials", async (req, res) => {
 
     // Calculate if there are more results
     // Note: We're only showing results from the batch we fetched, so hasMore is based on batch size
-    const hasMore = endIndex < resultsWithSimplifiedTitles.length;
+    const hasMore = endIndex < sortedResults.length;
 
     res.json({
       results: resultsWithReadStatus,
       totalCount: Math.min(
         result.totalCount || 0,
-        resultsWithSimplifiedTitles.length
+        sortedResults.length
       ), // Use batch size as total count for pagination purposes
       hasMore: hasMore,
       ...(remaining !== null && { remaining }),

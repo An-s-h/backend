@@ -141,10 +141,10 @@ router.post("/auth/update-profile", async (req, res) => {
   }
 });
 
-// PUT /api/auth/update-user - Update user information (username)
+// PUT /api/auth/update-user - Update user information (username, handle, nameHidden, picture, age)
 router.put("/auth/update-user/:userId", async (req, res) => {
   const { userId } = req.params;
-  const { username } = req.body || {};
+  const { username, handle, nameHidden, picture, age } = req.body || {};
 
   if (!userId) {
     return res.status(400).json({ error: "userId is required" });
@@ -152,8 +152,32 @@ router.put("/auth/update-user/:userId", async (req, res) => {
 
   try {
     const updateData = {};
-    if (username) {
+    if (username !== undefined) {
       updateData.username = username;
+    }
+    if (handle !== undefined) {
+      // Check if handle is unique (if provided and not empty)
+      if (handle && handle.trim()) {
+        const existingUser = await User.findOne({ 
+          handle: handle.trim(),
+          _id: { $ne: userId }
+        });
+        if (existingUser) {
+          return res.status(400).json({ error: "Handle is already taken" });
+        }
+        updateData.handle = handle.trim();
+      } else {
+        updateData.handle = undefined; // Allow clearing handle
+      }
+    }
+    if (nameHidden !== undefined) {
+      updateData.nameHidden = nameHidden;
+    }
+    if (picture !== undefined) {
+      updateData.picture = picture;
+    }
+    if (age !== undefined) {
+      updateData.age = age ? parseInt(age) : undefined;
     }
 
     if (Object.keys(updateData).length === 0) {
@@ -175,6 +199,10 @@ router.put("/auth/update-user/:userId", async (req, res) => {
     return res.json({ user: userResponse });
   } catch (error) {
     console.error("User update error:", error);
+    // Handle duplicate key error for handle
+    if (error.code === 11000 && error.keyPattern?.handle) {
+      return res.status(400).json({ error: "Handle is already taken" });
+    }
     return res.status(500).json({ error: "Failed to update user" });
   }
 });
@@ -190,6 +218,39 @@ router.put("/auth/update-user/:userId", async (req, res) => {
  * IMPORTANT: For sign-in flow (no onboarding data), new users are NOT created here
  * They must complete their profile first via /auth/complete-oauth-profile
  */
+// Helper function to check if a picture URL is from an OAuth provider
+function isOAuthPicture(pictureUrl) {
+  if (!pictureUrl) return false;
+  
+  const oauthDomains = [
+    'googleusercontent.com',
+    'lh3.googleusercontent.com',
+    'graph.microsoft.com',
+    'live.com',
+    'fbcdn.net',
+    'facebook.com',
+    'appleid.apple.com',
+    'scontent',
+    'auth0.com',
+  ];
+  
+  return oauthDomains.some(domain => pictureUrl.includes(domain));
+}
+
+// Helper function to check if a picture URL is from a custom upload (S3/Cloudinary)
+function isCustomPicture(pictureUrl) {
+  if (!pictureUrl) return false;
+  
+  const customDomains = [
+    'amazonaws.com',
+    's3.',
+    'cloudinary.com',
+    'res.cloudinary.com',
+  ];
+  
+  return customDomains.some(domain => pictureUrl.includes(domain));
+}
+
 router.post("/auth/oauth-sync", async (req, res) => {
   const {
     auth0Id,
@@ -239,7 +300,15 @@ router.post("/auth/oauth-sync", async (req, res) => {
         // Link OAuth to existing account
         existingByEmail.auth0Id = auth0Id;
         existingByEmail.oauthProvider = provider;
-        existingByEmail.picture = picture || existingByEmail.picture;
+        // Only update picture if user doesn't have a custom picture
+        // If they have a custom picture (S3/Cloudinary), preserve it
+        // If they have an OAuth picture or no picture, update with new OAuth picture
+        if (picture) {
+          if (!existingByEmail.picture || isOAuthPicture(existingByEmail.picture)) {
+            existingByEmail.picture = picture;
+          }
+          // If existing picture is custom (S3/Cloudinary), don't overwrite it
+        }
         // Don't update emailVerified from OAuth - keep existing status or set to false
         // existingByEmail.emailVerified = emailVerified || existingByEmail.emailVerified;
         existingByEmail.isOAuthUser = true;
@@ -340,7 +409,15 @@ router.post("/auth/oauth-sync", async (req, res) => {
     } else {
       // User exists, update their info
       user.username = name || user.username;
-      user.picture = picture || user.picture;
+      // Only update picture if user doesn't have a custom picture
+      // If they have a custom picture (S3/Cloudinary), preserve it
+      // If they have an OAuth picture or no picture, update with new OAuth picture
+      if (picture) {
+        if (!user.picture || isOAuthPicture(user.picture)) {
+          user.picture = picture;
+        }
+        // If existing picture is custom (S3/Cloudinary), don't overwrite it
+      }
       // Don't update emailVerified from OAuth - keep existing status
       // user.emailVerified = emailVerified || user.emailVerified;
       if (provider) user.oauthProvider = provider;

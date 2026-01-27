@@ -363,7 +363,7 @@ export async function searchClinicalTrials({
     while (nextPageToken && pageNum < maxPages) {
       const nextParams = new URLSearchParams(params);
       nextParams.set("pageToken", nextPageToken);
-      const nextUrl = `https://clinicaltrials.gov/api/v2/studies?${nextParams.toString()}`;
+      const nextUrl = `https://clinicalTrials.gov/api/v2/studies?${nextParams.toString()}`;
 
       try {
         const nextResp = await axios.get(nextUrl, { timeout: 15000 });
