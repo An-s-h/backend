@@ -1365,6 +1365,14 @@ router.get("/search/trial/:nctId/simplified", async (req, res) => {
     // Simplify trial details using AI
     const simplifiedResult = await simplifyTrialDetails(trial);
 
+    // Handle case where simplifyTrialDetails returns null (shouldn't happen, but safety check)
+    if (!simplifiedResult) {
+      return res.json({
+        trial: trial,
+        simplified: false,
+      });
+    }
+
     res.json({
       trial: simplifiedResult.trial,
       simplified: simplifiedResult.simplified,

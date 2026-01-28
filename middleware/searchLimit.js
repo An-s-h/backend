@@ -113,6 +113,18 @@ export async function checkSearchLimit(req, res = null) {
       searchCount = limitRecord.searchCount || 0;
     } else {
       // Create new record with count 0
+      // Ensure we never create a record with both deviceId and hashedIP as null
+      if (!identifier.value || !identifier.value.trim()) {
+        console.warn("[SearchLimit] Cannot create record with null identifier value");
+        return {
+          canSearch: false,
+          remaining: 0,
+          action: "ERROR",
+          message: "Unable to verify request. Please try again.",
+          showSignUpPrompt: false,
+        };
+      }
+
       const recordData = {
         searchCount: 0,
         lastSearchAt: null,
@@ -120,11 +132,30 @@ export async function checkSearchLimit(req, res = null) {
 
       if (identifier.type === "deviceId") {
         recordData.deviceId = identifier.value;
+        // Don't set hashedIP to null - leave it undefined
       } else {
         recordData.hashedIP = identifier.value;
+        // Don't set deviceId to null - leave it undefined
       }
 
-      limitRecord = await IPLimit.create(recordData);
+      try {
+        limitRecord = await IPLimit.create(recordData);
+      } catch (createError) {
+        // Handle duplicate key error during creation
+        if (createError.code === 11000) {
+          // Record already exists (race condition), try to find it
+          const query =
+            identifier.type === "deviceId"
+              ? { deviceId: identifier.value }
+              : { hashedIP: identifier.value };
+          limitRecord = await IPLimit.findOne(query);
+          if (!limitRecord) {
+            throw createError; // Re-throw if we still can't find it
+          }
+        } else {
+          throw createError;
+        }
+      }
     }
 
     const remaining = Math.max(0, MAX_FREE_SEARCHES - searchCount);
@@ -195,11 +226,23 @@ export async function incrementSearchCount(req) {
   }
 
   try {
-    // Build query based on identifier type
+    // Ensure we have a valid identifier value (never null/undefined)
+    if (!identifier.value || !identifier.value.trim()) {
+      console.warn("[SearchLimit] Invalid identifier value, skipping increment");
+      return;
+    }
+
+    // Build query based on identifier type - ensure we never query with null values
     const query =
       identifier.type === "deviceId"
         ? { deviceId: identifier.value }
         : { hashedIP: identifier.value };
+
+    // Ensure query doesn't have null values
+    if (query.deviceId === null || query.hashedIP === null) {
+      console.warn("[SearchLimit] Query contains null value, skipping increment");
+      return;
+    }
 
     // Use atomic increment to prevent race conditions
     const result = await IPLimit.findOneAndUpdate(
@@ -234,7 +277,33 @@ export async function incrementSearchCount(req) {
       console.log(`[SearchLimit] Incremented search count for ${idDisplay}`);
     }
   } catch (error) {
-    console.error("[SearchLimit] Error incrementing count:", error);
+    // Handle duplicate key errors gracefully (shouldn't happen with proper checks, but just in case)
+    if (error.code === 11000) {
+      // Duplicate key error - try to find existing record and update it instead
+      const identifier = getDeviceIdentifier(req);
+      if (identifier && identifier.value) {
+        const query =
+          identifier.type === "deviceId"
+            ? { deviceId: identifier.value }
+            : { hashedIP: identifier.value };
+        
+        try {
+          await IPLimit.findOneAndUpdate(
+            query,
+            {
+              $inc: { searchCount: 1 },
+              $set: { lastSearchAt: new Date() },
+            },
+            { new: true }
+          );
+          console.log("[SearchLimit] Recovered from duplicate key error by updating existing record");
+        } catch (recoveryError) {
+          console.error("[SearchLimit] Error recovering from duplicate key error:", recoveryError);
+        }
+      }
+    } else {
+      console.error("[SearchLimit] Error incrementing count:", error);
+    }
   }
 }
 

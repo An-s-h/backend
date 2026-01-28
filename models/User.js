@@ -4,7 +4,7 @@ import bcrypt from "bcryptjs";
 const userSchema = new mongoose.Schema(
   {
     username: { type: String, required: true, index: true },
-    handle: { type: String, sparse: true, index: true }, // Unique username/handle for profile URLs
+    handle: { type: String, sparse: true }, // Unique username/handle for profile URLs
     email: { type: String, required: true, index: true },
     password: { type: String, required: false }, // Optional for OAuth users
     role: { type: String, enum: ["patient", "researcher"], default: "patient" },
@@ -13,7 +13,7 @@ const userSchema = new mongoose.Schema(
     age: { type: Number }, // Optional age field
 
     // OAuth fields
-    auth0Id: { type: String, sparse: true, index: true }, // Auth0 user ID (sub)
+    auth0Id: { type: String, sparse: true }, // Auth0 user ID (sub)
     oauthProvider: { type: String }, // google-oauth2, windowslive, etc.
     picture: { type: String }, // Profile picture URL from OAuth or S3
     emailVerified: { type: Boolean, default: false },

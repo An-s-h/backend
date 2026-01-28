@@ -14,7 +14,6 @@ const ipLimitSchema = new mongoose.Schema(
       required: false, // Not required for backward compatibility
       unique: true,
       sparse: true, // Allows null/undefined values
-      index: true,
     },
     // Fallback: Hashed IP address (for backward compatibility and legacy records)
     hashedIP: {
@@ -22,7 +21,6 @@ const ipLimitSchema = new mongoose.Schema(
       required: false, // Not required anymore (deviceId is primary)
       unique: true,
       sparse: true, // Allows null/undefined values
-      index: true,
     },
     searchCount: {
       type: Number,

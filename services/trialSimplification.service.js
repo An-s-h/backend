@@ -293,6 +293,16 @@ export async function simplifyTrialDetails(trial) {
   const geminiInstance = getGeminiInstance();
   if (!geminiInstance) {
     // Fallback: return original trial data if AI is not available
+    console.warn("Google AI instance not available, returning original trial data");
+    return {
+      simplified: false,
+      trial: trial,
+    };
+  }
+
+  // Double-check API keys are available
+  if (!apiKey && !apiKey2) {
+    console.warn("Google AI API keys not configured, returning original trial data");
     return {
       simplified: false,
       trial: trial,
@@ -430,8 +440,23 @@ Return ONLY valid JSON, no markdown formatting, no code blocks.`;
       },
     };
   } catch (error) {
-    console.error("Error simplifying trial details:", error);
-    // Fallback: return original trial data
+    // Enhanced error handling to prevent server crashes
+    const errorMessage = error?.message || error?.statusText || "Unknown error";
+    const errorStatus = error?.status || error?.statusCode || "N/A";
+    
+    console.error("Error simplifying trial details:", {
+      message: errorMessage,
+      status: errorStatus,
+      errorDetails: error?.errorDetails || error?.error || error,
+      stack: error?.stack,
+    });
+    
+    // If it's a 404 or API error, log it but don't crash
+    if (errorStatus === 404 || errorStatus === 401 || errorStatus === 403) {
+      console.warn(`Google AI API error (${errorStatus}): ${errorMessage}. Returning original trial data.`);
+    }
+    
+    // Fallback: return original trial data - never crash the server
     return {
       simplified: false,
       trial: trial,
