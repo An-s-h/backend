@@ -9,6 +9,12 @@ import {
   calculatePublicationMatch,
   calculateExpertMatch,
 } from "../services/matching.service.js";
+import {
+  extractBiomarkers,
+} from "../services/medicalTerminology.service.js";
+import {
+  batchSimplifyTrialTitles,
+} from "../services/trialSimplification.service.js";
 
 const router = Router();
 
@@ -179,33 +185,54 @@ router.get("/recommendations/:userId", async (req, res) => {
     // Build PubMed query without location (e.g., "Neurology OR Alzheimer's Disease")
     let pubmedQuery = combinedQuery;
 
-    // For clinical trials, search with combined query but also try individual searches
-    // to get more diverse results
-    const trialSearches =
-      allTopics.length > 1
-        ? [combinedQuery, ...allTopics.slice(0, 3)] // Limit to avoid too many API calls
-        : [primaryTopic];
+    // Extract biomarkers from user profile (same as search route)
+    let biomarkers = [];
+    if (profile?.patient?.conditions) {
+      const profileConditionsStr = profile.patient.conditions.join(" ");
+      if (profileConditionsStr) {
+        const profileBiomarkers = extractBiomarkers(profileConditionsStr);
+        biomarkers = [...biomarkers, ...profileBiomarkers];
+      }
+    }
+    if (profile?.patient?.keywords) {
+      const profileKeywordsStr = profile.patient.keywords.join(" ");
+      if (profileKeywordsStr) {
+        const profileKeywordBiomarkers = extractBiomarkers(profileKeywordsStr);
+        biomarkers = [...biomarkers, ...profileKeywordBiomarkers];
+      }
+    }
+    // Remove duplicates
+    biomarkers = [...new Set(biomarkers)];
 
+    // Fetch a larger batch for trials (same as search route) - up to 500 results for sorting
+    // This ensures we get top results sorted by match percentage
+    const batchSize = 500;
+    
     // Fetch all data in parallel for better performance
-    // For trials, search with primary topic and filter for RECRUITING status only
+    // For trials, use the same logic as search route: fetch large batch, calculate matches, sort, then limit
     // Wrap each promise with error handling to prevent crashes
     const [trialsResult, publicationsResult, globalExperts] = await Promise.all(
       [
         searchClinicalTrials({
           q: primaryTopic,
           location: locationForTrials,
-          status: "RECRUITING",
+          status: "RECRUITING", // Keep RECRUITING filter for recommendations
+          biomarkers, // Pass extracted biomarkers (same as search route)
+          page: 1, // Always fetch from page 1 for the batch
+          pageSize: batchSize, // Fetch larger batch for sorting
         }).catch((error) => {
           console.error("Error fetching clinical trials:", error);
           return { items: [], totalCount: 0, hasMore: false };
         }),
-        searchPubMed({ q: pubmedQuery }).catch((error) => {
+        // Fetch more publications to ensure we have at least 9 after filtering by abstract
+        // Similar to search route, fetch a larger batch to account for filtering
+        searchPubMed({ q: pubmedQuery, page: 1, pageSize: 50 }).catch((error) => {
           console.error("Error fetching PubMed publications:", error);
           return {
             items: [],
             totalCount: 0,
             page: 1,
-            pageSize: 9,
+            pageSize: 50,
             hasMore: false,
           };
         }),
@@ -219,8 +246,11 @@ router.get("/recommendations/:userId", async (req, res) => {
     );
 
     // Extract items from the result objects (both services return objects with items property)
-    const trials = trialsResult?.items || [];
-    const publications = publicationsResult?.items || [];
+    const allTrials = trialsResult?.items || [];
+    // Filter out publications without abstracts
+    const publications = (publicationsResult?.items || []).filter(
+      (pub) => pub.abstract && pub.abstract.trim().length > 0
+    );
 
     // Fetch local researchers (CuraLink Experts) instead of mocked experts
 
@@ -265,8 +295,8 @@ router.get("/recommendations/:userId", async (req, res) => {
       experts = [];
     }
 
-    // Calculate match percentages for all items
-    const trialsWithMatch = trials.map((trial) => {
+    // Calculate match percentages for all trials (same as search route)
+    const trialsWithMatch = allTrials.map((trial) => {
       const match = calculateTrialMatch(trial, profile);
       return {
         ...trial,
@@ -275,10 +305,30 @@ router.get("/recommendations/:userId", async (req, res) => {
       };
     });
 
-    // Sort trials by match percentage (descending) and limit to 9
-    const sortedTrials = trialsWithMatch
-      .sort((a, b) => (b.matchPercentage || 0) - (a.matchPercentage || 0))
-      .slice(0, 9);
+    // Sort trials by match percentage (descending) - same as search route
+    const sortedTrials = trialsWithMatch.sort(
+      (a, b) => (b.matchPercentage || -1) - (a.matchPercentage || -1)
+    );
+
+    // Limit to top 9 trials (for recommendations)
+    const topTrials = sortedTrials.slice(0, 9);
+
+    // Simplify titles only for the top 9 trials (same approach as search route)
+    let trialsWithSimplifiedTitles;
+    try {
+      const simplifiedTitles = await batchSimplifyTrialTitles(topTrials);
+      trialsWithSimplifiedTitles = topTrials.map((trial, index) => ({
+        ...trial,
+        simplifiedTitle: simplifiedTitles[index] || trial.title,
+      }));
+    } catch (error) {
+      // If batch simplification fails, fallback to original titles
+      console.error("Error batch simplifying trial titles:", error);
+      trialsWithSimplifiedTitles = topTrials.map((trial) => ({
+        ...trial,
+        simplifiedTitle: trial.title,
+      }));
+    }
 
     const publicationsWithMatch = publications.map((pub) => {
       const match = calculatePublicationMatch(pub, profile);
@@ -288,6 +338,13 @@ router.get("/recommendations/:userId", async (req, res) => {
         matchExplanation: match.matchExplanation,
       };
     });
+
+    // Sort publications by match percentage (descending) and limit to top 9 matches
+    // This matches the pattern used for trials and ensures we show at least 9 top matches
+    // Similar to how the search route handles top results
+    const sortedPublications = publicationsWithMatch
+      .sort((a, b) => (b.matchPercentage || 0) - (a.matchPercentage || 0))
+      .slice(0, 9); // Limit to top 9 publications with highest match percentage
 
     const expertsWithMatch = experts.map((expert) => {
       const match = calculateExpertMatch(expert, profile);
@@ -309,8 +366,8 @@ router.get("/recommendations/:userId", async (req, res) => {
 
     // Build the complete recommendations response
     const recommendations = {
-      trials: sortedTrials,
-      publications: publicationsWithMatch,
+      trials: trialsWithSimplifiedTitles, // Use trials with simplified titles
+      publications: sortedPublications, // Use sorted publications instead of unsorted
       experts: expertsWithMatch,
       globalExperts: globalExpertsWithMatch,
     };

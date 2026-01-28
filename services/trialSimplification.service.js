@@ -78,11 +78,29 @@ export async function simplifyTrialTitle(trial) {
       model: "gemini-2.5-flash-lite",
     });
 
-    const prompt = `Simplify this clinical trial title into plain, easy-to-understand language that a high school student could understand. Keep it short (10-15 words max). Use simple words and avoid medical jargon.
+    const prompt = `Simplify the following medical research or clinical trial title so that a high school–level reader can understand it easily.
 
-Original Title: ${trial.title}
+CRITICAL RULES:
+- Preserve the original meaning, intent, and medical context exactly
+- Do NOT change what is being studied, tested, or measured
+- Do NOT add outcomes, conclusions, or assumptions
+- Keep key medical conditions, diseases, and treatments, but:
+  - You MAY replace highly technical phrasing with commonly understood equivalents
+  - You MAY add brief clarifying words if needed (e.g., "a type of cancer")
+- Avoid abbreviations unless they are widely known (e.g., HIV, COVID-19)
+- Use clear, simple sentence structure
+- Remove unnecessary scientific framing (e.g., "A randomized controlled trial of…")
 
-Return ONLY the simplified title, nothing else. No quotes, no explanations, just the simplified title.`;
+STYLE:
+- 10–15 words maximum
+- Plain, patient-friendly language
+- Neutral and factual tone
+
+Original title:
+"${trial.title}"
+
+Return ONLY the simplified title.
+No explanations, no quotes, no formatting.`;
 
     const result = await model.generateContent(prompt, {
       generationConfig: {
@@ -175,7 +193,23 @@ export async function batchSimplifyTrialTitles(trials) {
       .map((t, i) => `${i + 1}. ${t.title}`)
       .join("\n");
 
-    const prompt = `Simplify these ${uncachedTrials.length} clinical trial titles into plain, easy-to-understand language. Keep each simplified title short (10-15 words max). Use simple words and avoid medical jargon.
+    const prompt = `Simplify the following ${uncachedTrials.length} medical research or clinical trial titles so that a high school–level reader can understand them easily.
+
+CRITICAL RULES:
+- Preserve the original meaning, intent, and medical context exactly
+- Do NOT change what is being studied, tested, or measured
+- Do NOT add outcomes, conclusions, or assumptions
+- Keep key medical conditions, diseases, and treatments, but:
+  - You MAY replace highly technical phrasing with commonly understood equivalents
+  - You MAY add brief clarifying words if needed (e.g., "a type of cancer")
+- Avoid abbreviations unless they are widely known (e.g., HIV, COVID-19)
+- Use clear, simple sentence structure
+- Remove unnecessary scientific framing (e.g., "A randomized controlled trial of…")
+
+STYLE:
+- 10–15 words maximum per title
+- Plain, patient-friendly language
+- Neutral and factual tone
 
 ${titlesList}
 
@@ -267,7 +301,7 @@ export async function simplifyTrialDetails(trial) {
 
   try {
     const model = geminiInstance.getGenerativeModel({
-      model: "gemini-2.0-flash-exp",
+      model: "gemini-2.5-flash",
     });
 
     // Build comprehensive trial information for AI processing
@@ -295,12 +329,12 @@ Return a JSON object with the following structure:
 {
   "title": "Simplified version of the trial title in plain language, easy to understand (keep it short, 10-15 words max)",
   "studyPurpose": "Simple explanation of what this study is trying to find out, in 2-3 sentences",
-  "eligibilityCriteria": {
+    "eligibilityCriteria": {
     "summary": "Simple explanation of who can join this study, in plain language",
     "gender": "Simple explanation of gender requirements (e.g., 'Men and women' or 'Anyone')",
     "ageRange": "Simple explanation of age requirements (e.g., '18 to 65 years old' or 'Adults 18 and older')",
     "volunteers": "Simple explanation of whether healthy people can join (e.g., 'Yes, healthy people can join' or 'No, only people with the condition can join')",
-    "detailedCriteria": "Simplified version of the detailed eligibility criteria, broken into easy-to-read bullet points or short paragraphs"
+    "detailedCriteria": "Simplified version of the detailed eligibility criteria. Format as: 'Required criteria to participate in study: [list inclusion criteria in 2-4 concise bullet points or short sentences, keep each point under 50 words]\\n\\nCriteria that might exclude you from the study: [list exclusion criteria in 2-4 concise bullet points or short sentences, keep each point under 50 words]'. If there are no exclusion criteria, only include the inclusion section. Keep the total length reasonable - prioritize clarity and brevity over completeness."
   },
   "conditionsStudied": "Simple explanation of what health conditions or diseases this study is looking at, in plain language",
   "whatToExpect": "Simple explanation of what participants might expect if they join, in 2-3 sentences"

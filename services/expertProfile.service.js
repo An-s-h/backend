@@ -47,7 +47,7 @@ async function generateBioSummary(expertData) {
   if (!genAI) return null;
 
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
     const prompt = `Generate a concise 2-3 sentence professional summary for this researcher:
     
 Name: ${expertData.name || "Unknown"}

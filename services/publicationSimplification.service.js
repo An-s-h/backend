@@ -62,11 +62,28 @@ export async function simplifyPublicationTitle(publication) {
       model: "gemini-2.5-flash-lite",
     });
 
-    const prompt = `Simplify this research publication title into plain, easy-to-understand language that a high school student could understand. Keep it short (10-15 words max). Use simple words and avoid medical or scientific jargon.
+    const prompt = `Rewrite this medical research or clinical trial title so a normal patient (high school level) can easily understand it.
 
-Original Title: ${publication.title}
+Rules:
+- Keep the meaning exactly the same
+- Do not change what the study or trial is about
+- Do not add results, conclusions, or opinions
+- Keep important disease names, conditions, and treatments
+- If the wording is too technical, replace it with simpler, commonly used words
+- You may add a short explanation if it helps understanding
+- Avoid short forms unless they are very common (like HIV or COVID)
+- Remove unnecessary scientific phrases
 
-Return ONLY the simplified title, nothing else. No quotes, no explanations, just the simplified title.`;
+Style:
+- 10 to 15 words only
+- Simple, clear, patient-friendly language
+- Neutral and factual tone
+
+Original title:
+"${publication.title}"
+
+Return only the simplified title.
+No extra text, no explanations, no quotes.`;
 
     const result = await model.generateContent(prompt, {
       generationConfig: {

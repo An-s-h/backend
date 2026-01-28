@@ -7,8 +7,10 @@ import {
   simplifyTitle,
   generateTrialDetails,
   simplifyTrialSummary,
+  batchSimplifyPublicationTitles,
 } from "../services/summary.service.js";
 import { generateSummaryReport } from "../services/summaryReport.service.js";
+import { batchSimplifyTrialTitles } from "../services/trialSimplification.service.js";
 
 const router = Router();
 
@@ -139,6 +141,38 @@ router.post("/ai/simplify-trial-summary", async (req, res) => {
   } catch (error) {
     console.error("Error simplifying trial summary:", error);
     res.status(500).json({ error: "Failed to simplify trial summary" });
+  }
+});
+
+router.post("/ai/batch-simplify-titles", async (req, res) => {
+  try {
+    const { titles } = req.body || {};
+
+    if (!titles || !Array.isArray(titles)) {
+      return res.status(400).json({ error: "titles array is required" });
+    }
+
+    const simplifiedTitles = await batchSimplifyPublicationTitles(titles);
+    res.json({ simplifiedTitles });
+  } catch (error) {
+    console.error("Error batch simplifying titles:", error);
+    res.status(500).json({ error: "Failed to batch simplify titles" });
+  }
+});
+
+router.post("/ai/batch-simplify-trial-summaries", async (req, res) => {
+  try {
+    const { trials } = req.body || {};
+
+    if (!trials || !Array.isArray(trials)) {
+      return res.status(400).json({ error: "trials array is required" });
+    }
+
+    const simplifiedTitles = await batchSimplifyTrialTitles(trials);
+    res.json({ simplifiedSummaries: simplifiedTitles });
+  } catch (error) {
+    console.error("Error batch simplifying trial summaries:", error);
+    res.status(500).json({ error: "Failed to batch simplify trial summaries" });
   }
 });
 

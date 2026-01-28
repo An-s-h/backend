@@ -459,11 +459,28 @@ export async function simplifyTitle(title) {
       model: "gemini-2.5-flash-lite",
     });
 
-    const prompt = `Simplify this medical research publication title to make it easier to understand for patients. Keep the core meaning and main topic, but use simpler words and shorter phrases. The simplified title should be concise (aim for 8-12 words or 60-80 characters max) while preserving the essential information about what the study is about.
+    const prompt = `Rewrite this medical research or clinical trial title so a normal patient (high school level) can easily understand it.
 
-Original title: "${title}"
+Rules:
+- Keep the meaning exactly the same
+- Do not change what the study or trial is about
+- Do not add results, conclusions, or opinions
+- Keep important disease names, conditions, and treatments
+- If the wording is too technical, replace it with simpler, commonly used words
+- You may add a short explanation if it helps understanding
+- Avoid short forms unless they are very common (like HIV or COVID)
+- Remove unnecessary scientific phrases
 
-Return ONLY the simplified title, no explanations, no quotes, no markdown formatting. Just the simplified title text.`;
+Style:
+- 10 to 15 words only
+- Simple, clear, patient-friendly language
+- Neutral and factual tone
+
+Original title:
+"${title}"
+
+Return only the simplified title.
+No extra text, no explanations, no quotes.`;
 
     const result = await model.generateContent(prompt, {
       generationConfig: {
@@ -496,6 +513,184 @@ Return ONLY the simplified title, no explanations, no quotes, no markdown format
       return title;
     }
     return words.slice(0, 12).join(" ") + "...";
+  }
+}
+
+// Cache for simplified publication titles (in-memory)
+const publicationTitleCache = new Map();
+const PUBLICATION_CACHE_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours
+
+/**
+ * Batch simplify multiple publication titles in a single API call
+ * This is much faster than calling simplifyTitle individually
+ * @param {Array} titles - Array of title strings
+ * @returns {Promise<Array>} - Array of simplified titles in same order
+ */
+export async function batchSimplifyPublicationTitles(titles) {
+  if (!titles || titles.length === 0) {
+    return [];
+  }
+
+  // Filter out titles that don't need simplification
+  const titlesToSimplify = titles.filter(
+    (title) => title && typeof title === "string" && title.length > 60
+  );
+
+  // If no titles need simplification, return original titles
+  if (titlesToSimplify.length === 0) {
+    return titles.map((t) => t || "");
+  }
+
+  // Check cache for all titles first
+  const results = new Map();
+  const uncachedTitles = [];
+
+  for (const title of titlesToSimplify) {
+    const cacheKey = title.toLowerCase().trim();
+    const cached = publicationTitleCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < PUBLICATION_CACHE_EXPIRY) {
+      results.set(title, cached.simplifiedTitle);
+    } else {
+      uncachedTitles.push(title);
+    }
+  }
+
+  // If all were cached, return immediately
+  if (uncachedTitles.length === 0) {
+    return titles.map((t) => {
+      if (!t || typeof t !== "string") return "";
+      if (t.length <= 60) return t;
+      return results.get(t) || t;
+    });
+  }
+
+  // Check if any API key is available
+  if (!apiKey && !apiKey2) {
+    // Fallback: return original titles with truncation
+    return titles.map((t) => {
+      if (!t || typeof t !== "string") return "";
+      if (t.length <= 60) return t;
+      const words = t.split(" ");
+      return words.length <= 12 ? t : words.slice(0, 12).join(" ") + "...";
+    });
+  }
+
+  try {
+    const geminiInstance = getGeminiInstance();
+    if (!geminiInstance) {
+      // Fallback: return original titles with truncation
+      return titles.map((t) => {
+        if (!t || typeof t !== "string") return "";
+        if (t.length <= 60) return t;
+        const words = t.split(" ");
+        return words.length <= 12 ? t : words.slice(0, 12).join(" ") + "...";
+      });
+    }
+
+    const model = geminiInstance.getGenerativeModel({
+      model: "gemini-2.5-flash-lite",
+    });
+
+    // Build batch prompt with all titles (limit to reasonable size)
+    const titlesList = uncachedTitles
+      .map((t, i) => `${i + 1}. ${t}`)
+      .join("\n");
+
+    const prompt = `Rewrite the following ${uncachedTitles.length} medical research or clinical trial titles so a normal patient (high school level) can easily understand them.
+
+Rules:
+- Keep the meaning exactly the same
+- Do not change what the study or trial is about
+- Do not add results, conclusions, or opinions
+- Keep important disease names, conditions, and treatments
+- If the wording is too technical, replace it with simpler, commonly used words
+- You may add a short explanation if it helps understanding
+- Avoid short forms unless they are very common (like HIV or COVID)
+- Remove unnecessary scientific phrases
+
+Style:
+- 10 to 15 words only per title
+- Simple, clear, patient-friendly language
+- Neutral and factual tone
+
+${titlesList}
+
+Return ONLY a numbered list (1-${uncachedTitles.length}), one simplified title per line, in the same order. No quotes, no explanations. Format:
+1. [simplified title 1]
+2. [simplified title 2]`;
+
+    const result = await model.generateContent(prompt, {
+      generationConfig: {
+        maxOutputTokens: Math.min(50 * uncachedTitles.length, 1500),
+        temperature: 0.3,
+      },
+    });
+
+    let responseText = result.response.text().trim();
+
+    // Parse the numbered list response
+    const lines = responseText.split("\n").filter((line) => line.trim());
+    const simplifiedTitles = [];
+
+    for (let i = 0; i < uncachedTitles.length; i++) {
+      let simplifiedTitle = "";
+
+      // Try to find the corresponding line (handle various formats)
+      const line = lines.find((l) => {
+        const match = l.match(/^\d+[\.\)]\s*(.+)$/);
+        if (match) {
+          const num = parseInt(l.match(/^\d+/)[0]);
+          return num === i + 1;
+        }
+        return false;
+      });
+
+      if (line) {
+        const match = line.match(/^\d+[\.\)]\s*(.+)$/);
+        simplifiedTitle = match
+          ? match[1].trim()
+          : line.replace(/^\d+[\.\)]\s*/, "").trim();
+      } else if (lines[i]) {
+        // Fallback: use line by index
+        simplifiedTitle = lines[i].replace(/^\d+[\.\)]\s*/, "").trim();
+      }
+
+      // Clean up quotes
+      simplifiedTitle = simplifiedTitle.replace(/^["']|["']$/g, "").trim();
+
+      // Validate and cache
+      if (
+        !simplifiedTitle ||
+        simplifiedTitle.length > uncachedTitles[i].length ||
+        simplifiedTitle.length < 5
+      ) {
+        simplifiedTitle = uncachedTitles[i];
+      }
+
+      const cacheKey = uncachedTitles[i].toLowerCase().trim();
+      publicationTitleCache.set(cacheKey, {
+        simplifiedTitle,
+        timestamp: Date.now(),
+      });
+
+      results.set(uncachedTitles[i], simplifiedTitle);
+    }
+
+    // Return results in original order
+    return titles.map((t) => {
+      if (!t || typeof t !== "string") return "";
+      if (t.length <= 60) return t;
+      return results.get(t) || t;
+    });
+  } catch (error) {
+    console.error("Error batch simplifying publication titles:", error);
+    // Fallback: return original titles with truncation
+    return titles.map((t) => {
+      if (!t || typeof t !== "string") return "";
+      if (t.length <= 60) return t;
+      const words = t.split(" ");
+      return words.length <= 12 ? t : words.slice(0, 12).join(" ") + "...";
+    });
   }
 }
 
@@ -921,11 +1116,29 @@ export async function simplifyTrialSummary(trial) {
       .filter(Boolean)
       .join(". ");
 
-    const prompt = `Simplify this clinical trial title to make it easier to understand for patients. Keep the core meaning and main topic, but use simpler words and shorter phrases. The simplified title should be concise (aim for 10-15 words or 80-100 characters max) while preserving the essential information about what the trial is about.
+    const prompt = `Simplify the following medical research or clinical trial title so that a high school–level reader can understand it easily.
 
-${trialContext ? `Context: ${trialContext}\n` : ""}Original title: "${title}"
+CRITICAL RULES:
+- Preserve the original meaning, intent, and medical context exactly
+- Do NOT change what is being studied, tested, or measured
+- Do NOT add outcomes, conclusions, or assumptions
+- Keep key medical conditions, diseases, and treatments, but:
+  - You MAY replace highly technical phrasing with commonly understood equivalents
+  - You MAY add brief clarifying words if needed (e.g., "a type of cancer")
+- Avoid abbreviations unless they are widely known (e.g., HIV, COVID-19)
+- Use clear, simple sentence structure
+- Remove unnecessary scientific framing (e.g., "A randomized controlled trial of…")
 
-Return ONLY the simplified title, no explanations, no quotes, no markdown formatting. Just the simplified title text.`;
+STYLE:
+- 10–15 words maximum
+- Plain, patient-friendly language
+- Neutral and factual tone
+
+${trialContext ? `Context: ${trialContext}\n` : ""}Original title:
+"${title}"
+
+Return ONLY the simplified title.
+No explanations, no quotes, no formatting.`;
 
     const result = await model.generateContent(prompt, {
       generationConfig: {

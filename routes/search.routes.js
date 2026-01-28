@@ -539,7 +539,10 @@ router.get("/search/publications", async (req, res) => {
       pubmedResult.items?.length
     );
 
-    const allResults = pubmedResult.items || [];
+    // Filter out publications without abstracts
+    const allResults = (pubmedResult.items || []).filter(
+      (pub) => pub.abstract && pub.abstract.trim().length > 0
+    );
 
     // Build user profile for matching
     let userProfile = null;
@@ -1201,10 +1204,15 @@ router.get("/search/expert/publications", async (req, res) => {
       return res.json({ publications: [] });
     }
 
-    const publications = await searchGoogleScholarPublications({
+    const allPublications = await searchGoogleScholarPublications({
       author: author.trim(),
       num: 10,
     });
+
+    // Filter out publications without abstracts
+    const publications = (allPublications || []).filter(
+      (pub) => pub.abstract && pub.abstract.trim().length > 0
+    );
 
     res.json({ publications });
   } catch (error) {
