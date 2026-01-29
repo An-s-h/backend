@@ -1,18 +1,8 @@
-import nodemailer from "nodemailer";
 
-// Create reusable transporter using Gmail SMTP
-const createTransporter = () => {
-  return nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-      user: process.env.GMAIL_USER,
-      pass: process.env.GMAIL_APP_PASSWORD, // Use App Password, not regular password
-    },
-  });
-};
+const UNOSEND_API_URL = "https://www.unosend.co/api/v1/emails";
 
 /**
- * Send verification email to user
+ * Send verification email via Unosend API
  * @param {string} email - Recipient email address
  * @param {string} username - Recipient username
  * @param {string} verificationToken - Email verification token
@@ -26,18 +16,26 @@ export async function sendVerificationEmail(
   otp
 ) {
   try {
-    const transporter = createTransporter();
+    const apiKey = process.env.UNOSEND_API_KEY;
+    const fromEmail = process.env.UNOSEND_FROM_EMAIL || process.env.GMAIL_USER;
+
+    if (!apiKey) {
+      throw new Error("UNOSEND_API_KEY is not set in environment");
+    }
+    if (!fromEmail) {
+      throw new Error(
+        "UNOSEND_FROM_EMAIL (or GMAIL_USER) is not set - use a verified sending domain"
+      );
+    }
+
     const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
     const verificationLink = `${frontendUrl}/verify-email?token=${verificationToken}`;
 
-    // Logo URL - configure via environment variable (should be S3 URL)
-    const logoUrl = process.env.LOGO_URL || `https://res.cloudinary.com/dtgmjvfms/image/upload/logo_mh2rpv.png`;
+    const logoUrl =
+      process.env.LOGO_URL ||
+      `https://res.cloudinary.com/dtgmjvfms/image/upload/logo_mh2rpv.png`;
 
-    const mailOptions = {
-      from: `"Collabiora" <${process.env.GMAIL_USER}>`,
-      to: email,
-      subject: "Verify Your Collabiora Email Address",
-      html: `
+    const html = `
         <!DOCTYPE html>
         <html>
         <head>
@@ -85,25 +83,36 @@ export async function sendVerificationEmail(
           </div>
         </body>
         </html>
-      `,
-      text: `
-        Hello ${username}!
-        
-        Thank you for signing up for Collabiora. Please verify your email address.
-        
-        Your Verification Code: ${otp}
-        (This code expires in 15 minutes)
-        
-        Or click the link below to verify:
-        ${verificationLink}
-        
-        The verification link will expire in 24 hours. If you didn't create an account with Collabiora, please ignore this email.
-      `,
-    };
+      `;
 
-    const info = await transporter.sendMail(mailOptions);
-    console.log("Verification email sent:", info.messageId);
-    return { success: true, messageId: info.messageId };
+    const response = await fetch(UNOSEND_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: fromEmail.includes("<") ? fromEmail : `"Collabiora" <${fromEmail}>`,
+        to: [email],
+        subject: "Verify Your Collabiora Email Address",
+        html,
+      }),
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      let errMessage = errBody;
+      try {
+        const parsed = JSON.parse(errBody);
+        errMessage = parsed.message || parsed.error || errBody;
+      } catch (_) {}
+      throw new Error(`Unosend API error (${response.status}): ${errMessage}`);
+    }
+
+    const data = await response.json().catch(() => ({}));
+    const messageId = data.id || data.messageId || data.message_id;
+    console.log("Verification email sent via Unosend:", messageId || "ok");
+    return { success: true, messageId: messageId || "sent" };
   } catch (error) {
     console.error("Error sending verification email:", error);
     throw new Error(`Failed to send verification email: ${error.message}`);
@@ -111,14 +120,25 @@ export async function sendVerificationEmail(
 }
 
 /**
- * Verify email transporter configuration
+ * Verify Unosend configuration (API key and from address set)
  * @returns {Promise<boolean>} - True if configuration is valid
  */
 export async function verifyEmailConfig() {
   try {
-    const transporter = createTransporter();
-    await transporter.verify();
-    console.log("Email server is ready to send messages");
+    if (!process.env.UNOSEND_API_KEY) {
+      console.error("Email configuration error: UNOSEND_API_KEY is not set");
+      return false;
+    }
+    if (
+      !process.env.UNOSEND_FROM_EMAIL &&
+      !process.env.GMAIL_USER
+    ) {
+      console.error(
+        "Email configuration error: UNOSEND_FROM_EMAIL (or GMAIL_USER) is not set"
+      );
+      return false;
+    }
+    console.log("Unosend email configuration is ready");
     return true;
   } catch (error) {
     console.error("Email configuration error:", error);
