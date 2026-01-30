@@ -25,6 +25,9 @@ const userSchema = new mongoose.Schema(
     lastVerificationEmailSent: { type: Date }, // Track when last verification email was sent
     emailVerificationOTP: { type: String }, // 6-digit OTP for email verification
     emailVerificationOTPExpiry: { type: Date }, // OTP expires in 15 minutes
+
+    // Admin access (or set ADMIN_EMAILS in env to treat those emails as admin at login)
+    isAdmin: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

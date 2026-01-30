@@ -1,76 +1,127 @@
 import { Router } from "express";
+import mongoose from "mongoose";
+import jwt from "jsonwebtoken";
 import { Profile } from "../models/Profile.js";
 import { User } from "../models/User.js";
 import { SearchLimit } from "../models/SearchLimit.js";
+import { ForumCategory } from "../models/ForumCategory.js";
+import { Thread } from "../models/Thread.js";
+import { Reply } from "../models/Reply.js";
+import { Post } from "../models/Post.js";
+import { Comment } from "../models/Comment.js";
+import { Community } from "../models/Community.js";
+import { CommunityProposal } from "../models/CommunityProposal.js";
+import { CommunityMembership } from "../models/CommunityMembership.js";
+import { Subcategory } from "../models/Subcategory.js";
 
 const router = Router();
+const JWT_SECRET =
+  process.env.JWT_SECRET || "your-secret-key-change-in-production";
 
-// Admin credentials (hardcoded for basic implementation)
-const ADMIN_USERNAME = "admin123";
-const ADMIN_PASSWORD = "admin123";
-
-// Admin login endpoint
-router.post("/admin/login", async (req, res) => {
-  try {
-    const { username, password } = req.body;
-
-    if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
-      // Set a simple session token (in production, use JWT or proper session management)
-      res.json({
-        success: true,
-        message: "Login successful",
-        token: "admin_token_123", // Simple token for basic implementation
-      });
-    } else {
-      res.status(401).json({
-        success: false,
-        error: "Invalid credentials",
-      });
-    }
-  } catch (error) {
-    console.error("Admin login error:", error);
-    res.status(500).json({ error: "Failed to login" });
-  }
-});
-
-// Middleware to verify admin token (basic implementation)
+// Middleware: verify JWT and require isAdmin claim (admin signs in via main /api/auth/login)
 const verifyAdmin = (req, res, next) => {
   const token =
     req.headers.authorization?.replace("Bearer ", "") || req.query.token;
 
-  if (token === "admin_token_123") {
+  if (!token) {
+    return res.status(401).json({ error: "Unauthorized. Admin access required." });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    if (decoded.isAdmin !== true) {
+      return res.status(401).json({ error: "Unauthorized. Admin access required." });
+    }
+    req.adminUserId = decoded.userId;
     next();
-  } else {
-    res.status(401).json({ error: "Unauthorized. Admin access required." });
+  } catch (err) {
+    return res.status(401).json({ error: "Unauthorized. Admin access required." });
   }
 };
 
-// Get all CuraLink experts (for admin dashboard)
+// Get activity counts for a list of user IDs (threads, replies, posts, comments, communities)
+async function getActivityCounts(userIds) {
+  if (!userIds || userIds.length === 0) {
+    return { threads: {}, replies: {}, posts: {}, comments: {}, communities: {} };
+  }
+  const ids = userIds.map((id) => (id && id.toString ? id.toString() : id));
+  const objectIds = ids.map((id) => (typeof id === "string" ? new mongoose.Types.ObjectId(id) : id));
+
+  const [threadCounts, replyCounts, postCounts, commentCounts, communityCounts] = await Promise.all([
+    Thread.aggregate([
+      { $match: { authorUserId: { $in: objectIds } } },
+      { $group: { _id: "$authorUserId", count: { $sum: 1 } } },
+    ]),
+    Reply.aggregate([
+      { $match: { authorUserId: { $in: objectIds } } },
+      { $group: { _id: "$authorUserId", count: { $sum: 1 } } },
+    ]),
+    Post.aggregate([
+      { $match: { authorUserId: { $in: objectIds } } },
+      { $group: { _id: "$authorUserId", count: { $sum: 1 } } },
+    ]),
+    Comment.aggregate([
+      { $match: { authorUserId: { $in: objectIds } } },
+      { $group: { _id: "$authorUserId", count: { $sum: 1 } } },
+    ]),
+    CommunityMembership.aggregate([
+      { $match: { userId: { $in: objectIds } } },
+      { $group: { _id: "$userId", count: { $sum: 1 } } },
+    ]),
+  ]);
+
+  const toMap = (arr) => {
+    const m = {};
+    arr.forEach((item) => {
+      m[item._id.toString()] = item.count;
+    });
+    return m;
+  };
+
+  return {
+    threads: toMap(threadCounts),
+    replies: toMap(replyCounts),
+    posts: toMap(postCounts),
+    comments: toMap(commentCounts),
+    communities: toMap(communityCounts),
+  };
+}
+
+// Get all CuraLink experts (for admin dashboard) with activity stats
 router.get("/admin/experts", verifyAdmin, async (req, res) => {
   try {
     const profiles = await Profile.find({ role: "researcher" })
-      .populate("userId", "username email")
+      .populate("userId", "username email createdAt")
       .lean();
 
-    const experts = profiles
-      .filter((p) => p.userId && p.researcher)
-      .map((profile) => {
-        const user = profile.userId;
-        const researcher = profile.researcher || {};
-        return {
-          _id: profile.userId._id || profile.userId.id,
-          userId: profile.userId._id || profile.userId.id,
-          name: user.username || "Unknown Researcher",
-          email: user.email,
-          orcid: researcher.orcid || null,
-          bio: researcher.bio || null,
-          location: researcher.location || null,
-          specialties: researcher.specialties || [],
-          interests: researcher.interests || [],
-          available: researcher.available || false,
-          isVerified: researcher.isVerified || false,
-        };
-      });
+    const expertList = profiles.filter((p) => p.userId && p.researcher);
+    const userIds = expertList.map((p) => p.userId._id || p.userId.id);
+    const activity = await getActivityCounts(userIds);
+
+    const experts = expertList.map((profile) => {
+      const user = profile.userId;
+      const researcher = profile.researcher || {};
+      const uid = (user._id || user.id).toString();
+      return {
+        _id: user._id || user.id,
+        userId: user._id || user.id,
+        name: user.username || "Unknown Researcher",
+        email: user.email,
+        accountCreated: user.createdAt || null,
+        orcid: researcher.orcid || null,
+        bio: researcher.bio || null,
+        location: researcher.location || null,
+        specialties: researcher.specialties || [],
+        interests: researcher.interests || [],
+        available: researcher.available || false,
+        isVerified: researcher.isVerified || false,
+        threadCount: activity.threads[uid] || 0,
+        replyCount: activity.replies[uid] || 0,
+        postCount: activity.posts[uid] || 0,
+        commentCount: activity.comments[uid] || 0,
+        communityCount: activity.communities[uid] || 0,
+      };
+    });
 
     res.json({ experts });
   } catch (error) {
@@ -109,6 +160,172 @@ router.patch("/admin/experts/:userId/verify", verifyAdmin, async (req, res) => {
   } catch (error) {
     console.error("Error updating expert verification:", error);
     res.status(500).json({ error: "Failed to update verification status" });
+  }
+});
+
+// Dashboard overview stats (new joiners, totals)
+router.get("/admin/stats/overview", verifyAdmin, async (req, res) => {
+  try {
+    const now = new Date();
+    const last24 = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const thisWeek = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const thisMonth = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    const [patientUserIds, researcherUserIds] = await Promise.all([
+      Profile.find({ role: "patient" }).distinct("userId"),
+      Profile.find({ role: "researcher" }).distinct("userId"),
+    ]);
+
+    const [
+      patientsLast24,
+      patientsThisWeek,
+      patientsThisMonth,
+      researchersLast24,
+      researchersThisWeek,
+      researchersThisMonth,
+      totalForums,
+      totalDiscoveryPosts,
+    ] = await Promise.all([
+      patientUserIds.length
+        ? User.countDocuments({
+            _id: { $in: patientUserIds },
+            createdAt: { $gte: last24 },
+          })
+        : 0,
+      patientUserIds.length
+        ? User.countDocuments({
+            _id: { $in: patientUserIds },
+            createdAt: { $gte: thisWeek },
+          })
+        : 0,
+      patientUserIds.length
+        ? User.countDocuments({
+            _id: { $in: patientUserIds },
+            createdAt: { $gte: thisMonth },
+          })
+        : 0,
+      researcherUserIds.length
+        ? User.countDocuments({
+            _id: { $in: researcherUserIds },
+            createdAt: { $gte: last24 },
+          })
+        : 0,
+      researcherUserIds.length
+        ? User.countDocuments({
+            _id: { $in: researcherUserIds },
+            createdAt: { $gte: thisWeek },
+          })
+        : 0,
+      researcherUserIds.length
+        ? User.countDocuments({
+            _id: { $in: researcherUserIds },
+            createdAt: { $gte: thisMonth },
+          })
+        : 0,
+      ForumCategory.countDocuments(),
+      Post.countDocuments(),
+    ]);
+
+    res.json({
+      newPatients: { last24: patientsLast24, thisWeek: patientsThisWeek, thisMonth: patientsThisMonth },
+      newResearchers: { last24: researchersLast24, thisWeek: researchersThisWeek, thisMonth: researchersThisMonth },
+      totalForums: totalForums,
+      totalDiscoveryPosts: totalDiscoveryPosts,
+    });
+  } catch (error) {
+    console.error("Error fetching overview stats:", error);
+    res.status(500).json({ error: "Failed to fetch overview stats" });
+  }
+});
+
+// Get all patients with optional sort
+router.get("/admin/patients", verifyAdmin, async (req, res) => {
+  try {
+    const { sortBy = "accountCreated", order = "desc" } = req.query;
+
+    const profiles = await Profile.find({ role: "patient" })
+      .populate("userId", "username email createdAt")
+      .lean();
+
+    const patientList = profiles.filter((p) => p.userId);
+    const userIds = patientList.map((p) => p.userId._id || p.userId.id);
+    const activity = userIds.length ? await getActivityCounts(userIds) : { threads: {}, replies: {}, posts: {}, comments: {}, communities: {} };
+
+    let patients = patientList.map((profile) => {
+      const user = profile.userId;
+      const patient = profile.patient || {};
+      const uid = (user._id || user.id).toString();
+      return {
+        _id: user._id || user.id,
+        userId: user._id || user.id,
+        name: user.username || "Unknown Patient",
+        email: user.email,
+        accountCreated: user.createdAt || null,
+        conditions: patient.conditions || [],
+        location: patient.location || null,
+        threadCount: activity.threads[uid] || 0,
+        replyCount: activity.replies[uid] || 0,
+        postCount: activity.posts[uid] || 0,
+        commentCount: activity.comments[uid] || 0,
+        communityCount: activity.communities[uid] || 0,
+      };
+    });
+
+    const dir = order === "asc" ? 1 : -1;
+    if (sortBy === "name") {
+      patients.sort((a, b) => dir * (a.name || "").localeCompare(b.name || ""));
+    } else if (sortBy === "accountCreated") {
+      patients.sort((a, b) => {
+        const da = a.accountCreated ? new Date(a.accountCreated).getTime() : 0;
+        const db = b.accountCreated ? new Date(b.accountCreated).getTime() : 0;
+        return dir * (da - db);
+      });
+    } else if (sortBy === "activity") {
+      patients.sort((a, b) => {
+        const totalA = (a.threadCount || 0) + (a.replyCount || 0) + (a.postCount || 0) + (a.commentCount || 0);
+        const totalB = (b.threadCount || 0) + (b.replyCount || 0) + (b.postCount || 0) + (b.commentCount || 0);
+        return dir * (totalA - totalB);
+      });
+    }
+
+    res.json({ patients });
+  } catch (error) {
+    console.error("Error fetching patients for admin:", error);
+    res.status(500).json({ error: "Failed to fetch patients" });
+  }
+});
+
+// Delete patient account completely (admin only)
+router.delete("/admin/patients/:id", verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid patient ID" });
+    }
+
+    const profile = await Profile.findOne({ userId: id, role: "patient" });
+    if (!profile) {
+      return res.status(404).json({ error: "Patient not found" });
+    }
+
+    const userId = new mongoose.Types.ObjectId(id);
+
+    const threadIds = await Thread.find({ authorUserId: userId }).distinct("_id");
+    await Reply.deleteMany({ $or: [{ authorUserId: userId }, { threadId: { $in: threadIds } }] });
+    await Thread.deleteMany({ authorUserId: userId });
+
+    const postIds = await Post.find({ authorUserId: userId }).distinct("_id");
+    await Comment.deleteMany({ $or: [{ authorUserId: userId }, { postId: { $in: postIds } }] });
+    await Post.deleteMany({ authorUserId: userId });
+
+    await CommunityMembership.deleteMany({ userId });
+    await Profile.deleteOne({ userId });
+    await User.findByIdAndDelete(id);
+
+    res.json({ ok: true, message: "Patient account deleted completely" });
+  } catch (error) {
+    console.error("Error deleting patient:", error);
+    res.status(500).json({ error: "Failed to delete patient" });
   }
 });
 
@@ -192,6 +409,346 @@ router.post("/admin/users/:userId/reset-verification-email-limit", verifyAdmin, 
   } catch (error) {
     console.error("Error resetting verification email limit:", error);
     res.status(500).json({ error: "Failed to reset verification email limit" });
+  }
+});
+
+// ============================================
+// FORUMS MANAGEMENT (admin)
+// ============================================
+
+// List forum categories
+router.get("/admin/forums/categories", verifyAdmin, async (req, res) => {
+  try {
+    const categories = await ForumCategory.find({}).sort({ name: 1 }).lean();
+    const categoryIds = categories.map((c) => c._id);
+    const threadCounts = await Thread.aggregate([
+      { $match: { categoryId: { $in: categoryIds } } },
+      { $group: { _id: "$categoryId", count: { $sum: 1 } } },
+    ]);
+    const countMap = {};
+    threadCounts.forEach((item) => {
+      countMap[item._id.toString()] = item.count;
+    });
+    const withCounts = categories.map((cat) => ({
+      ...cat,
+      threadCount: countMap[cat._id.toString()] || 0,
+    }));
+    res.json({ categories: withCounts });
+  } catch (error) {
+    console.error("Error fetching forum categories:", error);
+    res.status(500).json({ error: "Failed to fetch forum categories" });
+  }
+});
+
+// Delete forum category (and its threads + replies)
+router.delete("/admin/forums/categories/:id", verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const category = await ForumCategory.findById(id);
+    if (!category) {
+      return res.status(404).json({ error: "Forum category not found" });
+    }
+    const threadIds = await Thread.find({ categoryId: id }).distinct("_id");
+    await Reply.deleteMany({ threadId: { $in: threadIds } });
+    await Thread.deleteMany({ categoryId: id });
+    await ForumCategory.findByIdAndDelete(id);
+    res.json({ ok: true, message: "Forum category deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting forum category:", error);
+    res.status(500).json({ error: "Failed to delete forum category" });
+  }
+});
+
+// List forum threads (all or by category)
+router.get("/admin/forums/threads", verifyAdmin, async (req, res) => {
+  try {
+    const { categoryId, page = 1, limit = 20 } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const query = categoryId ? { categoryId } : {};
+    const threads = await Thread.find(query)
+      .populate("categoryId", "name slug")
+      .populate("authorUserId", "username email")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit))
+      .lean();
+    const total = await Thread.countDocuments(query);
+    const threadIds = threads.map((t) => t._id);
+    const replyCounts = await Reply.aggregate([
+      { $match: { threadId: { $in: threadIds } } },
+      { $group: { _id: "$threadId", count: { $sum: 1 } } },
+    ]);
+    const replyMap = {};
+    replyCounts.forEach((item) => {
+      replyMap[item._id.toString()] = item.count;
+    });
+    const withCounts = threads.map((t) => ({
+      ...t,
+      replyCount: replyMap[t._id.toString()] || 0,
+    }));
+    res.json({
+      threads: withCounts,
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) },
+    });
+  } catch (error) {
+    console.error("Error fetching forum threads:", error);
+    res.status(500).json({ error: "Failed to fetch forum threads" });
+  }
+});
+
+// Delete forum thread (and its replies)
+router.delete("/admin/forums/threads/:id", verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const thread = await Thread.findById(id);
+    if (!thread) {
+      return res.status(404).json({ error: "Thread not found" });
+    }
+    await Reply.deleteMany({ threadId: id });
+    await Thread.findByIdAndDelete(id);
+    res.json({ ok: true, message: "Thread deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting thread:", error);
+    res.status(500).json({ error: "Failed to delete thread" });
+  }
+});
+
+// ============================================
+// POSTS MANAGEMENT (admin)
+// ============================================
+
+// List all posts (paginated)
+router.get("/admin/posts", verifyAdmin, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, communityId } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const query = communityId ? { communityId } : {};
+    const posts = await Post.find(query)
+      .populate("authorUserId", "username email")
+      .populate("communityId", "name slug")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit))
+      .lean();
+    const total = await Post.countDocuments(query);
+    res.json({
+      posts,
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) },
+    });
+  } catch (error) {
+    console.error("Error fetching posts:", error);
+    res.status(500).json({ error: "Failed to fetch posts" });
+  }
+});
+
+// Delete any post (admin)
+router.delete("/admin/posts/:id", verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const post = await Post.findById(id);
+    if (!post) {
+      return res.status(404).json({ error: "Post not found" });
+    }
+    await Comment.deleteMany({ postId: id });
+    await Post.findByIdAndDelete(id);
+    res.json({ ok: true, message: "Post deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting post:", error);
+    res.status(500).json({ error: "Failed to delete post" });
+  }
+});
+
+// ============================================
+// COMMUNITY MANAGEMENT (admin)
+// ============================================
+
+// List communities
+router.get("/admin/communities", verifyAdmin, async (req, res) => {
+  try {
+    const communities = await Community.find({}).sort({ name: 1 }).lean();
+    const communityIds = communities.map((c) => c._id);
+    const [memberCounts, threadCounts] = await Promise.all([
+      CommunityMembership.aggregate([
+        { $match: { communityId: { $in: communityIds } } },
+        { $group: { _id: "$communityId", count: { $sum: 1 } } },
+      ]),
+      Thread.aggregate([
+        { $match: { communityId: { $in: communityIds } } },
+        { $group: { _id: "$communityId", count: { $sum: 1 } } },
+      ]),
+    ]);
+    const memberMap = {};
+    const threadMap = {};
+    memberCounts.forEach((item) => { memberMap[item._id.toString()] = item.count; });
+    threadCounts.forEach((item) => { threadMap[item._id.toString()] = item.count; });
+    const withCounts = communities.map((c) => ({
+      ...c,
+      memberCount: memberMap[c._id.toString()] || 0,
+      threadCount: threadMap[c._id.toString()] || 0,
+    }));
+    res.json({ communities: withCounts });
+  } catch (error) {
+    console.error("Error fetching communities:", error);
+    res.status(500).json({ error: "Failed to fetch communities" });
+  }
+});
+
+// Create community (admin)
+router.post("/admin/communities", verifyAdmin, async (req, res) => {
+  try {
+    const { name, description, icon, color, tags, isOfficial } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: "name is required" });
+    }
+    const slug = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "");
+    const existing = await Community.findOne({ slug });
+    if (existing) {
+      return res.status(400).json({ error: "A community with this name already exists" });
+    }
+    const community = await Community.create({
+      name: name.trim(),
+      slug,
+      description: description || "",
+      icon: icon || "💬",
+      color: color || "#2F3C96",
+      tags: Array.isArray(tags) ? tags : [],
+      isOfficial: !!isOfficial,
+    });
+    res.status(201).json({ ok: true, community });
+  } catch (error) {
+    console.error("Error creating community:", error);
+    res.status(500).json({ error: "Failed to create community" });
+  }
+});
+
+// Delete community (admin) – cascades memberships, subcategories; threads/replies may remain with orphaned refs or you can delete them
+router.delete("/admin/communities/:id", verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const community = await Community.findById(id);
+    if (!community) {
+      return res.status(404).json({ error: "Community not found" });
+    }
+    const threadIds = await Thread.find({ communityId: id }).distinct("_id");
+    await Reply.deleteMany({ threadId: { $in: threadIds } });
+    await Thread.deleteMany({ communityId: id });
+    await CommunityMembership.deleteMany({ communityId: id });
+    await Subcategory.deleteMany({ parentCommunityId: id });
+    await Post.updateMany({ communityId: id }, { $set: { communityId: null } });
+    await Community.findByIdAndDelete(id);
+    res.json({ ok: true, message: "Community deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting community:", error);
+    res.status(500).json({ error: "Failed to delete community" });
+  }
+});
+
+// ============================================
+// COMMUNITY PROPOSALS (admin)
+// ============================================
+
+// List community proposals (pending first, then all)
+router.get("/admin/community-proposals", verifyAdmin, async (req, res) => {
+  try {
+    const { status } = req.query;
+    const query = status ? { status } : {};
+    const proposals = await CommunityProposal.find(query)
+      .populate("proposedBy", "username email")
+      .sort({ status: 1, createdAt: -1 })
+      .lean();
+    res.json({ proposals });
+  } catch (error) {
+    console.error("Error fetching community proposals:", error);
+    res.status(500).json({ error: "Failed to fetch proposals" });
+  }
+});
+
+// Approve a community proposal — creates the community and adds proposer as admin member
+router.post("/admin/community-proposals/:id/approve", verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { icon, color } = req.body;
+
+    const proposal = await CommunityProposal.findById(id);
+    if (!proposal) {
+      return res.status(404).json({ error: "Proposal not found" });
+    }
+    if (proposal.status !== "pending") {
+      return res.status(400).json({ error: "Proposal already reviewed" });
+    }
+
+    const name = proposal.title.trim();
+    const slug = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "");
+
+    const existing = await Community.findOne({ slug });
+    if (existing) {
+      return res.status(400).json({
+        error: "A community with this name already exists. Reject the proposal or use a different name.",
+      });
+    }
+
+    const community = await Community.create({
+      name,
+      slug,
+      description: proposal.description || "",
+      icon: icon || "💬",
+      color: color || "#2F3C96",
+      coverImage: proposal.thumbnailUrl || "",
+      createdBy: proposal.proposedBy,
+      isOfficial: false,
+    });
+
+    await CommunityMembership.create({
+      userId: proposal.proposedBy,
+      communityId: community._id,
+      role: "admin",
+    });
+
+    proposal.status = "approved";
+    proposal.reviewedAt = new Date();
+    proposal.reviewedBy = req.adminUserId;
+    proposal.createdCommunityId = community._id;
+    await proposal.save();
+
+    res.json({
+      ok: true,
+      message: "Community created and proposal approved",
+      community,
+    });
+  } catch (error) {
+    console.error("Error approving community proposal:", error);
+    res.status(500).json({ error: "Failed to approve proposal" });
+  }
+});
+
+// Reject a community proposal
+router.post("/admin/community-proposals/:id/reject", verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const proposal = await CommunityProposal.findById(id);
+    if (!proposal) {
+      return res.status(404).json({ error: "Proposal not found" });
+    }
+    if (proposal.status !== "pending") {
+      return res.status(400).json({ error: "Proposal already reviewed" });
+    }
+
+    proposal.status = "rejected";
+    proposal.reviewedAt = new Date();
+    proposal.reviewedBy = req.adminUserId;
+    await proposal.save();
+
+    res.json({ ok: true, message: "Proposal rejected" });
+  } catch (error) {
+    console.error("Error rejecting community proposal:", error);
+    res.status(500).json({ error: "Failed to reject proposal" });
   }
 });
 

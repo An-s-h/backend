@@ -1,6 +1,7 @@
 import { Router } from "express";
 import mongoose from "mongoose";
 import { Community } from "../models/Community.js";
+import { CommunityProposal } from "../models/CommunityProposal.js";
 import { Subcategory } from "../models/Subcategory.js";
 import { CommunityMembership } from "../models/CommunityMembership.js";
 import { Thread } from "../models/Thread.js";
@@ -8,6 +9,7 @@ import { Reply } from "../models/Reply.js";
 import { User } from "../models/User.js";
 import { Profile } from "../models/Profile.js";
 import { Notification } from "../models/Notification.js";
+import { verifySession } from "../middleware/auth.js";
 
 const router = Router();
 
@@ -124,6 +126,7 @@ router.get("/communities", async (req, res) => {
 
     const communitiesWithData = communities.map((community) => ({
       ...community,
+      image: community.coverImage || community.image,
       memberCount: memberCountMap[community._id.toString()] || 0,
       threadCount: threadCountMap[community._id.toString()] || 0,
       isFollowing: !!userMembershipMap[community._id.toString()],
@@ -138,6 +141,39 @@ router.get("/communities", async (req, res) => {
   } catch (error) {
     console.error("Error fetching communities:", error);
     res.status(500).json({ error: "Failed to fetch communities" });
+  }
+});
+
+// Propose a new community (patients and researchers) — requires auth
+router.post("/communities/proposals", verifySession, async (req, res) => {
+  try {
+    const { title, description, thumbnailUrl } = req.body;
+    const proposedBy = req.user._id;
+
+    if (!title || !String(title).trim()) {
+      return res.status(400).json({ error: "Title is required" });
+    }
+
+    const profile = await Profile.findOne({ userId: proposedBy }).lean();
+    const proposedByRole = profile?.role === "researcher" ? "researcher" : "patient";
+
+    const proposal = await CommunityProposal.create({
+      title: String(title).trim(),
+      description: description ? String(description).trim() : "",
+      thumbnailUrl: thumbnailUrl || "",
+      proposedBy,
+      proposedByRole,
+      status: "pending",
+    });
+
+    const populated = await CommunityProposal.findById(proposal._id)
+      .populate("proposedBy", "username email")
+      .lean();
+
+    res.status(201).json({ ok: true, proposal: populated });
+  } catch (error) {
+    console.error("Error creating community proposal:", error);
+    res.status(500).json({ error: "Failed to submit proposal" });
   }
 });
 

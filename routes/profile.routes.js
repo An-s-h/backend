@@ -23,13 +23,13 @@ router.post("/profile/:userId", async (req, res) => {
   const doc = await Profile.findOneAndUpdate(
     { userId },
     { ...payload, userId },
-    { new: true, upsert: true }
+    { new: true, upsert: true },
   );
   return res.json({ ok: true, profile: doc });
 });
 
-// GET /api/curalink-expert/profile/:userId - Get CuraLink expert profile with ORCID data and forums
-router.get("/curalink-expert/profile/:userId", async (req, res) => {
+// GET /api/collabiora-expert/profile/:userId - Get Collabiora expert profile with ORCID data and forums
+router.get("/collabiora-expert/profile/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
     const { currentUserId } = req.query; // For checking follow/favorite status
@@ -134,7 +134,10 @@ router.get("/curalink-expert/profile/:userId", async (req, res) => {
             fundings: orcidProfileData.fundings || [],
             totalFundings: orcidProfileData.totalFundings || 0,
             totalPeerReviews: orcidProfileData.totalPeerReviews || 0,
-            totalWorks: orcidProfileData.totalWorks || orcidProfileData.publications?.length || 0,
+            totalWorks:
+              orcidProfileData.totalWorks ||
+              orcidProfileData.publications?.length ||
+              0,
           };
         } else {
           // Even if fetchFullORCIDProfile returns null, still include publications count as 0
@@ -213,11 +216,11 @@ router.get("/curalink-expert/profile/:userId", async (req, res) => {
     }
 
     // Find all replies by this expert
-    const expertReplies = await Reply.find({ 
+    const expertReplies = await Reply.find({
       $or: [
         { authorUserId: userIdObjectId },
-        { authorUserId: userId } // Also try string version for compatibility
-      ]
+        { authorUserId: userId }, // Also try string version for compatibility
+      ],
     })
       .select("threadId")
       .lean();
@@ -234,25 +237,31 @@ router.get("/curalink-expert/profile/:userId", async (req, res) => {
     } else {
       // Convert thread IDs to ObjectIds for query
       const threadObjectIds = participatedThreadIds
-        .filter(id => mongoose.Types.ObjectId.isValid(id))
-        .map(id => new mongoose.Types.ObjectId(id));
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
 
       // Fetch threads where expert has participated (INCLUDE all forums where they replied, even if they created them)
-      const participatedForums = threadObjectIds.length > 0 ? await Thread.find({
-        _id: { $in: threadObjectIds },
-      })
-        .populate("categoryId", "name slug")
-        .populate("authorUserId", "username email")
-        .sort({ createdAt: -1 })
-        .limit(20)
-        .lean() : [];
+      const participatedForums =
+        threadObjectIds.length > 0
+          ? await Thread.find({
+              _id: { $in: threadObjectIds },
+            })
+              .populate("categoryId", "name slug")
+              .populate("authorUserId", "username email")
+              .sort({ createdAt: -1 })
+              .limit(20)
+              .lean()
+          : [];
 
       // Get reply counts for participated forums
       const participatedForumIds = participatedForums.map((f) => f._id);
-      const participatedReplyCounts = participatedForumIds.length > 0 ? await Reply.aggregate([
-        { $match: { threadId: { $in: participatedForumIds } } },
-        { $group: { _id: "$threadId", count: { $sum: 1 } } },
-      ]) : [];
+      const participatedReplyCounts =
+        participatedForumIds.length > 0
+          ? await Reply.aggregate([
+              { $match: { threadId: { $in: participatedForumIds } } },
+              { $group: { _id: "$threadId", count: { $sum: 1 } } },
+            ])
+          : [];
 
       const participatedCountMap = {};
       participatedReplyCounts.forEach((item) => {
@@ -260,18 +269,21 @@ router.get("/curalink-expert/profile/:userId", async (req, res) => {
       });
 
       // Get count of expert's replies in each participated forum
-      const expertReplyCounts = participatedForumIds.length > 0 ? await Reply.aggregate([
-        {
-          $match: {
-            threadId: { $in: participatedForumIds },
-            $or: [
-              { authorUserId: userIdObjectId },
-              { authorUserId: userId } // Also try string version for compatibility
-            ]
-          },
-        },
-        { $group: { _id: "$threadId", count: { $sum: 1 } } },
-      ]) : [];
+      const expertReplyCounts =
+        participatedForumIds.length > 0
+          ? await Reply.aggregate([
+              {
+                $match: {
+                  threadId: { $in: participatedForumIds },
+                  $or: [
+                    { authorUserId: userIdObjectId },
+                    { authorUserId: userId }, // Also try string version for compatibility
+                  ],
+                },
+              },
+              { $group: { _id: "$threadId", count: { $sum: 1 } } },
+            ])
+          : [];
 
       const expertReplyCountMap = {};
       expertReplyCounts.forEach((item) => {
@@ -289,10 +301,13 @@ router.get("/curalink-expert/profile/:userId", async (req, res) => {
         body: forum.body,
         upvotes: forum.upvotes?.length || 0,
         downvotes: forum.downvotes?.length || 0,
-        voteScore: (forum.upvotes?.length || 0) - (forum.downvotes?.length || 0),
+        voteScore:
+          (forum.upvotes?.length || 0) - (forum.downvotes?.length || 0),
         replyCount: participatedCountMap[forum._id.toString()] || 0,
         expertReplyCount: expertReplyCountMap[forum._id.toString()] || 0, // Number of replies by this expert
-        isCreator: forum.authorUserId?._id?.toString() === userId || forum.authorUserId?.toString() === userId, // Whether expert created this forum
+        isCreator:
+          forum.authorUserId?._id?.toString() === userId ||
+          forum.authorUserId?.toString() === userId, // Whether expert created this forum
         viewCount: forum.viewCount || 0,
         createdAt: forum.createdAt,
         updatedAt: forum.updatedAt,

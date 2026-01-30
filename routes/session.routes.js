@@ -10,9 +10,9 @@ const router = Router();
 const JWT_SECRET =
   process.env.JWT_SECRET || "your-secret-key-change-in-production";
 
-// Generate JWT token
-function generateToken(userId) {
-  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: "7d" });
+// Generate JWT token (include isAdmin for admin route verification)
+function generateToken(userId, isAdmin = false) {
+  return jwt.sign({ userId, isAdmin: !!isAdmin }, JWT_SECRET, { expiresIn: "7d" });
 }
 
 // POST /api/auth/register - Register new user
@@ -97,14 +97,20 @@ router.post("/auth/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid email or password" });
     }
 
-    // Generate JWT token
-    const token = generateToken(user._id.toString());
+    // Admin: DB flag or optional ADMIN_EMAILS env (comma-separated)
+    const adminEmails = process.env.ADMIN_EMAILS
+      ? process.env.ADMIN_EMAILS.split(",").map((e) => e.trim()).filter(Boolean)
+      : [];
+    const isAdmin = !!user.isAdmin || (adminEmails.length > 0 && adminEmails.includes(user.email));
+
+    // Generate JWT token with isAdmin claim for admin routes
+    const token = generateToken(user._id.toString(), isAdmin);
 
     // Remove password from response
     const userResponse = user.toObject();
     delete userResponse.password;
 
-    return res.json({ user: userResponse, token });
+    return res.json({ user: userResponse, token, isAdmin });
   } catch (error) {
     console.error("Login error:", error);
     return res.status(500).json({ error: "Failed to login" });
