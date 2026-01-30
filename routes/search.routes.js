@@ -230,7 +230,10 @@ function calculatePublicationRelevanceSignals(pub, queryMeta) {
       // Only boost if already relevant
       const recencyBoost = recencyWeight * 0.05; // Small boost for recent papers
       const nctBoost = hasNctLink ? 0.05 : 0; // Small boost for NCT linkage
-      queryRelevanceScore = Math.min(1.0, queryRelevanceScore + recencyBoost + nctBoost);
+      queryRelevanceScore = Math.min(
+        1.0,
+        queryRelevanceScore + recencyBoost + nctBoost
+      );
     }
   }
 
@@ -280,23 +283,23 @@ router.get("/search/trials", async (req, res) => {
     // Layer 3: Extract biomarkers from conditions/keywords if provided
     // Only extract if conditions are actually provided (medical interests enabled)
     let biomarkers = [];
-    
+
     // Extract biomarkers from query params (for non-signed-in users)
     if (conditions) {
-      const conditionsStr = Array.isArray(conditions) 
-        ? conditions.join(" ") 
+      const conditionsStr = Array.isArray(conditions)
+        ? conditions.join(" ")
         : conditions;
       const conditionBiomarkers = extractBiomarkers(conditionsStr);
       biomarkers = [...biomarkers, ...conditionBiomarkers];
     }
     if (keywords) {
-      const keywordsStr = Array.isArray(keywords) 
-        ? keywords.join(" ") 
+      const keywordsStr = Array.isArray(keywords)
+        ? keywords.join(" ")
         : keywords;
       const keywordBiomarkers = extractBiomarkers(keywordsStr);
       biomarkers = [...biomarkers, ...keywordBiomarkers];
     }
-    
+
     // Extract biomarkers from user profile if userId is provided (signed-in users)
     // We'll fetch the profile here and reuse it later for matching
     let userProfile = null;
@@ -307,18 +310,19 @@ router.get("/search/trials", async (req, res) => {
         const profileKeywords = userProfile.patient?.keywords || [];
         const profileConditionsStr = profileConditions.join(" ");
         const profileKeywordsStr = profileKeywords.join(" ");
-        
+
         if (profileConditionsStr) {
           const profileBiomarkers = extractBiomarkers(profileConditionsStr);
           biomarkers = [...biomarkers, ...profileBiomarkers];
         }
         if (profileKeywordsStr) {
-          const profileKeywordBiomarkers = extractBiomarkers(profileKeywordsStr);
+          const profileKeywordBiomarkers =
+            extractBiomarkers(profileKeywordsStr);
           biomarkers = [...biomarkers, ...profileKeywordBiomarkers];
         }
       }
     }
-    
+
     // Remove duplicates
     biomarkers = [...new Set(biomarkers)];
 
@@ -454,10 +458,7 @@ router.get("/search/trials", async (req, res) => {
 
     res.json({
       results: resultsWithReadStatus,
-      totalCount: Math.min(
-        result.totalCount || 0,
-        sortedResults.length
-      ), // Use batch size as total count for pagination purposes
+      totalCount: Math.min(result.totalCount || 0, sortedResults.length), // Use batch size as total count for pagination purposes
       hasMore: hasMore,
       ...(remaining !== null && { remaining }),
     });
@@ -521,8 +522,8 @@ router.get("/search/publications", async (req, res) => {
     // This ensures results are sorted across all pages, not just within each page
     const requestedPage = parseInt(page, 10);
     const requestedPageSize = parseInt(pageSize, 10);
-    // Fetch up to 500 results for sorting (covers ~83 pages with 6 results per page)
-    const batchSize = Math.min(500, Math.max(100, requestedPageSize * 50));
+    // Fetch up to 300 results; efetch uses POST to avoid 414 URI Too Long
+    const batchSize = Math.min(300, Math.max(100, requestedPageSize * 50));
 
     const pubmedResult = await searchPubMed({
       q: pubmedQuery,
@@ -550,7 +551,7 @@ router.get("/search/publications", async (req, res) => {
       // Fetch user profile from database
       const profile = await Profile.findOne({ userId }).lean();
       if (profile) {
-        userProfile = profile;
+        userProfile = { ...profile };
       }
     } else if (conditions || keywords || userLocation) {
       // Build profile from query params
@@ -576,7 +577,25 @@ router.get("/search/publications", async (req, res) => {
       };
     }
 
-    // Calculate match percentages if user profile is available
+    // Always include search query terms in match calculation - publications matching
+    // the user's search should show high match % (e.g. searching "Diabetes" -> Diabetes papers = high match)
+    let queryTermsForMatch = atmQueryMeta?.queryTerms || [];
+    if (queryTermsForMatch.length === 0 && q && q.trim()) {
+      // Fallback for short queries (e.g. "AI", "MS") that tokenize to empty
+      queryTermsForMatch = q.trim().split(/\s+/).filter((t) => t.length >= 2);
+    }
+    if (queryTermsForMatch.length > 0) {
+      if (!userProfile) {
+        userProfile = { patient: {} };
+      }
+      if (!userProfile.patient) userProfile.patient = {};
+      const existing = userProfile.patient.keywords || [];
+      userProfile.patient.keywords = [
+        ...new Set([...queryTermsForMatch, ...existing]),
+      ];
+    }
+
+    // Calculate match percentages (always run when we have terms to match - profile or search query)
     const resultsWithMatch = userProfile
       ? allResults.map((publication) => {
           const match = calculatePublicationMatch(publication, userProfile);
@@ -613,36 +632,37 @@ router.get("/search/publications", async (req, res) => {
     }
 
     // Filter out results with very low query relevance (likely false positives)
-    // Only keep results that have at least 0.5 relevance or exact phrase match (matching trials backend)
+    // Use 0.25 threshold to keep more relevant results (PubMed shows more; we were too aggressive at 0.5)
     if (q) {
       scoredResults = scoredResults.filter((publication) => {
         const relevance = publication.queryRelevanceScore || 0;
-        // Keep if: exact phrase match (1.0), or relevance >= 0.5, or no query provided
-        return relevance >= 0.5 || relevance === 1.0;
+        // Keep if: exact phrase match (1.0), or relevance >= 0.25 (relaxed for more PubMed-like results)
+        return relevance >= 0.25 || relevance === 1.0;
       });
     }
 
-    // Layer 5: Rank by query relevance FIRST, then other factors
-    // Sort priority: Query relevance > NCT linkage > recency > profile match (matching trials backend)
+    // Layer 5: Rank by match percentage FIRST (like trials), then query relevance, then other factors
+    // User expects highest match % first - all 97% before 81%, etc. (fixes duplicate match % on different pages)
     const sortedResults = scoredResults.sort((a, b) => {
-      // First: Query relevance (PRIMARY - most important)
+      // First: Profile match percentage (PRIMARY - user expects this like trials)
+      const aMatch = a.matchPercentage ?? -1;
+      const bMatch = b.matchPercentage ?? -1;
+      if (bMatch !== aMatch) return bMatch - aMatch;
+
+      // Second: Query relevance (tiebreaker)
       const aQuery = a.queryRelevanceScore || 0;
       const bQuery = b.queryRelevanceScore || 0;
-      // Use tighter threshold - 0.05 for more precise sorting (matching trials backend)
-      if (Math.abs(bQuery - aQuery) > 0.05) return bQuery - aQuery; // Significant difference
+      if (Math.abs(bQuery - aQuery) > 0.05) return bQuery - aQuery;
 
-      // Second: NCT linkage (boost for publications linking to clinical trials)
+      // Third: NCT linkage (boost for publications linking to clinical trials)
       const aNct = a.hasNctLink ? 1 : 0;
       const bNct = b.hasNctLink ? 1 : 0;
       if (bNct !== aNct) return bNct - aNct;
 
-      // Third: Recency (recent publications get slight boost)
+      // Fourth: Recency (recent publications get slight boost)
       const aRecency = a.recencyWeight || 0;
       const bRecency = b.recencyWeight || 0;
-      if (Math.abs(bRecency - aRecency) > 0.1) return bRecency - aRecency;
-
-      // Fourth: Profile match percentage (user's conditions/keywords match)
-      return (b.matchPercentage || -1) - (a.matchPercentage || -1);
+      return (bRecency || 0) - (aRecency || 0);
     });
 
     // Simplify titles for all publications in parallel (only for the batch we fetched)
@@ -954,7 +974,7 @@ router.get("/search/experts/platform", async (req, res) => {
 
     // Build query to find researchers
     const query = { role: "researcher" };
-    
+
     // Find all researcher profiles
     const profiles = await Profile.find({ role: "researcher" })
       .populate("userId", "username email medicalInterests")
@@ -967,7 +987,7 @@ router.get("/search/experts/platform", async (req, res) => {
         const user = profile.userId;
         const researcher = profile.researcher || {};
         const locationObj = researcher.location || {};
-        
+
         return {
           _id: user._id || user.id,
           id: user._id || user.id,
@@ -978,18 +998,22 @@ router.get("/search/experts/platform", async (req, res) => {
             ? `https://orcid.org/${researcher.orcid}`
             : null,
           biography: researcher.bio || null,
-          location: locationObj.city && locationObj.country
-            ? `${locationObj.city}, ${locationObj.country}`
-            : locationObj.city || locationObj.country || null,
+          location:
+            locationObj.city && locationObj.country
+              ? `${locationObj.city}, ${locationObj.country}`
+              : locationObj.city || locationObj.country || null,
           affiliation: researcher.institutionAffiliation || null,
           currentPosition: researcher.institutionAffiliation || null,
-          researchInterests: researcher.interests || researcher.specialties || [],
+          researchInterests:
+            researcher.interests || researcher.specialties || [],
           specialties: researcher.specialties || [],
           education: researcher.education
             ? researcher.education
                 .map(
                   (edu) =>
-                    `${edu.degree || ""} ${edu.field || ""} ${edu.institution || ""} ${edu.year || ""}`
+                    `${edu.degree || ""} ${edu.field || ""} ${
+                      edu.institution || ""
+                    } ${edu.year || ""}`
                 )
                 .filter(Boolean)
                 .join(", ")
@@ -1008,10 +1032,7 @@ router.get("/search/experts/platform", async (req, res) => {
     // Apply search filters (if search terms provided)
     // If no search terms, return all experts (browsing mode)
     if (researchArea || diseaseOfInterest) {
-      const searchTerms = [
-        researchArea,
-        diseaseOfInterest,
-      ]
+      const searchTerms = [researchArea, diseaseOfInterest]
         .filter(Boolean)
         .map((term) => term.toLowerCase());
 

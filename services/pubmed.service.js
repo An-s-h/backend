@@ -135,8 +135,9 @@ export async function searchPubMed({
       db: "pubmed",
       term: searchTerm,
       retmode: "json",
-      retmax: String(pageSize),
+      retmax: String(Math.min(Number(pageSize), 500)), // PubMed allows up to 10k; we cap at 500 for performance
       retstart: String(retstart),
+      sort: "relevance", // Explicit relevance sort (matches user expectation from pubmed.gov)
     });
 
     const idsResp = await retryWithBackoff(async () => {
@@ -154,6 +155,7 @@ export async function searchPubMed({
     if (ids.length === 0) return { items: [], totalCount: 0, page, pageSize };
 
     // Step 2: Fetch detailed metadata with EFetch with retry logic and increased timeout
+    // Use POST to avoid 414 URI Too Long when fetching many PMIDs (GET URL has ~9 chars per ID)
     const efetchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi`;
     const efetchParams = new URLSearchParams({
       db: "pubmed",
@@ -162,10 +164,11 @@ export async function searchPubMed({
     });
 
     const xmlResp = await retryWithBackoff(async () => {
-      return await axios.get(`${efetchUrl}?${efetchParams}`, {
-        timeout: 30000, // Increased from 15000 to 30000ms
+      return await axios.post(efetchUrl, efetchParams.toString(), {
+        timeout: 30000,
         headers: {
           "User-Agent": "Mozilla/5.0 (compatible; CuraLink/1.0)",
+          "Content-Type": "application/x-www-form-urlencoded",
         },
       });
     });

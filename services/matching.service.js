@@ -547,6 +547,7 @@ export function calculatePublicationMatch(pub, userProfile) {
   const title = pub.title || "";
   const abstract = pub.abstract || "";
   const journal = pub.journal || "";
+  const keywords = Array.isArray(pub.keywords) ? pub.keywords.join(" ") : "";
 
   // For researchers with multiple interests, give high score if ANY interest matches
   let topicScore = 0;
@@ -556,7 +557,8 @@ export function calculatePublicationMatch(pub, userProfile) {
     const titleSim = calculateSemanticSimilarity(t, title);
     const abstractSim = calculateSemanticSimilarity(t, abstract);
     const journalSim = calculateSemanticSimilarity(t, journal);
-    const termBest = Math.max(titleSim, abstractSim, journalSim);
+    const keywordsSim = keywords ? calculateSemanticSimilarity(t, keywords) : 0;
+    const termBest = Math.max(titleSim, abstractSim, journalSim, keywordsSim);
     
     // If this term matches well (threshold 0.5), count it
     if (termBest > 0.5) {
@@ -588,11 +590,11 @@ export function calculatePublicationMatch(pub, userProfile) {
 
   const weighted = topicScore * 0.6 + locationScore * 0.3 + recencyScore * 0.1;
   let final = weighted;
-  // Add base score boost
+  // Add base score boost (align with trials for consistent UX)
   final += 0.15; // Base boost for all matches
-  if (topicScore > 0) final += 0.15; // Additional boost for topic matches
+  if (topicScore > 0) final += 0.2; // Additional boost for topic matches (was 0.15)
   final = Math.min(0.99, final); // Cap at 100%
-  final = Math.max(0.15, final); // Higher minimum score (20%)
+  final = Math.max(0.15, final); // Higher minimum score (15%)
 
   const parts = [];
   if (topicScore > 0.5) parts.push("topic match");
