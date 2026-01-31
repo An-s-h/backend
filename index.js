@@ -23,10 +23,9 @@ import expertInvitesRoutes from "./routes/expert-invites.routes.js";
 import adminRoutes from "./routes/admin.routes.js";
 import waitlistRoutes from "./routes/waitlist.routes.js";
 import uploadRoutes from "./routes/upload.routes.js";
+import trendingRoutes from "./routes/trending.routes.js";
 import { optionalSession } from "./middleware/auth.js";
 import { searchLimitMiddleware } from "./middleware/searchLimit.js";
-import { ForumCategory } from "./models/ForumCategory.js";
-import { Community } from "./models/Community.js";
 
 dotenv.config();
 
@@ -88,6 +87,7 @@ app.use("/api", meetingRequestsRoutes);
 app.use("/api", connectionRequestsRoutes);
 app.use("/api", adminRoutes);
 app.use("/api", waitlistRoutes);
+app.use("/api", trendingRoutes);
 app.use("/api", uploadRoutes);
 
 const PORT = process.env.PORT || 5000;

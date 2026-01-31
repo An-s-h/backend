@@ -3,6 +3,8 @@ import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
 import { Profile } from "../models/Profile.js";
 import { User } from "../models/User.js";
+import { fetchFullORCIDProfile } from "../services/orcid.service.js";
+import { fetchPageMetadata } from "../services/adminPageMetadata.service.js";
 import { SearchLimit } from "../models/SearchLimit.js";
 import { ForumCategory } from "../models/ForumCategory.js";
 import { Thread } from "../models/Thread.js";
@@ -13,6 +15,8 @@ import { Community } from "../models/Community.js";
 import { CommunityProposal } from "../models/CommunityProposal.js";
 import { CommunityMembership } from "../models/CommunityMembership.js";
 import { Subcategory } from "../models/Subcategory.js";
+import { uploadSingle } from "../middleware/upload.js";
+import { uploadImage } from "../services/upload.service.js";
 
 const router = Router();
 const JWT_SECRET =
@@ -102,6 +106,11 @@ router.get("/admin/experts", verifyAdmin, async (req, res) => {
       const user = profile.userId;
       const researcher = profile.researcher || {};
       const uid = (user._id || user.id).toString();
+      const researchGateVerification = researcher.researchGateVerification || null;
+      const academiaEduVerification = researcher.academiaEduVerification || null;
+      const needsAttention =
+        (researcher.researchGate && researchGateVerification === "pending") ||
+        (researcher.academiaEdu && academiaEduVerification === "pending");
       return {
         _id: user._id || user.id,
         userId: user._id || user.id,
@@ -109,6 +118,11 @@ router.get("/admin/experts", verifyAdmin, async (req, res) => {
         email: user.email,
         accountCreated: user.createdAt || null,
         orcid: researcher.orcid || null,
+        researchGate: researcher.researchGate || null,
+        researchGateVerification,
+        academiaEdu: researcher.academiaEdu || null,
+        academiaEduVerification,
+        needsAttention,
         bio: researcher.bio || null,
         location: researcher.location || null,
         specialties: researcher.specialties || [],
@@ -130,7 +144,7 @@ router.get("/admin/experts", verifyAdmin, async (req, res) => {
   }
 });
 
-// Update expert verification status
+// Update expert verification status (isVerified + academic links verified when admin clicks Verify)
 router.patch("/admin/experts/:userId/verify", verifyAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
@@ -145,21 +159,128 @@ router.patch("/admin/experts/:userId/verify", verifyAdmin, async (req, res) => {
       return res.status(404).json({ error: "Expert not found" });
     }
 
-    // Update the isVerified field in the researcher subdocument
     profile.researcher.isVerified = isVerified;
+    // When admin verifies expert, also mark academic profiles as verified (name/publications checked by moderator)
+    if (isVerified) {
+      if (profile.researcher.researchGate) profile.researcher.researchGateVerification = "verified";
+      if (profile.researcher.academiaEdu) profile.researcher.academiaEduVerification = "verified";
+    } else {
+      profile.researcher.researchGateVerification = null;
+      profile.researcher.academiaEduVerification = null;
+    }
     await profile.save();
 
+    const uid = profile.userId?._id || profile.userId?.id || profile.userId || userId;
     res.json({
       success: true,
       message: `Expert ${isVerified ? "verified" : "unverified"} successfully`,
       expert: {
-        userId: profile.userId._id || profile.userId.id,
+        userId: uid,
         isVerified: profile.researcher.isVerified,
+        researchGateVerification: profile.researcher.researchGateVerification,
+        academiaEduVerification: profile.researcher.academiaEduVerification,
       },
     });
   } catch (error) {
     console.error("Error updating expert verification:", error);
     res.status(500).json({ error: "Failed to update verification status" });
+  }
+});
+
+// GET /api/admin/expert/:userId — full expert profile for admin (ORCID + ResearchGate/Academia metadata)
+router.get("/admin/expert/:userId", verifyAdmin, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const profile = await Profile.findOne({ userId })
+      .populate("userId", "username email createdAt")
+      .lean();
+
+    if (!profile || profile.role !== "researcher") {
+      return res.status(404).json({ error: "Expert not found" });
+    }
+
+    const user = profile.userId;
+    const researcher = profile.researcher || {};
+
+    let profileData = {
+      _id: user._id || user.id,
+      userId: user._id || user.id,
+      name: user.username || "Unknown Researcher",
+      email: user.email,
+      accountCreated: user.createdAt || null,
+      orcid: researcher.orcid || null,
+      researchGate: researcher.researchGate || null,
+      researchGateVerification: researcher.researchGateVerification || null,
+      academiaEdu: researcher.academiaEdu || null,
+      academiaEduVerification: researcher.academiaEduVerification || null,
+      bio: researcher.bio || null,
+      location: researcher.location || null,
+      specialties: researcher.specialties || [],
+      interests: researcher.interests || [],
+      available: researcher.available || false,
+      isVerified: researcher.isVerified || false,
+    };
+
+    // ORCID: fetch full profile like collabiora-expert
+    if (researcher.orcid) {
+      try {
+        const normalizedOrcid = researcher.orcid.trim().replace(/\s+/g, "");
+        const orcidProfileData = await fetchFullORCIDProfile(normalizedOrcid);
+        if (orcidProfileData) {
+          profileData = {
+            ...profileData,
+            name: profileData.name,
+            biography: orcidProfileData.biography || researcher.bio || null,
+            bio: orcidProfileData.biography || researcher.bio || null,
+            affiliation: orcidProfileData.affiliation || null,
+            location: orcidProfileData.location || researcher.location || null,
+            researchInterests: [
+              ...new Set([
+                ...(orcidProfileData.researchInterests || []),
+                ...(researcher.interests || []),
+                ...(researcher.specialties || []),
+              ]),
+            ],
+            currentPosition: orcidProfileData.currentPosition || null,
+            education: orcidProfileData.education || null,
+            orcidId: orcidProfileData.orcidId || normalizedOrcid,
+            works: orcidProfileData.works || [],
+            publications: orcidProfileData.works || [],
+            impactMetrics: orcidProfileData.impactMetrics || {
+              totalPublications: orcidProfileData.publications?.length || 0,
+              hIndex: 0,
+              totalCitations: 0,
+              maxCitations: 0,
+            },
+            country: orcidProfileData.country || null,
+            employments: orcidProfileData.employments || [],
+            educations: orcidProfileData.educations || [],
+          };
+        } else {
+          profileData.publications = [];
+          profileData.works = [];
+          profileData.impactMetrics = { totalPublications: 0, hIndex: 0, totalCitations: 0, maxCitations: 0 };
+        }
+      } catch (err) {
+        console.error("Admin expert ORCID fetch:", err.message);
+        profileData.publications = profileData.publications || [];
+        profileData.works = profileData.works || [];
+        profileData.impactMetrics = profileData.impactMetrics || { totalPublications: 0, hIndex: 0, totalCitations: 0, maxCitations: 0 };
+      }
+    }
+
+    // ResearchGate / Academia.edu: fetch metadata for admin view
+    const [researchGateMetadata, academiaEduMetadata] = await Promise.all([
+      researcher.researchGate ? fetchPageMetadata(researcher.researchGate) : Promise.resolve({ name: null, description: null }),
+      researcher.academiaEdu ? fetchPageMetadata(researcher.academiaEdu) : Promise.resolve({ name: null, description: null }),
+    ]);
+    profileData.researchGateMetadata = researchGateMetadata.name || researchGateMetadata.description ? researchGateMetadata : null;
+    profileData.academiaEduMetadata = academiaEduMetadata.name || academiaEduMetadata.description ? academiaEduMetadata : null;
+
+    res.json({ profile: profileData });
+  } catch (error) {
+    console.error("Error fetching admin expert profile:", error);
+    res.status(500).json({ error: "Failed to fetch expert profile" });
   }
 });
 
@@ -559,6 +680,30 @@ router.delete("/admin/posts/:id", verifyAdmin, async (req, res) => {
 });
 
 // ============================================
+// ADMIN UPLOAD (for community thumbnails, etc.)
+// ============================================
+router.post("/admin/upload", verifyAdmin, uploadSingle, async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+    if (!req.file.mimetype.startsWith("image/")) {
+      return res.status(400).json({ error: "File must be an image" });
+    }
+    const result = await uploadImage(
+      req.file.buffer,
+      "communities/thumbnails",
+      req.file.originalname,
+      req.file.mimetype
+    );
+    res.json({ ok: true, url: result.url || result.secure_url });
+  } catch (error) {
+    console.error("Error in admin upload:", error);
+    res.status(500).json({ error: "Failed to upload file" });
+  }
+});
+
+// ============================================
 // COMMUNITY MANAGEMENT (admin)
 // ============================================
 
@@ -596,7 +741,7 @@ router.get("/admin/communities", verifyAdmin, async (req, res) => {
 // Create community (admin)
 router.post("/admin/communities", verifyAdmin, async (req, res) => {
   try {
-    const { name, description, icon, color, tags, isOfficial } = req.body;
+    const { name, description, coverImage, thumbnailUrl, tags, isOfficial } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ error: "name is required" });
     }
@@ -612,8 +757,7 @@ router.post("/admin/communities", verifyAdmin, async (req, res) => {
       name: name.trim(),
       slug,
       description: description || "",
-      icon: icon || "💬",
-      color: color || "#2F3C96",
+      coverImage: coverImage || thumbnailUrl || "",
       tags: Array.isArray(tags) ? tags : [],
       isOfficial: !!isOfficial,
     });
@@ -670,7 +814,7 @@ router.get("/admin/community-proposals", verifyAdmin, async (req, res) => {
 router.post("/admin/community-proposals/:id/approve", verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { icon, color } = req.body;
+    const { thumbnailUrl } = req.body;
 
     const proposal = await CommunityProposal.findById(id);
     if (!proposal) {
@@ -697,9 +841,7 @@ router.post("/admin/community-proposals/:id/approve", verifyAdmin, async (req, r
       name,
       slug,
       description: proposal.description || "",
-      icon: icon || "💬",
-      color: color || "#2F3C96",
-      coverImage: proposal.thumbnailUrl || "",
+      coverImage: thumbnailUrl || proposal.thumbnailUrl || "",
       createdBy: proposal.proposedBy,
       isOfficial: false,
     });

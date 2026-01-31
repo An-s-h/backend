@@ -5,14 +5,83 @@ import { User } from "../models/User.js";
 import { Thread } from "../models/Thread.js";
 import { Reply } from "../models/Reply.js";
 import { fetchFullORCIDProfile } from "../services/orcid.service.js";
+import { verifySession } from "../middleware/auth.js";
 
 const router = Router();
+
+// ResearchGate: exact hostnames
+const RESEARCHGATE_HOSTS = ["researchgate.net", "www.researchgate.net"];
+// Academia.edu: allow academia.edu and *.academia.edu (e.g. sohag-univ.academia.edu, www.academia.edu)
+const ACADEMIA_DOMAIN_SUFFIX = ".academia.edu";
+const ACADEMIA_REGEX = /^https?:\/\/(www\.)?([a-z0-9-]+\.)?academia\.edu\/[A-Za-z0-9._-]+$/i;
+
+function validateAcademicUrl(url) {
+  if (!url || typeof url !== "string") return { valid: false, platform: null, normalizedUrl: null };
+  let normalized = url.trim();
+  if (!normalized.startsWith("http://") && !normalized.startsWith("https://")) normalized = "https://" + normalized;
+  let hostname;
+  try {
+    hostname = new URL(normalized).hostname.toLowerCase();
+  } catch {
+    return { valid: false, platform: null, normalizedUrl: null };
+  }
+  // ResearchGate: allowlist
+  if (RESEARCHGATE_HOSTS.includes(hostname)) {
+    return { valid: true, platform: "researchgate", normalizedUrl: normalized };
+  }
+  // Academia.edu: allow academia.edu and *.academia.edu
+  if (hostname === "academia.edu" || hostname.endsWith(ACADEMIA_DOMAIN_SUFFIX)) {
+    if (!ACADEMIA_REGEX.test(normalized)) return { valid: false, platform: null, normalizedUrl: null };
+    return { valid: true, platform: "academia", normalizedUrl: normalized };
+  }
+  return { valid: false, platform: null, normalizedUrl: null };
+}
 
 // GET /api/profile/:userId
 router.get("/profile/:userId", async (req, res) => {
   const { userId } = req.params;
   const profile = await Profile.findOne({ userId });
   return res.json({ profile });
+});
+
+// POST /api/profile/link-academic — must be before /profile/:userId so "link-academic" is not captured as userId
+router.post("/profile/link-academic", verifySession, async (req, res) => {
+  try {
+    const { url } = req.body || {};
+    const user = req.user;
+    if (!user) return res.status(401).json({ error: "Authentication required" });
+    if (!url || !url.trim()) return res.status(400).json({ error: "URL is required" });
+
+    const validation = validateAcademicUrl(url.trim());
+    if (!validation.valid)
+      return res.status(400).json({ error: "Invalid URL. Use a ResearchGate or Academia.edu profile link." });
+
+    const profile = await Profile.findOne({ userId: user._id });
+    if (!profile || profile.role !== "researcher")
+      return res.status(403).json({ error: "Only researchers can link academic profiles" });
+
+    const update = {};
+    if (validation.platform === "researchgate") {
+      update["researcher.researchGate"] = validation.normalizedUrl;
+      update["researcher.researchGateVerification"] = "pending";
+    } else {
+      update["researcher.academiaEdu"] = validation.normalizedUrl;
+      update["researcher.academiaEduVerification"] = "pending";
+    }
+    await Profile.findOneAndUpdate({ userId: user._id }, { $set: update }, { new: true });
+
+    return res.json({
+      ok: true,
+      saved: true,
+      status: "pending",
+      platform: validation.platform,
+      normalizedUrl: validation.normalizedUrl,
+      message: "Your profile will be reviewed by a moderator and verified.",
+    });
+  } catch (err) {
+    console.error("link-academic error:", err);
+    return res.status(500).json({ error: err.message || "Failed to save link" });
+  }
 });
 
 // POST /api/profile/:userId
@@ -23,7 +92,20 @@ router.post("/profile/:userId", async (req, res) => {
   const doc = await Profile.findOneAndUpdate(
     { userId },
     { ...payload, userId },
-    { new: true, upsert: true },
+    { new: true, upsert: true }
+  );
+  return res.json({ ok: true, profile: doc });
+});
+
+// PUT /api/profile/:userId (same as POST for frontend compatibility)
+router.put("/profile/:userId", async (req, res) => {
+  const { userId } = req.params;
+  const payload = req.body || {};
+  if (!payload.role) return res.status(400).json({ error: "role is required" });
+  const doc = await Profile.findOneAndUpdate(
+    { userId },
+    { ...payload, userId },
+    { new: true, upsert: true }
   );
   return res.json({ ok: true, profile: doc });
 });
@@ -53,6 +135,10 @@ router.get("/collabiora-expert/profile/:userId", async (req, res) => {
       name: user.username || "Unknown Researcher",
       email: user.email,
       orcid: researcher.orcid || null,
+      researchGate: researcher.researchGate || null,
+      researchGateVerification: researcher.researchGateVerification || null,
+      academiaEdu: researcher.academiaEdu || null,
+      academiaEduVerification: researcher.academiaEduVerification || null,
       bio: researcher.bio || null,
       location: researcher.location || null,
       specialties: researcher.specialties || [],

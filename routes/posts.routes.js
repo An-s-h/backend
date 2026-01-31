@@ -6,6 +6,7 @@ import { User } from "../models/User.js";
 import { Profile } from "../models/Profile.js";
 import { Community } from "../models/Community.js";
 import { Subcategory } from "../models/Subcategory.js";
+import { CommunityMembership } from "../models/CommunityMembership.js";
 import { verifySession } from "../middleware/auth.js";
 
 const router = Router();
@@ -226,11 +227,20 @@ router.post("/posts", verifySession, async (req, res) => {
       });
     }
 
-    // Validate community if provided
+    // Validate community if provided: must exist and user must be a member
     if (communityId) {
       const community = await Community.findById(communityId);
       if (!community) {
         return res.status(404).json({ error: "Community not found" });
+      }
+      const membership = await CommunityMembership.findOne({
+        userId: authorUserId,
+        communityId,
+      });
+      if (!membership) {
+        return res.status(403).json({
+          error: "You can only post to communities you have joined. Join this community from Forums first.",
+        });
       }
     }
 

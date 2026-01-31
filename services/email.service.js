@@ -1,4 +1,12 @@
-
+/**
+ * Email service via Unosend API (https://www.unosend.co)
+ *
+ * Required env:
+ *   UNOSEND_API_KEY   - Your Unosend API key (Bearer token)
+ *   UNOSEND_FROM_EMAIL - Sender address from a verified domain (e.g. hello@yourdomain.com)
+ *                        Fallback: GMAIL_USER if set
+ * Optional: FRONTEND_URL, LOGO_URL
+ */
 const UNOSEND_API_URL = "https://www.unosend.co/api/v1/emails";
 
 /**
