@@ -471,7 +471,7 @@ export function calculateTrialMatch(trial, userProfile) {
   }
 
   const overlap = calculateArrayOverlap(allTerms, trialConditions);
-  
+
   // For researchers with multiple interests: boost score if ANY interest matches
   // This ensures high scores even with partial matches
   if (researcherInterests.length > 0 && matchCount > 0) {

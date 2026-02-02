@@ -582,7 +582,10 @@ router.get("/search/publications", async (req, res) => {
     let queryTermsForMatch = atmQueryMeta?.queryTerms || [];
     if (queryTermsForMatch.length === 0 && q && q.trim()) {
       // Fallback for short queries (e.g. "AI", "MS") that tokenize to empty
-      queryTermsForMatch = q.trim().split(/\s+/).filter((t) => t.length >= 2);
+      queryTermsForMatch = q
+        .trim()
+        .split(/\s+/)
+        .filter((t) => t.length >= 2);
     }
     if (queryTermsForMatch.length > 0) {
       if (!userProfile) {
@@ -1474,6 +1477,204 @@ router.get("/search/publication/:pmid/simplified", async (req, res) => {
       error: "Failed to fetch simplified publication details",
       publication: null,
     });
+  }
+});
+
+// Helper function to normalize and calculate name similarity
+function calculateNameSimilarity(searchName, authorName) {
+  // Normalize: lowercase and remove accents
+  const normalize = (str) => 
+    str
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const searchNorm = normalize(searchName);
+  const authorNorm = normalize(authorName);
+
+  // Split into tokens
+  const searchTokens = searchNorm.split(" ").filter(t => t.length > 1);
+  const authorTokens = authorNorm.split(" ").filter(t => t.length > 1);
+
+  if (searchTokens.length === 0 || authorTokens.length === 0) {
+    return 0;
+  }
+
+  // Check for exact match
+  if (searchNorm === authorNorm) {
+    return 1.0;
+  }
+
+  // Check if author name contains all search tokens
+  let matchedTokens = 0;
+  for (const searchToken of searchTokens) {
+    for (const authorToken of authorTokens) {
+      // Check if tokens match (start with or exact match)
+      if (
+        authorToken === searchToken ||
+        authorToken.startsWith(searchToken) ||
+        searchToken.startsWith(authorToken)
+      ) {
+        matchedTokens++;
+        break;
+      }
+    }
+  }
+
+  // Calculate similarity score
+  const similarity = matchedTokens / searchTokens.length;
+  return similarity;
+}
+
+// Search for experts by name using OpenAlex and Semantic Scholar
+// GET /api/search/experts/by-name?name=John+Smith
+router.get("/search/experts/by-name", async (req, res) => {
+  try {
+    const { name } = req.query;
+    
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: "Name parameter is required" });
+    }
+
+    const searchName = name.trim();
+    const results = [];
+    const seenOrcids = new Set();
+    const seenNames = new Set();
+
+    // 1. Search OpenAlex
+    try {
+      const openAlexUrl = `https://api.openalex.org/authors?search=${encodeURIComponent(
+        searchName
+      )}&per_page=20`;
+      
+      const openAlexResponse = await fetch(openAlexUrl, {
+        headers: {
+          "User-Agent": "CuraLink/1.0 (mailto:support@curalink.com)",
+        },
+      });
+
+      if (openAlexResponse.ok) {
+        const openAlexData = await openAlexResponse.json();
+        
+        for (const author of openAlexData.results || []) {
+          const orcid = author.orcid ? author.orcid.split("/").pop() : null;
+          const authorName = author.display_name || "";
+          
+          if (!authorName) continue;
+          
+          // Calculate name similarity
+          const similarity = calculateNameSimilarity(searchName, authorName);
+          
+          // Only include results with reasonable name match (at least 50% of search tokens match)
+          if (similarity < 0.5) continue;
+          
+          // Deduplicate by ORCID or name
+          const key = orcid || authorName.toLowerCase();
+          if (seenOrcids.has(key) || seenNames.has(authorName.toLowerCase())) continue;
+          
+          if (orcid) seenOrcids.add(orcid);
+          seenNames.add(authorName.toLowerCase());
+
+          const institution = author.last_known_institution?.display_name || null;
+          const citationCount = author.cited_by_count || 0;
+          const hIndex = author.summary_stats?.h_index || 0;
+          const topics = (author.topics || [])
+            .slice(0, 5)
+            .map((t) => t.display_name)
+            .filter(Boolean);
+
+          results.push({
+            id: author.id,
+            name: authorName,
+            orcid,
+            institution,
+            citationCount,
+            hIndex,
+            topics,
+            source: "OpenAlex",
+            worksCount: author.works_count || 0,
+            similarity, // Include similarity for sorting
+          });
+        }
+      }
+    } catch (err) {
+      console.error("OpenAlex search error:", err);
+    }
+
+    // 2. Search Semantic Scholar (fallback/verification)
+    try {
+      const semanticScholarUrl = `https://api.semanticscholar.org/graph/v1/author/search?query=${encodeURIComponent(
+        searchName
+      )}&limit=20&fields=authorId,name,affiliations,citationCount,hIndex,paperCount,externalIds`;
+
+      const semanticResponse = await fetch(semanticScholarUrl);
+
+      if (semanticResponse.ok) {
+        const semanticData = await semanticResponse.json();
+        
+        for (const author of semanticData.data || []) {
+          const orcid = author.externalIds?.ORCID || null;
+          const authorName = author.name || "";
+          
+          if (!authorName) continue;
+          
+          // Calculate name similarity
+          const similarity = calculateNameSimilarity(searchName, authorName);
+          
+          // Only include results with reasonable name match (at least 50% of search tokens match)
+          if (similarity < 0.5) continue;
+          
+          const key = orcid || authorName.toLowerCase();
+          if (seenOrcids.has(key) || seenNames.has(authorName.toLowerCase())) continue;
+          
+          if (orcid) seenOrcids.add(orcid);
+          seenNames.add(authorName.toLowerCase());
+
+          const institution = (author.affiliations || []).map((a) => a).join(", ") || null;
+          const citationCount = author.citationCount || 0;
+          const hIndex = author.hIndex || 0;
+
+          results.push({
+            id: author.authorId,
+            name: authorName,
+            orcid,
+            institution,
+            citationCount,
+            hIndex,
+            topics: [],
+            source: "Semantic Scholar",
+            worksCount: author.paperCount || 0,
+            similarity, // Include similarity for sorting
+          });
+        }
+      }
+    } catch (err) {
+      console.error("Semantic Scholar search error:", err);
+    }
+
+    // Sort by name similarity first, then by citation count
+    results.sort((a, b) => {
+      // Sort by similarity first (higher is better)
+      const simDiff = (b.similarity || 0) - (a.similarity || 0);
+      if (Math.abs(simDiff) > 0.1) return simDiff;
+      
+      // If similarity is close, sort by citation count
+      return (b.citationCount || 0) - (a.citationCount || 0);
+    });
+
+    // Remove similarity field before returning (internal use only)
+    const cleanedResults = results.map(({ similarity, ...rest }) => rest);
+
+    return res.json({
+      results: cleanedResults.slice(0, 20),
+      totalFound: results.length,
+    });
+  } catch (error) {
+    console.error("Expert name search error:", error);
+    return res.status(500).json({ error: "Failed to search for expert by name" });
   }
 });
 

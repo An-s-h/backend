@@ -31,6 +31,8 @@ const educationSchema = new mongoose.Schema(
 
 const researcherSchema = new mongoose.Schema(
   {
+    profession: String, // e.g. MD, PhD, RN, PharmD, etc.
+    academicRank: String, // e.g. Professor, Associate Professor, etc.
     specialties: [{ type: String }],
     interests: [{ type: String }],
     orcid: String,

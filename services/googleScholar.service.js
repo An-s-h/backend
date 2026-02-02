@@ -80,23 +80,26 @@ async function findAuthorInOpenAlex(authorName) {
 
     for (const author of authors) {
       const displayName = (author.display_name || "").toLowerCase();
-      
+
       // Calculate a simple matching score
       let score = 0;
-      
+
       // Exact match bonus
       if (displayName === normalizedSearchName) {
         score += 1000;
       }
-      
+
       // Partial match (name contains search or vice versa)
-      if (displayName.includes(normalizedSearchName) || normalizedSearchName.includes(displayName)) {
+      if (
+        displayName.includes(normalizedSearchName) ||
+        normalizedSearchName.includes(displayName)
+      ) {
         score += 100;
       }
-      
+
       // Add works count as tiebreaker (prefer more prolific authors)
       score += (author.works_count || 0) / 100;
-      
+
       // Add citation count as another factor
       score += (author.cited_by_count || 0) / 10000;
 
@@ -113,7 +116,8 @@ async function findAuthorInOpenAlex(authorName) {
         displayName: bestMatch.display_name,
         worksCount: bestMatch.works_count || 0,
         citedByCount: bestMatch.cited_by_count || 0,
-        lastKnownInstitution: bestMatch.last_known_institution?.display_name || null,
+        lastKnownInstitution:
+          bestMatch.last_known_institution?.display_name || null,
       };
 
       // Cache the result
@@ -163,7 +167,7 @@ async function fetchAuthorPublications(authorId, limit = 10) {
       if (work.doi && !work.doi.startsWith("http")) {
         link = `https://doi.org/${work.doi}`;
       }
-      
+
       // Try to get open access PDF link if available
       let pdfLink = null;
       if (work.open_access?.oa_url) {
@@ -179,7 +183,8 @@ async function fetchAuthorPublications(authorId, limit = 10) {
         .filter(Boolean);
 
       // Get venue/journal name
-      const venue = work.primary_location?.source?.display_name ||
+      const venue =
+        work.primary_location?.source?.display_name ||
         work.host_venue?.display_name ||
         "";
 
@@ -309,22 +314,26 @@ export async function searchGoogleScholarPublications({
   // Try OpenAlex first (primary source)
   try {
     console.log(`Searching OpenAlex for publications by "${author}"...`);
-    
+
     // First find the author
     const authorData = await findAuthorInOpenAlex(author);
-    
+
     if (authorData && authorData.id) {
-      console.log(`Found author in OpenAlex: ${authorData.displayName} (${authorData.worksCount} works, ${authorData.citedByCount} citations)`);
-      
+      console.log(
+        `Found author in OpenAlex: ${authorData.displayName} (${authorData.worksCount} works, ${authorData.citedByCount} citations)`
+      );
+
       // Fetch their publications
       publications = await fetchAuthorPublications(authorData.id, num);
-      
+
       if (publications.length > 0) {
         console.log(`Found ${publications.length} publications from OpenAlex`);
         return publications;
       }
     } else {
-      console.log(`Author "${author}" not found in OpenAlex, trying fallback...`);
+      console.log(
+        `Author "${author}" not found in OpenAlex, trying fallback...`
+      );
     }
   } catch (error) {
     console.error("Error with OpenAlex:", error.message);
@@ -390,7 +399,8 @@ export async function searchGoogleScholar({ q = "", num = 10 } = {}) {
         .filter(Boolean);
 
       // Get venue/journal name
-      const venue = work.primary_location?.source?.display_name ||
+      const venue =
+        work.primary_location?.source?.display_name ||
         work.host_venue?.display_name ||
         "";
 
@@ -424,7 +434,8 @@ export async function searchGoogleScholar({ q = "", num = 10 } = {}) {
         publication: venue,
         year: work.publication_year || null,
         citations: work.cited_by_count || 0,
-        pdfLink: work.open_access?.oa_url || work.primary_location?.pdf_url || null,
+        pdfLink:
+          work.open_access?.oa_url || work.primary_location?.pdf_url || null,
       };
     });
   } catch (error) {

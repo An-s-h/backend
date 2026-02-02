@@ -96,11 +96,14 @@ function filterTrialsByEligibility(trials, filters) {
     if (filters.radiusMiles && filters.userLocation && trial.location) {
       // Simplified: if user location is provided, check if trial location contains it
       // In production, use actual geocoding and distance calculation
-      const userLocStr = typeof filters.userLocation === "string"
-        ? filters.userLocation.toLowerCase()
-        : `${filters.userLocation.city || ""} ${filters.userLocation.state || ""}`.toLowerCase();
+      const userLocStr =
+        typeof filters.userLocation === "string"
+          ? filters.userLocation.toLowerCase()
+          : `${filters.userLocation.city || ""} ${
+              filters.userLocation.state || ""
+            }`.toLowerCase();
       const trialLocStr = trial.location.toLowerCase();
-      
+
       // If locations don't match at all, exclude (simplified check)
       // In production, calculate actual distance using coordinates
       if (userLocStr && !trialLocStr.includes(userLocStr.split(",")[0])) {
@@ -132,6 +135,90 @@ function filterByRecruitmentStatus(trials, statusFilter) {
   }
 
   return trials;
+}
+
+/**
+ * Apply query relevance scoring and filter (all-terms match).
+ * Used in both cold path and cache branch so totalCount stays consistent.
+ * @param {Array} trials - List of trial objects
+ * @param {string} q - Search query
+ * @returns {Array} - Filtered trials with queryRelevanceScore, queryMatchCount, queryTermCount, significantTermMatches
+ */
+function applyQueryRelevanceFilter(trials, q) {
+  if (!q) {
+    return trials.map((trial) => ({
+      ...trial,
+      queryRelevanceScore: 0,
+      queryMatchCount: 0,
+      queryTermCount: 0,
+      significantTermMatches: 0,
+    }));
+  }
+  const queryLower = q.toLowerCase().trim();
+  const stopWords = new Set([
+    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
+  ]);
+  const queryTerms = queryLower
+    .split(/\s+/)
+    .filter((term) => term.length > 2 && !stopWords.has(term));
+
+  let items = trials.map((trial) => {
+    const title = (trial.title || "").toLowerCase();
+    const description = (trial.description || "").toLowerCase();
+    const conditions = (trial.conditions || []).join(" ").toLowerCase();
+    const searchText = `${title} ${description} ${conditions}`;
+    let matchCount = 0;
+    let exactPhraseMatch = false;
+    let significantTermMatches = 0;
+    if (searchText.includes(queryLower)) {
+      exactPhraseMatch = true;
+      matchCount = queryTerms.length;
+      significantTermMatches = queryTerms.length;
+    } else {
+      for (const term of queryTerms) {
+        const termRegex = new RegExp(
+          `\\b${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+          "i"
+        );
+        if (termRegex.test(searchText)) {
+          matchCount++;
+          if (termRegex.test(title) || termRegex.test(conditions)) significantTermMatches++;
+        }
+      }
+    }
+    let queryRelevanceScore = 0;
+    if (exactPhraseMatch) {
+      queryRelevanceScore = 1.0;
+    } else if (queryTerms.length > 0) {
+      const allTermsMatch = matchCount === queryTerms.length;
+      const significantRatio = significantTermMatches / queryTerms.length;
+      const matchRatio = matchCount / queryTerms.length;
+      if (allTermsMatch && significantRatio >= 0.6) queryRelevanceScore = 0.85 + significantRatio * 0.15;
+      else if (allTermsMatch && significantRatio >= 0.4) queryRelevanceScore = 0.75 + significantRatio * 0.1;
+      else if (allTermsMatch && significantRatio > 0) queryRelevanceScore = 0.5 + significantRatio * 0.2;
+      else if (allTermsMatch) queryRelevanceScore = 0.3;
+      else if (matchRatio >= 0.75) queryRelevanceScore = 0.5 + significantRatio * 0.3;
+      else if (matchRatio >= 0.5) queryRelevanceScore = 0.3 + significantRatio * 0.3;
+      else queryRelevanceScore = matchRatio * 0.5;
+    }
+    return {
+      ...trial,
+      queryRelevanceScore,
+      queryMatchCount: matchCount,
+      queryTermCount: queryTerms.length,
+      significantTermMatches,
+    };
+  });
+
+  items = items.filter((trial) => {
+    const relevance = trial.queryRelevanceScore || 0;
+    const matchCount = trial.queryMatchCount ?? 0;
+    const termCount = trial.queryTermCount ?? 0;
+    if (relevance === 1.0) return true;
+    const allTermsMatch = termCount > 0 && matchCount === termCount;
+    return relevance >= 0.5 && allTermsMatch;
+  });
+  return items;
 }
 
 /**
@@ -290,11 +377,13 @@ export async function searchClinicalTrials({
   const effectiveStatus = status || "RECRUITING,NOT_YET_RECRUITING";
 
   // Build cache key including all filters (including biomarkers for Layer 3)
-  const cacheKey = `ct:${expandedQuery}:${effectiveStatus}:${countryOnly || ""}:${
-    phase || ""
-  }:${eligibilitySex || ""}:${eligibilityAgeMin || ""}:${
+  const cacheKey = `ct:${expandedQuery}:${effectiveStatus}:${
+    countryOnly || ""
+  }:${phase || ""}:${eligibilitySex || ""}:${eligibilityAgeMin || ""}:${
     eligibilityAgeMax || ""
-  }:${radiusMiles || ""}:${biomarkers && biomarkers.length > 0 ? biomarkers.join(",") : ""}`;
+  }:${radiusMiles || ""}:${
+    biomarkers && biomarkers.length > 0 ? biomarkers.join(",") : ""
+  }`;
   const cached = getCache(cacheKey);
   if (cached) {
     // Apply all filters
@@ -315,6 +404,11 @@ export async function searchClinicalTrials({
       });
     }
 
+    // Apply same query relevance filter as cold path so totalCount is consistent across pages
+    if (q) {
+      filtered = applyQueryRelevanceFilter(filtered, q);
+    }
+
     // Apply pagination
     const totalCount = filtered.length;
     const startIndex = (page - 1) * pageSize;
@@ -332,7 +426,7 @@ export async function searchClinicalTrials({
   // Build API query with Layer 1 expanded query
   const params = new URLSearchParams();
   if (expandedQuery) params.set("query.term", expandedQuery);
-  
+
   // Layer 2: Filter by status (RECRUITING or NOT_YET_RECRUITING)
   if (effectiveStatus.includes(",")) {
     // ClinicalTrials.gov API supports multiple statuses separated by commas
@@ -438,12 +532,10 @@ export async function searchClinicalTrials({
         // Extract design and phase (Layer 4)
         const phases = designModule.phases || [];
         const phase = phases.length > 0 ? phases.join(", ") : "N/A";
-        const studyType =
-          designModule.studyType || "Unknown"; // INTERVENTIONAL or OBSERVATIONAL
+        const studyType = designModule.studyType || "Unknown"; // INTERVENTIONAL or OBSERVATIONAL
 
         // Extract sponsor (for Layer 5)
-        const leadSponsor =
-          sponsorCollaboratorsModule.leadSponsor?.name || "";
+        const leadSponsor = sponsorCollaboratorsModule.leadSponsor?.name || "";
         const collaborators =
           sponsorCollaboratorsModule.collaborators?.map((c) => c.name) || [];
 
@@ -543,19 +635,36 @@ export async function searchClinicalTrials({
     if (q) {
       const queryLower = q.toLowerCase().trim();
       // Filter out very common words that don't add meaning
-      const stopWords = new Set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by']);
-      const queryTerms = queryLower.split(/\s+/).filter(term => term.length > 2 && !stopWords.has(term));
-      
+      const stopWords = new Set([
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "but",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+      ]);
+      const queryTerms = queryLower
+        .split(/\s+/)
+        .filter((term) => term.length > 2 && !stopWords.has(term));
+
       filteredItems = filteredItems.map((trial) => {
         const title = (trial.title || "").toLowerCase();
         const description = (trial.description || "").toLowerCase();
         const conditions = (trial.conditions || []).join(" ").toLowerCase();
         const searchText = `${title} ${description} ${conditions}`;
-        
+
         let matchCount = 0;
         let exactPhraseMatch = false;
         let significantTermMatches = 0;
-        
+
         // Check for exact phrase match first (highest priority)
         if (searchText.includes(queryLower)) {
           exactPhraseMatch = true;
@@ -566,7 +675,10 @@ export async function searchClinicalTrials({
           // e.g., "fog" shouldn't match "FoG" (Freezing of Gait) unless it's actually "fog"
           for (const term of queryTerms) {
             // Use word boundary regex to match whole words only
-            const termRegex = new RegExp(`\\b${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+            const termRegex = new RegExp(
+              `\\b${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+              "i"
+            );
             if (termRegex.test(searchText)) {
               matchCount++;
               // Consider it significant if it appears in title or conditions (not just description)
@@ -576,7 +688,7 @@ export async function searchClinicalTrials({
             }
           }
         }
-        
+
         // Calculate relevance score with stricter weighting:
         // - Exact phrase match = 1.0 (perfect match)
         // - All terms match in title/conditions = 0.95+ (high relevance)
@@ -590,31 +702,31 @@ export async function searchClinicalTrials({
           const allTermsMatch = matchCount === queryTerms.length;
           const significantRatio = significantTermMatches / queryTerms.length;
           const matchRatio = matchCount / queryTerms.length;
-          
+
           if (allTermsMatch && significantRatio >= 0.6) {
             // All terms matched and at least 60% are in title/conditions - very relevant
-            queryRelevanceScore = 0.85 + (significantRatio * 0.15); // 0.94 - 1.0
+            queryRelevanceScore = 0.85 + significantRatio * 0.15; // 0.94 - 1.0
           } else if (allTermsMatch && significantRatio >= 0.4) {
             // All terms matched and at least 40% in title/conditions - good relevance
-            queryRelevanceScore = 0.75 + (significantRatio * 0.1); // 0.79 - 0.85
+            queryRelevanceScore = 0.75 + significantRatio * 0.1; // 0.79 - 0.85
           } else if (allTermsMatch && significantRatio > 0) {
             // All terms matched but mostly in description - moderate relevance (may filter later)
-            queryRelevanceScore = 0.5 + (significantRatio * 0.2); // 0.5 - 0.7
+            queryRelevanceScore = 0.5 + significantRatio * 0.2; // 0.5 - 0.7
           } else if (allTermsMatch) {
             // All terms matched but NONE in title/conditions - likely false positive
             queryRelevanceScore = 0.3; // Very low score
           } else if (matchRatio >= 0.75) {
             // Most terms (75%+) matched
-            queryRelevanceScore = 0.5 + (significantRatio * 0.3); // 0.5 - 0.8
+            queryRelevanceScore = 0.5 + significantRatio * 0.3; // 0.5 - 0.8
           } else if (matchRatio >= 0.5) {
             // Half or more terms matched
-            queryRelevanceScore = 0.3 + (significantRatio * 0.3); // 0.3 - 0.6
+            queryRelevanceScore = 0.3 + significantRatio * 0.3; // 0.3 - 0.6
           } else {
             // Less than half matched - low relevance
             queryRelevanceScore = matchRatio * 0.5; // 0.0 - 0.25
           }
         }
-        
+
         return {
           ...trial,
           queryRelevanceScore,
@@ -640,8 +752,14 @@ export async function searchClinicalTrials({
     if (q) {
       filteredItems = filteredItems.filter((trial) => {
         const relevance = trial.queryRelevanceScore || 0;
-        // Keep if: exact phrase match (1.0), or relevance >= 0.5, or no query provided
-        return relevance >= 0.5 || relevance === 1.0;
+        const matchCount = trial.queryMatchCount ?? 0;
+        const termCount = trial.queryTermCount ?? 0;
+        // Exact phrase match: always keep
+        if (relevance === 1.0) return true;
+        // Otherwise require ALL query terms to be present (tighten search like ClinicalTrials.gov)
+        // e.g. "functional movement disorders" must not keep trials that only have "movement disorders"
+        const allTermsMatch = termCount > 0 && matchCount === termCount;
+        return relevance >= 0.5 && allTermsMatch;
       });
     }
     const afterFilter = filteredItems.length;
@@ -655,7 +773,7 @@ export async function searchClinicalTrials({
       const bQuery = b.queryRelevanceScore || 0;
       // Use tighter threshold - 0.05 instead of 0.1 for more precise sorting
       if (Math.abs(bQuery - aQuery) > 0.05) return bQuery - aQuery; // Significant difference
-      
+
       // Second: biomarker match (Layer 3) - only if query relevance is similar
       if (biomarkers && biomarkers.length > 0) {
         const aBio = a.biomarkerMatchScore || 0;
@@ -674,7 +792,7 @@ export async function searchClinicalTrials({
       if (Math.abs(bPhase - aPhase) > 0.1) return bPhase - aPhase;
 
       // Fifth: Status (RECRUITING > NOT_YET_RECRUITING)
-      const statusOrder = { RECRUITING: 2, "NOT_YET_RECRUITING": 1 };
+      const statusOrder = { RECRUITING: 2, NOT_YET_RECRUITING: 1 };
       const aStatus = statusOrder[a.status] || 0;
       const bStatus = statusOrder[b.status] || 0;
       return bStatus - aStatus;
@@ -701,4 +819,3 @@ export async function searchClinicalTrials({
     };
   }
 }
-

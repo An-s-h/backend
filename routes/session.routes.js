@@ -271,7 +271,10 @@ router.post("/auth/oauth-sync", async (req, res) => {
     location,
     gender,
     // Optional onboarding data (researcher)
-    specialty,
+    profession,
+    academicRank,
+    primarySpecialty,
+    subspecialties,
     researchInterests,
     educationHistory,
     skills,
@@ -293,7 +296,9 @@ router.post("/auth/oauth-sync", async (req, res) => {
       conditions ||
       location ||
       gender ||
-      specialty ||
+      profession ||
+      academicRank ||
+      primarySpecialty ||
       researchInterests
     );
 
@@ -352,7 +357,8 @@ router.post("/auth/oauth-sync", async (req, res) => {
           medicalInterests = conditions || [];
         } else if (userRole === "researcher") {
           medicalInterests = [
-            ...(specialty ? [specialty] : []),
+            ...(primarySpecialty ? [primarySpecialty] : []),
+            ...(subspecialties || []),
             ...(researchInterests || []),
           ];
         }
@@ -384,14 +390,21 @@ router.post("/auth/oauth-sync", async (req, res) => {
             };
           } else if (
             userRole === "researcher" &&
-            (specialty ||
+            (profession ||
+              academicRank ||
+              primarySpecialty ||
               researchInterests ||
               location ||
               educationHistory ||
               skills)
           ) {
             profileData.researcher = {
-              specialties: specialty ? [specialty] : [],
+              profession: profession || undefined,
+              academicRank: academicRank || undefined,
+              specialties: [
+                ...(primarySpecialty ? [primarySpecialty] : []),
+                ...(subspecialties || []),
+              ],
               interests: researchInterests || [],
               location: location || {},
               education: educationHistory || [],
