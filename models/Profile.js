@@ -35,6 +35,7 @@ const researcherSchema = new mongoose.Schema(
     academicRank: String, // e.g. Professor, Associate Professor, etc.
     specialties: [{ type: String }],
     interests: [{ type: String }],
+    certifications: [{ type: String }],
     orcid: String,
     researchGate: String,
     researchGateVerification: { type: String, enum: ["pending", "verified"], default: null },

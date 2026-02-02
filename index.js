@@ -24,6 +24,7 @@ import adminRoutes from "./routes/admin.routes.js";
 import waitlistRoutes from "./routes/waitlist.routes.js";
 import uploadRoutes from "./routes/upload.routes.js";
 import trendingRoutes from "./routes/trending.routes.js";
+import orcidRoutes from "./routes/orcid.routes.js";
 import { optionalSession } from "./middleware/auth.js";
 import { searchLimitMiddleware } from "./middleware/searchLimit.js";
 
@@ -88,6 +89,7 @@ app.use("/api", connectionRequestsRoutes);
 app.use("/api", adminRoutes);
 app.use("/api", waitlistRoutes);
 app.use("/api", trendingRoutes);
+app.use("/api", orcidRoutes);
 app.use("/api", uploadRoutes);
 
 const PORT = process.env.PORT || 5000;
