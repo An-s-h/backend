@@ -138,10 +138,15 @@ router.post("/orcid/callback", async (req, res) => {
           .map((k) => k?.content)
           .filter(Boolean) || [];
 
+      // Get primary email (if visible in record)
+      const emails = person?.emails?.email || [];
+      const primaryEmail = emails[0]?.email || null;
+
       profileData = {
         name: fullName,
         affiliation: currentAffiliation,
         researchInterests: interests,
+        email: primaryEmail,
       };
     } catch (profileError) {
       console.error("Error fetching ORCID profile:", profileError.message);

@@ -379,21 +379,33 @@ router.get("/communities/:communityId/threads", async (req, res) => {
       .limit(parseInt(limit))
       .lean();
 
-    // Get reply counts
+    // Get reply counts and researcher-reply flags
     const threadIds = threads.map((t) => t._id);
-    const replyCounts = await Reply.aggregate([
-      { $match: { threadId: { $in: threadIds } } },
-      { $group: { _id: "$threadId", count: { $sum: 1 } } },
+    const [replyCounts, researcherReplies] = await Promise.all([
+      Reply.aggregate([
+        { $match: { threadId: { $in: threadIds } } },
+        { $group: { _id: "$threadId", count: { $sum: 1 } } },
+      ]),
+      Reply.aggregate([
+        { $match: { threadId: { $in: threadIds }, authorRole: "researcher" } },
+        { $group: { _id: "$threadId" } },
+      ]),
     ]);
     const replyCountMap = {};
     replyCounts.forEach((item) => {
       replyCountMap[item._id.toString()] = item.count;
     });
+    const researcherReplyThreadIds = new Set(
+      researcherReplies.map((r) => r._id.toString())
+    );
 
     const threadsWithData = threads.map((thread) => ({
       ...thread,
       replyCount: replyCountMap[thread._id.toString()] || 0,
       voteScore: (thread.upvotes?.length || 0) - (thread.downvotes?.length || 0),
+      hasResearcherReply:
+        researcherReplyThreadIds.has(thread._id.toString()) ||
+        thread.authorRole === "researcher",
     }));
 
     // Sort by vote score if top
@@ -441,21 +453,33 @@ router.get("/communities/feed/:userId", async (req, res) => {
       .limit(parseInt(limit))
       .lean();
 
-    // Get reply counts
+    // Get reply counts and researcher-reply flags
     const threadIds = threads.map((t) => t._id);
-    const replyCounts = await Reply.aggregate([
-      { $match: { threadId: { $in: threadIds } } },
-      { $group: { _id: "$threadId", count: { $sum: 1 } } },
+    const [replyCounts, researcherReplies] = await Promise.all([
+      Reply.aggregate([
+        { $match: { threadId: { $in: threadIds } } },
+        { $group: { _id: "$threadId", count: { $sum: 1 } } },
+      ]),
+      Reply.aggregate([
+        { $match: { threadId: { $in: threadIds }, authorRole: "researcher" } },
+        { $group: { _id: "$threadId" } },
+      ]),
     ]);
     const replyCountMap = {};
     replyCounts.forEach((item) => {
       replyCountMap[item._id.toString()] = item.count;
     });
+    const researcherReplyThreadIds = new Set(
+      researcherReplies.map((r) => r._id.toString())
+    );
 
     const threadsWithData = threads.map((thread) => ({
       ...thread,
       replyCount: replyCountMap[thread._id.toString()] || 0,
       voteScore: (thread.upvotes?.length || 0) - (thread.downvotes?.length || 0),
+      hasResearcherReply:
+        researcherReplyThreadIds.has(thread._id.toString()) ||
+        thread.authorRole === "researcher",
     }));
 
     const total = await Thread.countDocuments({ communityId: { $in: communityIds } });
@@ -508,20 +532,31 @@ router.get("/communities/recommended/:userId", async (req, res) => {
         .lean();
 
       const threadIds = threads.map((t) => t._id);
-      const replyCounts = await Reply.aggregate([
-        { $match: { threadId: { $in: threadIds } } },
-        { $group: { _id: "$threadId", count: { $sum: 1 } } },
+      const [replyCounts, researcherReplies] = await Promise.all([
+        Reply.aggregate([
+          { $match: { threadId: { $in: threadIds } } },
+          { $group: { _id: "$threadId", count: { $sum: 1 } } },
+        ]),
+        Reply.aggregate([
+          { $match: { threadId: { $in: threadIds }, authorRole: "researcher" } },
+          { $group: { _id: "$threadId" } },
+        ]),
       ]);
       const replyCountMap = {};
       replyCounts.forEach((item) => {
         replyCountMap[item._id.toString()] = item.count;
       });
+      const researcherReplyThreadIds = new Set(
+        researcherReplies.map((r) => r._id.toString())
+      );
 
       return res.json({
         threads: threads.map((t) => ({
           ...t,
           replyCount: replyCountMap[t._id.toString()] || 0,
           voteScore: (t.upvotes?.length || 0) - (t.downvotes?.length || 0),
+          hasResearcherReply:
+            researcherReplyThreadIds.has(t._id.toString()) || t.authorRole === "researcher",
         })),
       });
     }
@@ -548,20 +583,31 @@ router.get("/communities/recommended/:userId", async (req, res) => {
       .lean();
 
     const threadIds = threads.map((t) => t._id);
-    const replyCounts = await Reply.aggregate([
-      { $match: { threadId: { $in: threadIds } } },
-      { $group: { _id: "$threadId", count: { $sum: 1 } } },
+    const [replyCounts, researcherReplies] = await Promise.all([
+      Reply.aggregate([
+        { $match: { threadId: { $in: threadIds } } },
+        { $group: { _id: "$threadId", count: { $sum: 1 } } },
+      ]),
+      Reply.aggregate([
+        { $match: { threadId: { $in: threadIds }, authorRole: "researcher" } },
+        { $group: { _id: "$threadId" } },
+      ]),
     ]);
     const replyCountMap = {};
     replyCounts.forEach((item) => {
       replyCountMap[item._id.toString()] = item.count;
     });
+    const researcherReplyThreadIds = new Set(
+      researcherReplies.map((r) => r._id.toString())
+    );
 
     res.json({
       threads: threads.map((t) => ({
         ...t,
         replyCount: replyCountMap[t._id.toString()] || 0,
         voteScore: (t.upvotes?.length || 0) - (t.downvotes?.length || 0),
+        hasResearcherReply:
+          researcherReplyThreadIds.has(t._id.toString()) || t.authorRole === "researcher",
       })),
     });
   } catch (error) {
@@ -599,22 +645,33 @@ router.get("/communities/involving/:userId", async (req, res) => {
     allThreads.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     const limitedThreads = allThreads.slice(0, parseInt(limit));
 
-    // Get reply counts
+    // Get reply counts and researcher-reply flags
     const threadIds = limitedThreads.map((t) => t._id);
-    const replyCounts = await Reply.aggregate([
-      { $match: { threadId: { $in: threadIds } } },
-      { $group: { _id: "$threadId", count: { $sum: 1 } } },
+    const [replyCounts, researcherReplies] = await Promise.all([
+      Reply.aggregate([
+        { $match: { threadId: { $in: threadIds } } },
+        { $group: { _id: "$threadId", count: { $sum: 1 } } },
+      ]),
+      Reply.aggregate([
+        { $match: { threadId: { $in: threadIds }, authorRole: "researcher" } },
+        { $group: { _id: "$threadId" } },
+      ]),
     ]);
     const replyCountMap = {};
     replyCounts.forEach((item) => {
       replyCountMap[item._id.toString()] = item.count;
     });
+    const researcherReplyThreadIds = new Set(
+      researcherReplies.map((r) => r._id.toString())
+    );
 
     res.json({
       threads: limitedThreads.map((t) => ({
         ...t,
         replyCount: replyCountMap[t._id.toString()] || 0,
         voteScore: (t.upvotes?.length || 0) - (t.downvotes?.length || 0),
+        hasResearcherReply:
+          researcherReplyThreadIds.has(t._id.toString()) || t.authorRole === "researcher",
         isOwnThread: t.authorUserId?._id?.toString() === userId || t.authorUserId?.toString() === userId,
       })),
     });
@@ -654,16 +711,25 @@ router.get("/communities/search/threads", async (req, res) => {
       .limit(parseInt(limit))
       .lean();
 
-    // Get reply counts
+    // Get reply counts and researcher-reply flags
     const threadIds = threads.map((t) => t._id);
-    const replyCounts = await Reply.aggregate([
-      { $match: { threadId: { $in: threadIds } } },
-      { $group: { _id: "$threadId", count: { $sum: 1 } } },
+    const [replyCounts, researcherReplies] = await Promise.all([
+      Reply.aggregate([
+        { $match: { threadId: { $in: threadIds } } },
+        { $group: { _id: "$threadId", count: { $sum: 1 } } },
+      ]),
+      Reply.aggregate([
+        { $match: { threadId: { $in: threadIds }, authorRole: "researcher" } },
+        { $group: { _id: "$threadId" } },
+      ]),
     ]);
     const replyCountMap = {};
     replyCounts.forEach((item) => {
       replyCountMap[item._id.toString()] = item.count;
     });
+    const researcherReplyThreadIds = new Set(
+      researcherReplies.map((r) => r._id.toString())
+    );
 
     const total = await Thread.countDocuments(matchQuery);
 
@@ -672,6 +738,8 @@ router.get("/communities/search/threads", async (req, res) => {
         ...t,
         replyCount: replyCountMap[t._id.toString()] || 0,
         voteScore: (t.upvotes?.length || 0) - (t.downvotes?.length || 0),
+        hasResearcherReply:
+          researcherReplyThreadIds.has(t._id.toString()) || t.authorRole === "researcher",
       })),
       pagination: {
         page: parseInt(page),
@@ -698,6 +766,7 @@ router.post("/communities/:communityId/threads", async (req, res) => {
       subcategoryId,
       tags,
       conditions,
+      onlyResearchersCanReply,
     } = req.body;
 
     if (!authorUserId || !authorRole || !title || !body) {
@@ -736,6 +805,7 @@ router.post("/communities/:communityId/threads", async (req, res) => {
       body,
       tags: tags || [],
       conditions: normalizedConditions,
+      onlyResearchersCanReply: !!onlyResearchersCanReply,
     });
 
     const populatedThread = await Thread.findById(thread._id)

@@ -121,22 +121,34 @@ router.get("/forums/threads", async (req, res) => {
     .sort({ createdAt: -1 })
     .lean();
 
-  // Get reply counts for each thread
+  // Get reply counts and researcher-reply flags for each thread
   const threadIds = threads.map((t) => t._id);
-  const replyCounts = await Reply.aggregate([
-    { $match: { threadId: { $in: threadIds } } },
-    { $group: { _id: "$threadId", count: { $sum: 1 } } },
+  const [replyCounts, researcherReplies] = await Promise.all([
+    Reply.aggregate([
+      { $match: { threadId: { $in: threadIds } } },
+      { $group: { _id: "$threadId", count: { $sum: 1 } } },
+    ]),
+    Reply.aggregate([
+      { $match: { threadId: { $in: threadIds }, authorRole: "researcher" } },
+      { $group: { _id: "$threadId" } },
+    ]),
   ]);
 
   const countMap = {};
   replyCounts.forEach((item) => {
     countMap[item._id.toString()] = item.count;
   });
+  const researcherReplyThreadIds = new Set(
+    researcherReplies.map((r) => r._id.toString())
+  );
 
   const threadsWithCounts = threads.map((thread) => ({
     ...thread,
     replyCount: countMap[thread._id.toString()] || 0,
     voteScore: (thread.upvotes?.length || 0) - (thread.downvotes?.length || 0),
+    hasResearcherReply:
+      researcherReplyThreadIds.has(thread._id.toString()) ||
+      thread.authorRole === "researcher",
   }));
 
   setCache(cacheKey, threadsWithCounts, CACHE_TTL.threads);
@@ -232,6 +244,7 @@ router.post("/forums/threads", async (req, res) => {
     title,
     body,
     conditions,
+    onlyResearchersCanReply,
   } = req.body || {};
   if (!categoryId || !authorUserId || !authorRole || !title || !body) {
     return res.status(400).json({
@@ -246,6 +259,7 @@ router.post("/forums/threads", async (req, res) => {
     title,
     body,
     conditions: normalizedConditions,
+    onlyResearchersCanReply: !!onlyResearchersCanReply,
   });
 
   const populatedThread = await Thread.findById(thread._id)
@@ -318,17 +332,16 @@ router.post("/forums/replies", async (req, res) => {
       .json({ error: "threadId, authorUserId, authorRole, body required" });
   }
 
-  const thread = await Thread.findById(threadId);
+  const thread = await Thread.findById(threadId).lean();
   if (!thread) return res.status(404).json({ error: "thread not found" });
 
-  // If replying to a patient thread, only researchers can reply
-  // If replying to a researcher thread, anyone (patient or researcher) can reply
-  if (thread.authorRole === "patient" && authorRole !== "researcher") {
+  // If creator chose "only researchers should reply", only researchers can reply
+  if (thread.onlyResearchersCanReply && authorRole !== "researcher") {
     return res
       .status(403)
-      .json({ error: "Only researchers can reply to patient questions" });
+      .json({ error: "Only researchers can reply to this thread" });
   }
-  // Researchers can reply to any thread, patients can reply to researcher threads
+  // Otherwise: patients can reply to patients or researchers; researchers can reply to any thread
 
   // If replying to another reply, check if it exists
   if (parentReplyId) {

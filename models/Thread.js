@@ -15,6 +15,8 @@ const threadSchema = new mongoose.Schema(
     upvotes: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
     downvotes: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
     viewCount: { type: Number, default: 0 },
+    // When true, only users with role "researcher" can reply (creator's choice)
+    onlyResearchersCanReply: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
