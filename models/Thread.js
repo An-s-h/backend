@@ -17,6 +17,8 @@ const threadSchema = new mongoose.Schema(
     viewCount: { type: Number, default: 0 },
     // When true, only users with role "researcher" can reply (creator's choice)
     onlyResearchersCanReply: { type: Boolean, default: false },
+    // When true, this thread was created in Researcher Forums (not visible in Health Forums)
+    isResearcherForum: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

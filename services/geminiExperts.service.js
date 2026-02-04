@@ -28,7 +28,7 @@ function getGeminiInstance(preferAlternate = false) {
   if (!genAI && !genAI2) {
     return null;
   }
-  
+
   // If only one API key is available, use it
   if (!genAI2) {
     return genAI;
@@ -36,13 +36,13 @@ function getGeminiInstance(preferAlternate = false) {
   if (!genAI) {
     return genAI2;
   }
-  
+
   // If preferAlternate is true, use the alternate key (for fallback on error)
   if (preferAlternate) {
     const alternateKey = apiKeyCounter === 0 ? genAI2 : genAI;
     return alternateKey;
   }
-  
+
   // Round-robin between two API keys
   apiKeyCounter = (apiKeyCounter + 1) % 2;
   const selectedKey = apiKeyCounter === 0 ? genAI : genAI2;
@@ -96,7 +96,7 @@ async function retryWithBackoff(fn, maxRetries = 3, initialDelay = 1000) {
         errorMessage?.includes("overloaded") ||
         errorMessage?.includes("503") ||
         errorStatus === 503;
-      const isRateLimitError = 
+      const isRateLimitError =
         errorMessage?.includes("429") ||
         errorMessage?.includes("rate limit") ||
         errorMessage?.includes("quota") ||
@@ -110,9 +110,9 @@ async function retryWithBackoff(fn, maxRetries = 3, initialDelay = 1000) {
       // Exponential backoff: 1s, 2s, 4s
       const delay = initialDelay * Math.pow(2, attempt);
       console.log(
-        `Gemini ${isRateLimitError ? 'rate limited' : 'overloaded'}, retrying in ${delay}ms... (attempt ${
-          attempt + 1
-        }/${maxRetries})`
+        `Gemini ${
+          isRateLimitError ? "rate limited" : "overloaded"
+        }, retrying in ${delay}ms... (attempt ${attempt + 1}/${maxRetries})`
       );
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
@@ -138,17 +138,19 @@ export async function findResearchersWithGemini(query = "") {
 
   let geminiInstance = null;
   let attemptWithAlternate = false;
-  
+
   try {
     geminiInstance = getGeminiInstance(false);
     if (!geminiInstance) {
       console.warn("No Gemini API keys available for expert search");
       return [];
     }
-    
+
     // Use fastest model (flash is much faster than pro)
     // Use fastest and deterministic model
-    let model = geminiInstance.getGenerativeModel({ model: "gemini-2.5-flash" });
+    let model = geminiInstance.getGenerativeModel({
+      model: "gemini-2.5-flash",
+    });
 
     // Highly structured and specific system-style prompt
     const prompt = `
@@ -216,7 +218,7 @@ export async function findResearchersWithGemini(query = "") {
       // If we have two API keys and first one failed, try the alternate
       if (genAI && genAI2 && !attemptWithAlternate) {
         const errorMessage = firstError.message || String(firstError);
-        const isRetryableError = 
+        const isRetryableError =
           errorMessage?.includes("429") ||
           errorMessage?.includes("503") ||
           errorMessage?.includes("rate limit") ||
@@ -224,11 +226,13 @@ export async function findResearchersWithGemini(query = "") {
           errorMessage?.includes("overloaded") ||
           firstError.status === 429 ||
           firstError.status === 503;
-        
+
         if (isRetryableError) {
           attemptWithAlternate = true;
           geminiInstance = getGeminiInstance(true);
-          model = geminiInstance.getGenerativeModel({ model: "gemini-2.5-flash" });
+          model = geminiInstance.getGenerativeModel({
+            model: "gemini-2.5-flash",
+          });
           result = await retryWithBackoff(async () => {
             return await model.generateContent(prompt, {
               generationConfig: {
@@ -291,7 +295,19 @@ export async function findResearchersWithGemini(query = "") {
     // Cache the results
     setCache(cacheKey, formattedResearchers);
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/f1b3fc61-8c8f-48bb-889f-dd932b9156c8',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'geminiExperts.service.js:237',message:'Successfully returned researchers',data:{count:formattedResearchers.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+    fetch("http://127.0.0.1:7242/ingest/f1b3fc61-8c8f-48bb-889f-dd932b9156c8", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        location: "geminiExperts.service.js:237",
+        message: "Successfully returned researchers",
+        data: { count: formattedResearchers.length },
+        timestamp: Date.now(),
+        sessionId: "debug-session",
+        runId: "run1",
+        hypothesisId: "C",
+      }),
+    }).catch(() => {});
     // #endregion
     return formattedResearchers;
   } catch (error) {
@@ -302,8 +318,14 @@ export async function findResearchersWithGemini(query = "") {
     ) {
       console.error("Gemini model is overloaded. Please try again later.");
     }
-    if (error.message?.includes("429") || error.message?.includes("rate limit") || error.message?.includes("quota")) {
-      console.error("Gemini API rate limit or quota exceeded. Please try again later.");
+    if (
+      error.message?.includes("429") ||
+      error.message?.includes("rate limit") ||
+      error.message?.includes("quota")
+    ) {
+      console.error(
+        "Gemini API rate limit or quota exceeded. Please try again later."
+      );
     }
     if (error.message?.includes("JSON")) {
       console.error("Failed to parse JSON response from Gemini");

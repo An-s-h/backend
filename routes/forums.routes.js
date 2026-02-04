@@ -114,6 +114,8 @@ router.get("/forums/threads", async (req, res) => {
     ...(normalizedConditions.length > 0
       ? { conditions: { $in: normalizedConditions } }
       : {}),
+    // Exclude threads from Researcher Forums
+    isResearcherForum: { $ne: true },
   };
   const threads = await Thread.find(q)
     .populate("categoryId", "name slug")
@@ -149,6 +151,54 @@ router.get("/forums/threads", async (req, res) => {
     hasResearcherReply:
       researcherReplyThreadIds.has(thread._id.toString()) ||
       thread.authorRole === "researcher",
+  }));
+
+  setCache(cacheKey, threadsWithCounts, CACHE_TTL.threads);
+  res.json({ threads: threadsWithCounts });
+});
+
+// Get researcher forum threads (for Researcher Forums page)
+router.get("/researcher-forums/threads", async (req, res) => {
+  const { communityId, subcategoryId } = req.query;
+  const cacheKey = `researcher-forums:threads:${communityId || "all"}:${subcategoryId || "all"}`;
+  const cached = getCache(cacheKey);
+  if (cached) {
+    return res.json({ threads: cached });
+  }
+
+  const q = {
+    // Show threads from Researcher Forums OR threads by researchers
+    $or: [
+      { isResearcherForum: true },
+      { authorRole: "researcher" },
+    ],
+    ...(communityId ? { communityId } : {}),
+    ...(subcategoryId ? { subcategoryId } : {}),
+  };
+
+  const threads = await Thread.find(q)
+    .populate("communityId", "name slug icon color")
+    .populate("subcategoryId", "name slug")
+    .populate("authorUserId", "username email")
+    .sort({ createdAt: -1 })
+    .lean();
+
+  // Get reply counts
+  const threadIds = threads.map((t) => t._id);
+  const replyCounts = await Reply.aggregate([
+    { $match: { threadId: { $in: threadIds } } },
+    { $group: { _id: "$threadId", count: { $sum: 1 } } },
+  ]);
+
+  const countMap = {};
+  replyCounts.forEach((item) => {
+    countMap[item._id.toString()] = item.count;
+  });
+
+  const threadsWithCounts = threads.map((thread) => ({
+    ...thread,
+    replyCount: countMap[thread._id.toString()] || 0,
+    voteScore: (thread.upvotes?.length || 0) - (thread.downvotes?.length || 0),
   }));
 
   setCache(cacheKey, threadsWithCounts, CACHE_TTL.threads);
@@ -245,6 +295,7 @@ router.post("/forums/threads", async (req, res) => {
     body,
     conditions,
     onlyResearchersCanReply,
+    isResearcherForum,
   } = req.body || {};
   if (!categoryId || !authorUserId || !authorRole || !title || !body) {
     return res.status(400).json({
@@ -260,6 +311,7 @@ router.post("/forums/threads", async (req, res) => {
     body,
     conditions: normalizedConditions,
     onlyResearchersCanReply: !!onlyResearchersCanReply,
+    isResearcherForum: !!isResearcherForum,
   });
 
   const populatedThread = await Thread.findById(thread._id)
@@ -498,6 +550,86 @@ router.post("/forums/replies/:replyId/vote", async (req, res) => {
     ok: true,
     voteScore: reply.upvotes.length - reply.downvotes.length,
   });
+});
+
+// Update reply (owner only)
+router.patch("/forums/replies/:replyId", async (req, res) => {
+  const { replyId } = req.params;
+  const { userId, body } = req.body || {};
+
+  if (!userId || body === undefined) {
+    return res
+      .status(400)
+      .json({ error: "userId and body required" });
+  }
+
+  const reply = await Reply.findById(replyId);
+  if (!reply) return res.status(404).json({ error: "Reply not found" });
+
+  const authorId = reply.authorUserId?.toString?.() || reply.authorUserId?.toString?.();
+  if (authorId !== userId.toString()) {
+    return res.status(403).json({ error: "You can only edit your own reply" });
+  }
+
+  reply.body = String(body).trim();
+  if (!reply.body) {
+    return res.status(400).json({ error: "Body cannot be empty" });
+  }
+  await reply.save();
+
+  invalidateCache(`forums:thread:${reply.threadId}`);
+  invalidateCache("forums:threads:");
+
+  const populated = await Reply.findById(reply._id)
+    .populate("authorUserId", "username email")
+    .lean();
+
+  res.json({
+    ok: true,
+    reply: {
+      ...populated,
+      voteScore: (populated.upvotes?.length || 0) - (populated.downvotes?.length || 0),
+    },
+  });
+});
+
+// Delete reply and all nested children (recursive); returns count of deleted replies
+async function deleteReplyAndDescendants(replyId) {
+  const reply = await Reply.findById(replyId);
+  if (!reply) return 0;
+  const children = await Reply.find({ parentReplyId: replyId }).lean();
+  let count = 1;
+  for (const child of children) {
+    count += await deleteReplyAndDescendants(child._id);
+  }
+  await Reply.findByIdAndDelete(replyId);
+  return count;
+}
+
+router.delete("/forums/replies/:replyId", async (req, res) => {
+  const { replyId } = req.params;
+  const { userId } = req.body || {};
+
+  if (!userId) {
+    return res.status(400).json({ error: "userId required" });
+  }
+
+  const reply = await Reply.findById(replyId);
+  if (!reply) return res.status(404).json({ error: "Reply not found" });
+
+  const authorId = reply.authorUserId?.toString?.() || reply.authorUserId?.toString?.();
+  if (authorId !== userId.toString()) {
+    return res.status(403).json({ error: "You can only delete your own reply" });
+  }
+
+  const threadId = reply.threadId.toString();
+  const deletedCount = await deleteReplyAndDescendants(replyId);
+
+  invalidateCache(`forums:thread:${threadId}`);
+  invalidateCache("forums:threads:");
+  invalidateCache("forums:categories");
+
+  res.json({ ok: true, threadId, deletedCount });
 });
 
 // Vote on a thread

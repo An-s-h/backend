@@ -360,10 +360,15 @@ router.get("/communities/:communityId/threads", async (req, res) => {
 
     const normalizedConditions = normalizeConditions(condition);
 
+    const { excludeResearcherForum } = req.query;
     let query = {
       communityId,
       ...(normalizedConditions.length > 0
         ? { conditions: { $in: normalizedConditions } }
+        : {}),
+      // Exclude researcher forum posts if requested (for Health Forums)
+      ...(excludeResearcherForum === "true"
+        ? { isResearcherForum: { $ne: true } }
         : {}),
     };
     if (subcategoryId) {
@@ -767,6 +772,7 @@ router.post("/communities/:communityId/threads", async (req, res) => {
       tags,
       conditions,
       onlyResearchersCanReply,
+      isResearcherForum,
     } = req.body;
 
     if (!authorUserId || !authorRole || !title || !body) {
@@ -806,6 +812,7 @@ router.post("/communities/:communityId/threads", async (req, res) => {
       tags: tags || [],
       conditions: normalizedConditions,
       onlyResearchersCanReply: !!onlyResearchersCanReply,
+      isResearcherForum: !!isResearcherForum,
     });
 
     const populatedThread = await Thread.findById(thread._id)

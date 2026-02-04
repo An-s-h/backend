@@ -4,6 +4,8 @@ import { Profile } from "../models/Profile.js";
 import { User } from "../models/User.js";
 import { Thread } from "../models/Thread.js";
 import { Reply } from "../models/Reply.js";
+import { Community } from "../models/Community.js";
+import { CommunityMembership } from "../models/CommunityMembership.js";
 import { fetchFullORCIDProfile } from "../services/orcid.service.js";
 import { verifySession } from "../middleware/auth.js";
 
@@ -36,6 +38,66 @@ function validateAcademicUrl(url) {
   }
   return { valid: false, platform: null, normalizedUrl: null };
 }
+
+// GET /api/profile/:userId/forum-profile — public forum profile: name, username, forums posted, communities joined (for user profile modal)
+router.get("/profile/:userId/forum-profile", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const uid = new mongoose.Types.ObjectId(userId);
+
+    const user = await User.findById(uid).select("username handle picture role").lean();
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Forums they have posted in (threads authored by this user; include community/subcategory context)
+    const threads = await Thread.find({ authorUserId: uid, isResearcherForum: false })
+      .populate("communityId", "name slug")
+      .populate("subcategoryId", "name slug")
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean();
+
+    const forumsPosted = threads.map((t) => ({
+      _id: t._id,
+      title: t.title,
+      community: t.communityId ? { name: t.communityId.name, slug: t.communityId.slug } : null,
+      subcategory: t.subcategoryId ? { name: t.subcategoryId.name } : null,
+      createdAt: t.createdAt,
+    }));
+
+    // Communities they have joined
+    const memberships = await CommunityMembership.find({ userId: uid })
+      .populate("communityId", "name slug color")
+      .lean();
+
+    const communitiesJoined = (memberships || [])
+      .filter((m) => m.communityId)
+      .map((m) => ({
+        _id: m.communityId._id,
+        name: m.communityId.name,
+        slug: m.communityId.slug,
+        color: m.communityId.color,
+      }));
+
+    res.json({
+      user: {
+        _id: user._id,
+        username: user.username,
+        handle: user.handle,
+        picture: user.picture,
+        role: user.role,
+        displayName: user.handle || user.username || "User",
+      },
+      forumsPosted,
+      communitiesJoined,
+    });
+  } catch (err) {
+    if (err.name === "CastError") return res.status(400).json({ error: "Invalid user ID" });
+    console.error("Error fetching forum profile:", err);
+    res.status(500).json({ error: "Failed to load profile" });
+  }
+});
 
 // GET /api/profile/:userId
 router.get("/profile/:userId", async (req, res) => {
