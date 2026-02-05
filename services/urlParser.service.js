@@ -224,6 +224,7 @@ function processStudyData(study, nctId) {
       email: c.email || "",
       phone: c.phone || "",
       role: c.role || c.type || "Central Contact",
+      url: c.url || c.contactUrl || null,
     })) || [];
 
   // Also extract overall study contacts if available
@@ -233,6 +234,7 @@ function processStudyData(study, nctId) {
       email: c.email || "",
       phone: c.phone || "",
       role: c.role || c.type || "Overall Contact",
+      url: c.url || c.contactUrl || null,
     })) || [];
 
   // Combine all contacts, prioritizing central contacts
@@ -243,13 +245,14 @@ function processStudyData(study, nctId) {
   const phase = phases.length > 0 ? phases.join(", ") : "N/A";
 
   const nctIdFinal = identificationModule.nctId || nctId.toUpperCase();
+  const officialTitle = identificationModule.officialTitle || "";
+  const briefTitle = identificationModule.briefTitle || "";
+  const title = officialTitle || briefTitle || "Clinical Trial";
   return {
     id: nctIdFinal,
     _id: nctIdFinal,
-    title:
-      identificationModule.officialTitle ||
-      identificationModule.briefTitle ||
-      "Clinical Trial",
+    title,
+    briefTitle: briefTitle || null,
     status: statusModule.overallStatus || "Unknown",
     phase,
     conditions,

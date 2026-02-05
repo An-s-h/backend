@@ -1,22 +1,28 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
 import rateLimiter from "../utils/geminiRateLimiter.js";
 import { searchPubMed } from "./pubmed.service.js";
 import { searchClinicalTrials } from "./clinicalTrials.service.js";
 import { findResearchersWithGemini } from "./geminiExperts.service.js";
 import { fetchTrialById, fetchPublicationById } from "./urlParser.service.js";
 
-dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.join(__dirname, "..", ".env") });
 
 const apiKey = process.env.GOOGLE_AI_API_KEY;
 const apiKey2 = process.env.GOOGLE_AI_API_KEY_2;
 
 if (!apiKey && !apiKey2) {
-  console.warn("⚠️  No Google AI API keys found for chatbot");
+  console.warn("⚠️  No Google AI API keys found for chatbot (GOOGLE_AI_API_KEY, GOOGLE_AI_API_KEY_2)");
 }
 
 const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
 const genAI2 = apiKey2 ? new GoogleGenerativeAI(apiKey2) : null;
+
+const CHATBOT_MODELS = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2-flash"];
 
 let apiKeyCounter = 0;
 
@@ -73,7 +79,28 @@ const SYSTEM_PROMPT = `You are iora, the user's personal AI assistant on Collabi
 - Encourage users to explore Collabiora's search features for deeper research
 - **CRITICAL**: When greeting or introducing yourself (e.g. for "hi", "hey", "hello"), say "I'm Iora" and "Collabiora" - never use "CuraBot" or "CuraLink"
 
-Remember: You're a research assistant, not a replacement for medical advice. Always emphasize the importance of consulting healthcare professionals for personal medical decisions.`;
+Remember: You're a research assistant, not a replacement for medical advice. Always emphasize the importance of consulting healthcare professionals for personal medical decisions.
+
+**When the user asks about a specific trial**: A formatted card will show the requested information. Keep your text response very brief (1-3 sentences) - do NOT repeat the details that appear in the card. Just add a short contextual note or suggest next steps.`;
+
+/**
+ * Detect which trial section(s) the user is asking for - show only that section in the card
+ */
+function detectTrialSectionFocus(query) {
+  const q = query.toLowerCase().trim();
+  if (/\b(contact|phone|email|reach|get in touch|who do i contact|contact details)\b/.test(q)) return ["contacts"];
+  if (/\b(inclusion|exclusion|eligibility|criteria|qualify|participate|who can)\b/.test(q)) return ["eligibility"];
+  if (/\b(location|where|site|place|conducted|enrolling)\b/.test(q)) return ["locations"];
+  return ["overview"];
+}
+
+/** Show full publication card only for "display/show" requests. Summarize, findings, conclusions, methods, takeaways get AI analysis. */
+function detectPublicationSummaryFocus(query) {
+  const q = query.toLowerCase().trim();
+  // Full card only when user wants to see the raw publication/abstract (no analysis)
+  if (/\b(show (me )?this (paper|publication|article)|display (the )?(abstract|publication)|view (the )?abstract)\b/.test(q)) return true;
+  return false;
+}
 
 /**
  * Detect if query is asking for publications, trials, or experts
@@ -337,7 +364,7 @@ function buildItemContext(itemContext) {
         contextInfo += "\n";
       });
     }
-    contextInfo += `\n\n[Important: Answer only from the trial details above. Include the NCT ID and link (${trialUrl}) for verification. For inclusion criteria use the Eligibility section; for contact details use the Contact Details and Trial Locations; for participation explain steps and point to contacts/link.]`;
+    contextInfo += `\n\n[Important: Answer only from the trial details above. Use SIMPLIFIED, PLAIN LANGUAGE. Format your response with clear markdown: use ## for main section headers, **bold** for labels, - for bullet points. Include the NCT ID and end with a markdown link: [View full trial on ClinicalTrials.gov](${trialUrl}). Do not dump raw data - synthesize and explain in a helpful way based on the user's question.]`;
   } else if (itemContext.type === "publication") {
     contextInfo = `\n\n[User is asking about this specific publication. Use the following information to answer their question accurately. Always cite the PubMed link for verification:]\n\n`;
     contextInfo += `Title: ${item.title || "Unknown"}\n`;
@@ -351,10 +378,14 @@ function buildItemContext(itemContext) {
     if (item.keywords && item.keywords.length > 0) {
       contextInfo += `\nKeywords: ${Array.isArray(item.keywords) ? item.keywords.join(", ") : item.keywords}\n`;
     }
-    contextInfo += `\n\n[Important: Always provide accurate information based on the publication details above. Include the PMID and link to PubMed for verification. When summarizing, focus on the key findings and methodology.]`;
+    contextInfo += `\n\n[Important: Always provide accurate information based on the publication details above. Use SIMPLIFIED, PLAIN LANGUAGE that a general audience can understand - avoid jargon, explain medical/scientific terms when needed, and keep sentences clear and concise. Format your response with clear markdown structure: use ## for main section headers (e.g. ## Key Takeaways), **bold** for subsection labels (e.g. **Nature and Prevalence:**), and - for bullet points. End with a markdown link to PubMed, e.g. [View on PubMed](https://pubmed.ncbi.nlm.nih.gov/PMID/) - do not include raw URLs as plain text.]`;
   } else if (itemContext.type === "expert") {
+    const expertName = item.name || "Unknown";
+    const profilePath = item.userId || item.id || item._id
+      ? `/collabiora-expert/profile/${item.userId || item.id || item._id}`
+      : `/expert/profile?name=${encodeURIComponent(expertName)}`;
     contextInfo = `\n\n[User is asking about this specific expert/researcher. Use the following information to answer their question accurately:]\n\n`;
-    contextInfo += `Name: ${item.name || "Unknown"}\n`;
+    contextInfo += `Name: ${expertName}\n`;
     contextInfo += `Affiliation: ${item.affiliation || "Unknown"}\n`;
     contextInfo += `Location: ${item.location || "Unknown"}\n`;
     if (item.bio || item.biography) {
@@ -363,7 +394,8 @@ function buildItemContext(itemContext) {
     if (item.researchInterests) {
       contextInfo += `\nResearch Interests: ${item.researchInterests}\n`;
     }
-    contextInfo += `\n\n[Important: Provide information about this researcher's background, expertise, and contributions based on the details above.]`;
+    contextInfo += `\nProfile URL (include this link at the end of your response): ${profilePath}\n`;
+    contextInfo += `\n\n[Important: Provide information about this researcher's background, expertise, and contributions based on the details above. End your response with a markdown link so the user can view the full profile: [View profile](${profilePath})]`;
   }
   
   return contextInfo;
@@ -501,12 +533,6 @@ export async function generateChatResponse(messages, res, req = null) {
   }
 
   try {
-    // Use gemini-2.5-flash for better conversational capabilities
-    const model = geminiInstance.getGenerativeModel({
-      model: "gemini-2.5-flash",
-      systemInstruction: SYSTEM_PROMPT,
-    });
-
     // Convert messages to Gemini format
     // Filter out the initial assistant greeting and only keep actual conversation
     const chatHistory = messages.slice(0, -1)
@@ -552,6 +578,40 @@ export async function generateChatResponse(messages, res, req = null) {
       console.log(`[Chatbot] ${itemContext ? 'Item context detected' : 'No search results found'}, generating AI response`);
     }
 
+    // If asking about a specific trial, send trialDetails with showCard: false so AI response is shown (not raw card)
+    if (itemContext?.type === "trial" && itemContext?.item) {
+      const t = itemContext.item;
+      const trialUrl = t.url || t.clinicalTrialsGovUrl || `https://clinicaltrials.gov/study/${t.nctId || t.id}`;
+      const trialDetails = {
+        showCard: false,
+        nctId: t.nctId || t.id,
+        title: t.title || t.briefTitle || t.officialTitle || "Unknown",
+        url: trialUrl,
+      };
+      res.write(`data: ${JSON.stringify({ trialDetails })}\n\n`);
+    }
+
+    // If asking about a specific publication, always send publicationDetails so "Ask more" options are shown.
+    // showFullCard: true for summarize (show card, hide AI); false for methods/takeaways (show AI + compact Ask more bar).
+    if (itemContext?.type === "publication" && itemContext?.item) {
+      const p = itemContext.item;
+      const authorsStr = Array.isArray(p.authors) ? p.authors.join(", ") : (p.authors || "Unknown");
+      const showFullCard = detectPublicationSummaryFocus(userQuery);
+      const publicationDetails = {
+        showFullCard,
+        title: p.title || "Unknown",
+        pmid: p.pmid || p.id,
+        url: p.url || p.link || (p.pmid ? `https://pubmed.ncbi.nlm.nih.gov/${p.pmid}/` : null),
+        authors: authorsStr,
+        journal: p.journal || "Unknown",
+        year: p.year || "Unknown",
+        abstract: p.fullAbstract || p.abstract || null,
+        keywords: Array.isArray(p.keywords) ? p.keywords.join(", ") : (p.keywords || null),
+        publicationTypes: Array.isArray(p.publicationTypes) ? p.publicationTypes.join(", ") : null,
+      };
+      res.write(`data: ${JSON.stringify({ publicationDetails })}\n\n`);
+    }
+
     // Generate AI response (with item context if available)
     let enhancedQuery = userQuery;
     
@@ -560,23 +620,32 @@ export async function generateChatResponse(messages, res, req = null) {
       enhancedQuery = userQuery + buildItemContext(itemContext);
     }
 
-    const chat = model.startChat({
-      history: chatHistory,
-      generationConfig: {
-        maxOutputTokens: 2048,
-        temperature: 0.7,
-        topP: 0.9,
-        topK: 40,
-      },
-    });
-
-    const result = await chat.sendMessageStream(enhancedQuery);
-
-    // Stream the response
-    for await (const chunk of result.stream) {
-      const chunkText = chunk.text();
-      if (chunkText) {
-        res.write(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
+    for (const modelName of CHATBOT_MODELS) {
+      try {
+        const model = geminiInstance.getGenerativeModel({
+          model: modelName,
+          systemInstruction: SYSTEM_PROMPT,
+        });
+        const chat = model.startChat({
+          history: chatHistory,
+          generationConfig: {
+            maxOutputTokens: 2048,
+            temperature: 0.7,
+            topP: 0.9,
+            topK: 40,
+          },
+        });
+        const result = await chat.sendMessageStream(enhancedQuery);
+        for await (const chunk of result.stream) {
+          const chunkText = chunk.text();
+          if (chunkText) {
+            res.write(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
+          }
+        }
+        break;
+      } catch (modelErr) {
+        console.warn(`[Chatbot] Model ${modelName} failed:`, modelErr.message);
+        if (modelName === CHATBOT_MODELS[CHATBOT_MODELS.length - 1]) throw modelErr;
       }
     }
 
@@ -613,6 +682,19 @@ export async function generateChatResponse(messages, res, req = null) {
         res.setHeader("Content-Type", "text/event-stream");
         res.setHeader("Cache-Control", "no-cache");
         res.setHeader("Connection", "keep-alive");
+
+        // If asking about a specific trial, send trialDetails with showCard: false (show AI response + Ask more bar)
+        if (itemContext?.type === "trial" && itemContext?.item) {
+          const t = itemContext.item;
+          const trialUrl = t.url || t.clinicalTrialsGovUrl || `https://clinicaltrials.gov/study/${t.nctId || t.id}`;
+          const trialDetails = {
+            showCard: false,
+            nctId: t.nctId || t.id,
+            title: t.title || t.briefTitle || t.officialTitle || "Unknown",
+            url: trialUrl,
+          };
+          res.write(`data: ${JSON.stringify({ trialDetails })}\n\n`);
+        }
 
         // If we have search results, send them as structured data and skip AI generation
         if (searchResults && Array.isArray(searchResults) && searchResults.length > 0 && !itemContext) {
@@ -671,23 +753,42 @@ export async function generateChatResponse(messages, res, req = null) {
       }
     }
 
-    // If all attempts fail, send error
+    // Send error to client in stream format
+    const errMsg = error.message?.includes("API key") ? "Chatbot API configuration issue. Please contact support." : "Failed to generate response. Please try again.";
     if (!res.headersSent) {
-      res.write(`data: ${JSON.stringify({ error: "Failed to generate response. Please try again." })}\n\n`);
-      res.end();
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
     }
+    res.write(`data: ${JSON.stringify({ error: errMsg })}\n\n`);
+    res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+    res.end();
   }
 }
 
 /**
- * Generate suggested prompts based on user context
+ * Generate suggested prompts - personalized by condition/medical interest when provided
+ * @param {string} userRole - "patient" | "researcher"
+ * @param {string} [condition] - First medical condition/interest (e.g. "Diabetes", "Parkinson's")
  */
-export function generateSuggestedPrompts(userRole = "patient") {
+export function generateSuggestedPrompts(userRole = "patient", condition = null) {
+  const c = condition && String(condition).trim() ? condition.trim() : null;
+
+  if (c) {
+    const personalized = [
+      `Show me publications on ${c}`,
+      `Show me recent trials for ${c}`,
+      `Find experts in ${c}`,
+      `What are the latest research findings on ${c}?`,
+    ];
+    return personalized;
+  }
+
   const patientPrompts = [
     "Find clinical trials for my condition",
-    "Explain recent research on cancer treatments",
+    "Show me recent publications on health topics",
+    "Find experts in my area of interest",
     "Help me understand this medical term",
-    "Find experts in cardiology",
   ];
 
   const researcherPrompts = [

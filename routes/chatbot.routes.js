@@ -15,9 +15,8 @@ router.post("/chatbot/chat", async (req, res) => {
       return res.status(400).json({ error: "Messages array is required" });
     }
 
-    // Validate message format
     const isValid = messages.every(
-      msg => msg.role && msg.content && 
+      msg => msg.role && (msg.content != null) && 
       (msg.role === "user" || msg.role === "assistant")
     );
 
@@ -32,19 +31,24 @@ router.post("/chatbot/chat", async (req, res) => {
   } catch (error) {
     console.error("Error in chat endpoint:", error);
     if (!res.headersSent) {
-      res.status(500).json({ error: "Internal server error" });
+      const msg = error.message === "Gemini API not configured"
+        ? "Chatbot is not configured. Please ensure GOOGLE_AI_API_KEY is set."
+        : "Failed to generate response. Please try again.";
+      res.status(500).json({ error: msg });
     }
   }
 });
 
 /**
  * GET /api/chatbot/suggestions
- * Get suggested prompts based on user role
+ * Get suggested prompts - personalized by condition when provided
+ * Query: role=patient|researcher, condition=Diabetes (optional - first medical interest)
  */
 router.get("/chatbot/suggestions", (req, res) => {
   try {
     const userRole = req.query.role || "patient";
-    const suggestions = generateSuggestedPrompts(userRole);
+    const condition = req.query.condition || null;
+    const suggestions = generateSuggestedPrompts(userRole, condition);
     res.json({ suggestions });
   } catch (error) {
     console.error("Error getting suggestions:", error);
