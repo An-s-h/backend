@@ -69,6 +69,7 @@ router.get("/posts", async (req, res) => {
       communityId,
       subcategoryId,
       authorUserId,
+      linkedThreadId, // Check if thread is shared
       page = "1",
       pageSize = "20",
       userId, // For checking likes
@@ -92,12 +93,16 @@ router.get("/posts", async (req, res) => {
     if (authorUserId) {
       query.authorUserId = new mongoose.Types.ObjectId(authorUserId);
     }
+    if (linkedThreadId) {
+      query.linkedThreadId = new mongoose.Types.ObjectId(linkedThreadId);
+    }
 
     // Get posts with pagination
     const posts = await Post.find(query)
       .populate("authorUserId", "username email picture")
       .populate("communityId", "name slug color icon")
       .populate("subcategoryId", "name slug")
+      .populate("linkedThreadId", "title body categoryId")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -156,6 +161,7 @@ router.get("/posts/:id", async (req, res) => {
       .populate("authorUserId", "username email picture")
       .populate("communityId", "name slug color icon")
       .populate("subcategoryId", "name slug")
+      .populate("linkedThreadId", "title body categoryId")
       .lean();
 
     if (!post) {
@@ -200,6 +206,7 @@ router.post("/posts", verifySession, async (req, res) => {
       tags = [],
       conditions = [],
       isOfficial = false,
+      linkedThreadId, // Link to forum thread if shared from forums
     } = req.body;
 
     const authorUserId = req.user._id;
@@ -255,6 +262,15 @@ router.post("/posts", verifySession, async (req, res) => {
     // Only researchers can mark posts as official
     const officialFlag = authorRole === "researcher" ? isOfficial : false;
 
+    // Validate linkedThreadId if provided
+    if (linkedThreadId) {
+      const { Thread } = await import("../models/Thread.js");
+      const thread = await Thread.findById(linkedThreadId);
+      if (!thread) {
+        return res.status(404).json({ error: "Linked forum thread not found" });
+      }
+    }
+
     const post = await Post.create({
       communityId: communityId || null,
       subcategoryId: subcategoryId || null,
@@ -266,6 +282,7 @@ router.post("/posts", verifySession, async (req, res) => {
       tags: Array.isArray(tags) ? tags.slice(0, 10) : [],
       conditions: normalizeConditions(conditions),
       isOfficial: officialFlag,
+      linkedThreadId: linkedThreadId || null,
     });
 
     const populatedPost = await Post.findById(post._id)

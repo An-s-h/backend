@@ -26,6 +26,12 @@ const userSchema = new mongoose.Schema(
     emailVerificationOTP: { type: String }, // 6-digit OTP for email verification
     emailVerificationOTPExpiry: { type: Date }, // OTP expires in 15 minutes
 
+    // Password reset fields
+    passwordResetToken: { type: String, sparse: true, index: true },
+    passwordResetTokenExpiry: { type: Date },
+    passwordResetTokenUsed: { type: Boolean, default: false }, // Track if token was already used
+    lastPasswordResetEmailSent: { type: Date }, // Track when last reset email was sent
+
     // Admin access (or set ADMIN_EMAILS in env to treat those emails as admin at login)
     isAdmin: { type: Boolean, default: false },
   },

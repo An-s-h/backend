@@ -46,6 +46,18 @@ function getDeviceIdentifier(req) {
  * Returns strict limit check - blocks after 6 searches
  */
 export async function checkSearchLimit(req, res = null) {
+  // Allow bypassing search limit in development mode for testing
+  if (process.env.NODE_ENV !== "production" && req.headers["x-testing"] === "true") {
+    console.log("[SearchLimit] BYPASS: Testing mode enabled - skipping limit check");
+    return {
+      canSearch: true,
+      remaining: 999,
+      action: "TESTING_BYPASS",
+      message: null,
+      showSignUpPrompt: false,
+    };
+  }
+
   // Get device identifier (deviceId preferred, IP as fallback)
   const identifier = getDeviceIdentifier(req);
 
@@ -218,6 +230,12 @@ export async function checkSearchLimit(req, res = null) {
  * Increment search count for device (deviceId preferred, IP as fallback)
  */
 export async function incrementSearchCount(req) {
+  // Skip incrementing in testing mode
+  if (process.env.NODE_ENV !== "production" && req.headers["x-testing"] === "true") {
+    console.log("[SearchLimit] BYPASS: Testing mode - skipping count increment");
+    return;
+  }
+
   const identifier = getDeviceIdentifier(req);
 
   if (!identifier) {

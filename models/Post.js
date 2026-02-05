@@ -17,6 +17,7 @@ const postSchema = new mongoose.Schema(
     tags: [{ type: String }], // MeSH terminology tags
     conditions: [{ type: String }], // Condition tags
     isOfficial: { type: Boolean, default: false }, // Official work flag for researchers
+    linkedThreadId: { type: mongoose.Schema.Types.ObjectId, ref: "Thread", index: true }, // Link to forum thread if shared from forums
     likes: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
     viewCount: { type: Number, default: 0 },
     // For replies/comments on posts

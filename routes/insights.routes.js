@@ -133,7 +133,7 @@ router.get("/insights/:userId/following", async (req, res) => {
   try {
     const { userId } = req.params;
     const following = await Follow.find({ followerId: userId })
-      .populate("followingId", "username email")
+      .populate("followingId", "username email picture role")
       .sort({ createdAt: -1 })
       .lean();
     
@@ -142,6 +142,8 @@ router.get("/insights/:userId/following", async (req, res) => {
         _id: f.followingId._id || f.followingId.id,
         username: f.followingId.username,
         email: f.followingId.email,
+        picture: f.followingId.picture,
+        role: f.followingId.role,
         followedAt: f.createdAt,
       })),
       count: following.length,

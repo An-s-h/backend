@@ -128,6 +128,201 @@ export async function sendVerificationEmail(
 }
 
 /**
+ * Send password reset email via Unosend API
+ * @param {string} email - Recipient email address
+ * @param {string} username - Recipient username
+ * @param {string} resetToken - Password reset token
+ * @param {string} otp - Optional 6-digit OTP code (backup)
+ * @returns {Promise<Object>} - Result of sending email
+ */
+export async function sendPasswordResetEmail(
+  email,
+  username,
+  resetToken
+) {
+  try {
+    const apiKey = process.env.UNOSEND_API_KEY;
+    const fromEmail = process.env.UNOSEND_FROM_EMAIL || process.env.GMAIL_USER;
+
+    if (!apiKey) {
+      throw new Error("UNOSEND_API_KEY is not set in environment");
+    }
+    if (!fromEmail) {
+      throw new Error(
+        "UNOSEND_FROM_EMAIL (or GMAIL_USER) is not set - use a verified sending domain"
+      );
+    }
+
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+    const resetLink = `${frontendUrl}/reset-password?token=${resetToken}`;
+
+    const logoUrl =
+      process.env.LOGO_URL ||
+      `https://res.cloudinary.com/dtgmjvfms/image/upload/logo_mh2rpv.png`;
+
+    const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Reset Your Password</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="background: linear-gradient(135deg, #D0C4E2, #E8E0EF); padding: 30px; border-radius: 10px; text-align: center; margin-bottom: 20px;">
+            <img src="${logoUrl}" alt="Collabiora Logo" style="max-width: 200px; height: auto; margin-bottom: 10px;" />
+          </div>
+          
+          <div style="background: #fff; padding: 30px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h2 style="color: #2F3C96;">Hello ${username}!</h2>
+            
+            <p>We received a request to reset your password for your Collabiora account. Click the button below to reset your password.</p>
+            
+            <div style="text-align: center; margin: 20px 0;">
+              <a href="${resetLink}" 
+                 style="display: inline-block; background: #2F3C96; color: #fff; padding: 12px 30px; text-decoration: none; border-radius: 5px; font-weight: bold;">
+                Reset Password
+              </a>
+            </div>
+            
+            <p style="color: #666; font-size: 14px;">Or copy and paste this link into your browser:</p>
+            <p style="color: #666; font-size: 12px; word-break: break-all;">${resetLink}</p>
+            
+            <p style="color: #666; font-size: 14px; margin-top: 30px;">
+              <strong>Important:</strong> This link will expire in 15 minutes and can only be used once. If you didn't request a password reset, please ignore this email and your password will remain unchanged.
+            </p>
+          </div>
+          
+          <div style="text-align: center; margin-top: 20px; color: #999; font-size: 12px;">
+            <p>&copy; ${new Date().getFullYear()} Collabiora. All rights reserved.</p>
+          </div>
+        </body>
+        </html>
+      `;
+
+    const response = await fetch(UNOSEND_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: fromEmail.includes("<") ? fromEmail : `"Collabiora" <${fromEmail}>`,
+        to: [email],
+        subject: "Reset Your Collabiora Password",
+        html,
+      }),
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      let errMessage = errBody;
+      try {
+        const parsed = JSON.parse(errBody);
+        errMessage = parsed.message || parsed.error || errBody;
+      } catch (_) {}
+      throw new Error(`Unosend API error (${response.status}): ${errMessage}`);
+    }
+
+    const data = await response.json().catch(() => ({}));
+    const messageId = data.id || data.messageId || data.message_id;
+    console.log("Password reset email sent via Unosend:", messageId || "ok");
+    return { success: true, messageId: messageId || "sent" };
+  } catch (error) {
+    console.error("Error sending password reset email:", error);
+    throw new Error(`Failed to send password reset email: ${error.message}`);
+  }
+}
+
+/**
+ * Send password reset confirmation email
+ * @param {string} email - Recipient email address
+ * @param {string} username - Recipient username
+ * @returns {Promise<Object>} - Result of sending email
+ */
+export async function sendPasswordResetConfirmationEmail(email, username) {
+  try {
+    const apiKey = process.env.UNOSEND_API_KEY;
+    const fromEmail = process.env.UNOSEND_FROM_EMAIL || process.env.GMAIL_USER;
+
+    if (!apiKey) {
+      throw new Error("UNOSEND_API_KEY is not set in environment");
+    }
+    if (!fromEmail) {
+      throw new Error(
+        "UNOSEND_FROM_EMAIL (or GMAIL_USER) is not set - use a verified sending domain"
+      );
+    }
+
+    const logoUrl =
+      process.env.LOGO_URL ||
+      `https://res.cloudinary.com/dtgmjvfms/image/upload/logo_mh2rpv.png`;
+
+    const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Password Changed Successfully</title>
+        </head>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="background: linear-gradient(135deg, #D0C4E2, #E8E0EF); padding: 30px; border-radius: 10px; text-align: center; margin-bottom: 20px;">
+            <img src="${logoUrl}" alt="Collabiora Logo" style="max-width: 200px; height: auto; margin-bottom: 10px;" />
+          </div>
+          
+          <div style="background: #fff; padding: 30px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h2 style="color: #2F3C96;">Hello ${username}!</h2>
+            
+            <p>Your password was successfully changed on ${new Date().toLocaleString()}.</p>
+            
+            <p style="color: #666; font-size: 14px; margin-top: 20px;">
+              If you didn't make this change, please contact our support team immediately to secure your account.
+            </p>
+          </div>
+          
+          <div style="text-align: center; margin-top: 20px; color: #999; font-size: 12px;">
+            <p>&copy; ${new Date().getFullYear()} Collabiora. All rights reserved.</p>
+          </div>
+        </body>
+        </html>
+      `;
+
+    const response = await fetch(UNOSEND_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: fromEmail.includes("<") ? fromEmail : `"Collabiora" <${fromEmail}>`,
+        to: [email],
+        subject: "Your Password Was Changed Successfully",
+        html,
+      }),
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      let errMessage = errBody;
+      try {
+        const parsed = JSON.parse(errBody);
+        errMessage = parsed.message || parsed.error || errBody;
+      } catch (_) {}
+      throw new Error(`Unosend API error (${response.status}): ${errMessage}`);
+    }
+
+    const data = await response.json().catch(() => ({}));
+    const messageId = data.id || data.messageId || data.message_id;
+    console.log("Password reset confirmation email sent via Unosend:", messageId || "ok");
+    return { success: true, messageId: messageId || "sent" };
+  } catch (error) {
+    console.error("Error sending password reset confirmation email:", error);
+    throw new Error(`Failed to send confirmation email: ${error.message}`);
+  }
+}
+
+/**
  * Verify Unosend configuration (API key and from address set)
  * @returns {Promise<boolean>} - True if configuration is valid
  */

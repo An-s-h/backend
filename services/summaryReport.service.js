@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import dotenv from "dotenv";
+import rateLimiter from "../utils/geminiRateLimiter.js";
 
 dotenv.config();
 
@@ -29,7 +30,8 @@ export async function generateExpertSummary(expert, patientContext = {}) {
   }
 
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+    const modelName = "gemini-2.5-flash-lite";
+    const model = genAI.getGenerativeModel({ model: modelName });
 
     const prompt = `
 Create a compact clinical profile for this expert.
@@ -72,7 +74,16 @@ ${
 Return ONLY the JSON object with no additional text or commentary.
 `;
 
-    const result = await model.generateContent(prompt);
+    const expertDataLength = JSON.stringify(expert).length;
+    const estimatedTokens = 200 + expertDataLength / 4 + 500;
+    
+    const result = await rateLimiter.execute(
+      async () => {
+        return await model.generateContent(prompt);
+      },
+      modelName,
+      estimatedTokens
+    );
     const responseText = result.response.text().trim();
 
     // Clean JSON response
@@ -154,7 +165,8 @@ export async function generatePublicationSummary(
   }
 
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
+    const modelName = "gemini-2.5-flash-lite";
+    const model = genAI.getGenerativeModel({ model: modelName });
 
     // Updated prompt to also generate simplified title if needed
     const prompt = `Summarize this medical publication for a doctor. Return a JSON object:
@@ -181,7 +193,16 @@ ${
 
 Return ONLY valid JSON, no markdown formatting.`;
 
-    const result = await model.generateContent(prompt);
+    const publicationLength = JSON.stringify(publication).length;
+    const estimatedTokens = 300 + publicationLength / 4 + 500;
+    
+    const result = await rateLimiter.execute(
+      async () => {
+        return await model.generateContent(prompt);
+      },
+      modelName,
+      estimatedTokens
+    );
     const responseText = result.response.text().trim();
 
     let jsonText = responseText;
@@ -267,7 +288,8 @@ export async function generateTrialSummary(trial, patientContext = {}) {
   }
 
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
+    const modelName = "gemini-2.5-flash-lite";
+    const model = genAI.getGenerativeModel({ model: modelName });
 
     // Updated prompt to also generate simplified title if needed
     const prompt = `Create a doctor-friendly summary of this clinical trial. Return a JSON object:
@@ -304,7 +326,16 @@ ${patientContext.location ? `Patient Location: ${patientContext.location}` : ""}
 
 Return ONLY valid JSON, no markdown formatting.`;
 
-    const result = await model.generateContent(prompt);
+    const trialLength = JSON.stringify(trial).length;
+    const estimatedTokens = 400 + trialLength / 4 + 600;
+    
+    const result = await rateLimiter.execute(
+      async () => {
+        return await model.generateContent(prompt);
+      },
+      modelName,
+      estimatedTokens
+    );
     const responseText = result.response.text().trim();
 
     let jsonText = responseText;

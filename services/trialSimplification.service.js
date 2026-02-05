@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import dotenv from "dotenv";
+import rateLimiter from "../utils/geminiRateLimiter.js";
 
 dotenv.config();
 
@@ -74,8 +75,9 @@ export async function simplifyTrialTitle(trial) {
   }
 
   try {
+    const modelName = "gemini-2.5-flash-lite";
     const model = geminiInstance.getGenerativeModel({
-      model: "gemini-2.5-flash-lite",
+      model: modelName,
     });
 
     const prompt = `Simplify the following medical research or clinical trial title so that a high school–level reader can understand it easily.
@@ -102,12 +104,21 @@ Original title:
 Return ONLY the simplified title.
 No explanations, no quotes, no formatting.`;
 
-    const result = await model.generateContent(prompt, {
-      generationConfig: {
-        maxOutputTokens: 100,
-        temperature: 0.7,
+    // Estimate tokens: prompt ~150 + title length + response 100 = ~300-400 tokens
+    const estimatedTokens = 150 + (trial.title?.length || 100) / 4 + 100;
+    
+    const result = await rateLimiter.execute(
+      async () => {
+        return await model.generateContent(prompt, {
+          generationConfig: {
+            maxOutputTokens: 100,
+            temperature: 0.7,
+          },
+        });
       },
-    });
+      modelName,
+      estimatedTokens
+    );
 
     let simplifiedTitle = result.response.text().trim();
 
@@ -184,8 +195,9 @@ export async function batchSimplifyTrialTitles(trials) {
   }
 
   try {
+    const modelName = "gemini-2.5-flash-lite";
     const model = geminiInstance.getGenerativeModel({
-      model: "gemini-2.5-flash-lite",
+      model: modelName,
     });
 
     // Build batch prompt with all titles (limit to reasonable size)
@@ -217,12 +229,23 @@ Return ONLY a numbered list (1-${uncachedTrials.length}), one simplified title p
 1. [simplified title 1]
 2. [simplified title 2]`;
 
-    const result = await model.generateContent(prompt, {
-      generationConfig: {
-        maxOutputTokens: Math.min(50 * uncachedTrials.length, 1500), // Reduced from 100 to 50 per title
-        temperature: 0.5, // Reduced from 0.7 for faster, more consistent responses
+    const maxOutputTokens = Math.min(50 * uncachedTrials.length, 1500);
+    // Estimate total tokens: prompt + titles + response
+    const totalTitlesLength = uncachedTrials.reduce((sum, t) => sum + (t.title?.length || 100), 0);
+    const estimatedTokens = 300 + totalTitlesLength / 4 + maxOutputTokens;
+    
+    const result = await rateLimiter.execute(
+      async () => {
+        return await model.generateContent(prompt, {
+          generationConfig: {
+            maxOutputTokens: maxOutputTokens,
+            temperature: 0.5, // Reduced from 0.7 for faster, more consistent responses
+          },
+        });
       },
-    });
+      modelName,
+      estimatedTokens
+    );
 
     let responseText = result.response.text().trim();
 
@@ -310,8 +333,9 @@ export async function simplifyTrialDetails(trial) {
   }
 
   try {
+    const modelName = "gemini-2.5-flash-lite"; // Use lite version for better rate limits
     const model = geminiInstance.getGenerativeModel({
-      model: "gemini-2.5-flash",
+      model: modelName,
     });
 
     // Build comprehensive trial information for AI processing
@@ -374,12 +398,22 @@ Status: ${trialInfo.status}
 
 Return ONLY valid JSON, no markdown formatting, no code blocks.`;
 
-    const result = await model.generateContent(prompt, {
-      generationConfig: {
-        maxOutputTokens: 2000,
-        temperature: 0.7,
+    // Estimate tokens: prompt ~500 + trial content ~500 + response 2000 = ~3000 tokens
+    const trialContentLength = JSON.stringify(trialInfo).length;
+    const estimatedTokens = 500 + trialContentLength / 4 + 2000;
+    
+    const result = await rateLimiter.execute(
+      async () => {
+        return await model.generateContent(prompt, {
+          generationConfig: {
+            maxOutputTokens: 2000,
+            temperature: 0.7,
+          },
+        });
       },
-    });
+      modelName,
+      estimatedTokens
+    );
 
     let responseText = result.response.text().trim();
 

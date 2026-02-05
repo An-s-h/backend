@@ -7,6 +7,10 @@ import { searchGoogleScholarPublications } from "../services/googleScholar.servi
 import { getExpertProfile } from "../services/expertProfile.service.js";
 import { searchVerifiedExpertsV2 } from "../services/expertDiscoveryV2.service.js";
 import {
+  findDeterministicExperts,
+  formatExpertsForResponse,
+} from "../services/deterministicExperts.service.js";
+import {
   fetchTrialById,
   fetchPublicationById,
 } from "../services/urlParser.service.js";
@@ -1215,6 +1219,76 @@ router.get("/search/experts/v2", async (req, res) => {
     return res.status(500).json({
       error: "Failed to search verified experts. Please try again later.",
       results: [],
+    });
+  }
+});
+
+// Deterministic expert discovery pipeline (API-first, Gemini only for constraints/summaries)
+// Flow: Gemini (constraints only) -> OpenAlex works -> Extract authors -> Semantic Scholar verification -> Ranking -> Gemini (summaries)
+router.get("/search/experts/deterministic", async (req, res) => {
+  try {
+    // Check search limit for anonymous users (browser-based deviceId)
+    if (!req.user) {
+      const limitCheck = await checkSearchLimit(req);
+      if (!limitCheck.canSearch) {
+        return res.status(429).json({
+          error:
+            limitCheck.message ||
+            "You've used all your free searches! Sign in to continue searching.",
+          remaining: 0,
+          results: [],
+          showSignUpPrompt: limitCheck.showSignUpPrompt,
+        });
+      }
+    }
+
+    const { q = "", location, limit = "10" } = req.query;
+
+    if (!q || !q.trim()) {
+      return res.json({ results: [], message: "Query is required" });
+    }
+
+    const parsedLimit = Math.max(5, Math.min(10, parseInt(limit, 10) || 10));
+
+    console.log(
+      `🔍 Deterministic expert search: topic="${q}", location="${location || "global"}", limit=${parsedLimit}`
+    );
+
+    // Execute deterministic expert discovery
+    const experts = await findDeterministicExperts(
+      q.trim(),
+      location || null,
+      parsedLimit
+    );
+
+    // Format for API response
+    const formattedExperts = formatExpertsForResponse(experts);
+
+    // Increment search count for anonymous users after successful search
+    if (!req.user) {
+      await incrementSearchCount(req);
+    }
+
+    // Get remaining searches for anonymous users
+    let remaining = null;
+    if (!req.user) {
+      const limitCheck = await checkSearchLimit(req);
+      remaining = limitCheck.remaining;
+    }
+
+    return res.json({
+      results: formattedExperts,
+      totalFound: formattedExperts.length,
+      method: "deterministic",
+      ...(remaining !== null && { remaining }),
+    });
+  } catch (error) {
+    console.error("Error in deterministic expert search:", error);
+    return res.status(500).json({
+      error:
+        "Failed to search experts using deterministic method. Please try again later.",
+      results: [],
+      details: process.env.NODE_ENV === "development" ? error.message : undefined,
     });
   }
 });

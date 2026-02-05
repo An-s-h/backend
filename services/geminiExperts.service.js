@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import dotenv from "dotenv";
+import rateLimiter from "../utils/geminiRateLimiter.js";
 
 dotenv.config();
 
@@ -146,10 +147,10 @@ export async function findResearchersWithGemini(query = "") {
       return [];
     }
 
-    // Use fastest model (flash is much faster than pro)
-    // Use fastest and deterministic model
+    // Use model with higher rate limits (gemini-2.5-flash-lite has 4K RPM vs gemini-2.5-flash 1K RPM)
+    const modelName = "gemini-2.5-flash-lite";
     let model = geminiInstance.getGenerativeModel({
-      model: "gemini-2.5-flash",
+      model: modelName,
     });
 
     // Highly structured and specific system-style prompt
@@ -204,16 +205,23 @@ export async function findResearchersWithGemini(query = "") {
 
     let result;
     try {
-      result = await retryWithBackoff(async () => {
-        return await model.generateContent(prompt, {
-          generationConfig: {
-            maxOutputTokens: 3000, // Slightly higher for detail
-            temperature: 0.3, // Lower for consistency and factual accuracy
-            topP: 0.7,
-            topK: 40,
-          },
-        });
-      });
+      // Estimate tokens: prompt ~500 + response 3000 = ~3500 tokens
+      result = await rateLimiter.execute(
+        async () => {
+          return await retryWithBackoff(async () => {
+            return await model.generateContent(prompt, {
+              generationConfig: {
+                maxOutputTokens: 3000, // Slightly higher for detail
+                temperature: 0.3, // Lower for consistency and factual accuracy
+                topP: 0.7,
+                topK: 40,
+              },
+            });
+          });
+        },
+        modelName,
+        3500
+      );
     } catch (firstError) {
       // If we have two API keys and first one failed, try the alternate
       if (genAI && genAI2 && !attemptWithAlternate) {
@@ -230,19 +238,26 @@ export async function findResearchersWithGemini(query = "") {
         if (isRetryableError) {
           attemptWithAlternate = true;
           geminiInstance = getGeminiInstance(true);
+          const alternateModelName = "gemini-2.5-flash";
           model = geminiInstance.getGenerativeModel({
-            model: "gemini-2.5-flash",
+            model: alternateModelName,
           });
-          result = await retryWithBackoff(async () => {
-            return await model.generateContent(prompt, {
-              generationConfig: {
-                maxOutputTokens: 3000,
-                temperature: 0.3,
-                topP: 0.7,
-                topK: 40,
-              },
-            });
-          });
+          result = await rateLimiter.execute(
+            async () => {
+              return await retryWithBackoff(async () => {
+                return await model.generateContent(prompt, {
+                  generationConfig: {
+                    maxOutputTokens: 3000,
+                    temperature: 0.3,
+                    topP: 0.7,
+                    topK: 40,
+                  },
+                });
+              });
+            },
+            alternateModelName,
+            3500
+          );
         } else {
           throw firstError;
         }
@@ -294,21 +309,6 @@ export async function findResearchersWithGemini(query = "") {
 
     // Cache the results
     setCache(cacheKey, formattedResearchers);
-    // #region agent log
-    fetch("http://127.0.0.1:7242/ingest/f1b3fc61-8c8f-48bb-889f-dd932b9156c8", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        location: "geminiExperts.service.js:237",
-        message: "Successfully returned researchers",
-        data: { count: formattedResearchers.length },
-        timestamp: Date.now(),
-        sessionId: "debug-session",
-        runId: "run1",
-        hypothesisId: "C",
-      }),
-    }).catch(() => {});
-    // #endregion
     return formattedResearchers;
   } catch (error) {
     console.error("Error finding researchers with Gemini:", error.message);

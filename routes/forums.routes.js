@@ -119,7 +119,7 @@ router.get("/forums/threads", async (req, res) => {
   };
   const threads = await Thread.find(q)
     .populate("categoryId", "name slug")
-    .populate("authorUserId", "username email")
+    .populate("authorUserId", "username email picture handle nameHidden")
     .sort({ createdAt: -1 })
     .lean();
 
@@ -179,7 +179,7 @@ router.get("/researcher-forums/threads", async (req, res) => {
   const threads = await Thread.find(q)
     .populate("communityId", "name slug icon color")
     .populate("subcategoryId", "name slug")
-    .populate("authorUserId", "username email")
+    .populate("authorUserId", "username email picture handle nameHidden")
     .sort({ createdAt: -1 })
     .lean();
 
@@ -218,7 +218,7 @@ router.get("/forums/threads/:threadId", async (req, res) => {
 
   const thread = await Thread.findById(threadId)
     .populate("categoryId", "name slug")
-    .populate("authorUserId", "username email")
+    .populate("authorUserId", "username email picture handle nameHidden")
     .lean();
 
   if (!thread) return res.status(404).json({ error: "Thread not found" });
@@ -228,7 +228,7 @@ router.get("/forums/threads/:threadId", async (req, res) => {
 
   // Get all replies with populated data
   const replies = await Reply.find({ threadId })
-    .populate("authorUserId", "username email")
+    .populate("authorUserId", "username email picture handle nameHidden")
     .sort({ createdAt: 1 })
     .lean();
 
@@ -316,7 +316,7 @@ router.post("/forums/threads", async (req, res) => {
 
   const populatedThread = await Thread.findById(thread._id)
     .populate("categoryId", "name slug")
-    .populate("authorUserId", "username email")
+    .populate("authorUserId", "username email picture handle nameHidden")
     .lean();
 
   // If patient creates a thread, notify researchers in matching specialties
@@ -411,7 +411,7 @@ router.post("/forums/replies", async (req, res) => {
   });
 
   const populatedReply = await Reply.findById(reply._id)
-    .populate("authorUserId", "username email")
+    .populate("authorUserId", "username email picture handle nameHidden")
     .lean();
 
   // Get researcher profile for specialties if author is researcher
@@ -581,7 +581,7 @@ router.patch("/forums/replies/:replyId", async (req, res) => {
   invalidateCache("forums:threads:");
 
   const populated = await Reply.findById(reply._id)
-    .populate("authorUserId", "username email")
+    .populate("authorUserId", "username email picture handle nameHidden")
     .lean();
 
   res.json({

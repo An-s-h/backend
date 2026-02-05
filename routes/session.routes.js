@@ -3,7 +3,7 @@ import { User } from "../models/User.js";
 import { Profile } from "../models/Profile.js";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
-import { sendVerificationEmail } from "../services/email.service.js";
+import { sendVerificationEmail, sendPasswordResetEmail, sendPasswordResetConfirmationEmail } from "../services/email.service.js";
 import { verifySession } from "../middleware/auth.js";
 
 const router = Router();
@@ -114,6 +114,172 @@ router.post("/auth/login", async (req, res) => {
   } catch (error) {
     console.error("Login error:", error);
     return res.status(500).json({ error: "Failed to login" });
+  }
+});
+
+// POST /api/auth/forgot-password - Request password reset
+router.post("/auth/forgot-password", async (req, res) => {
+  const { email, role } = req.body || {};
+
+  if (!email) {
+    return res.status(400).json({ error: "Email is required" });
+  }
+
+  try {
+    // Find user by email and role (if provided)
+    // If role not provided, check both roles
+    let user;
+    if (role && ["patient", "researcher"].includes(role)) {
+      user = await User.findOne({ email, role });
+    } else {
+      // Try patient first, then researcher
+      user = await User.findOne({ email, role: "patient" }) ||
+             await User.findOne({ email, role: "researcher" });
+    }
+
+    // Always return success message (security: prevent email enumeration)
+    // If email exists, send reset email; if not, just return success
+    if (user && user.password) {
+      // Generate reset token
+      const resetToken = crypto.randomBytes(32).toString("hex");
+      const hashedToken = crypto.createHash("sha256").update(resetToken).digest("hex");
+
+      // Set token expiry to 15 minutes
+      const tokenExpiry = new Date();
+      tokenExpiry.setMinutes(tokenExpiry.getMinutes() + 15);
+
+      // Update user with reset token
+      user.passwordResetToken = hashedToken;
+      user.passwordResetTokenExpiry = tokenExpiry;
+      user.passwordResetTokenUsed = false;
+      user.lastPasswordResetEmailSent = new Date();
+      await user.save();
+
+      // Send reset email (no OTP backup code)
+      try {
+        await sendPasswordResetEmail(user.email, user.username, resetToken);
+      } catch (emailError) {
+        console.error("Failed to send password reset email:", emailError);
+        // Don't fail the request if email fails - still return success
+      }
+    }
+
+    // Always return the same message (security best practice)
+    return res.json({
+      message: "If this email exists, we've sent a reset link.",
+    });
+  } catch (error) {
+    console.error("Forgot password error:", error);
+    // Still return success to prevent email enumeration
+    return res.json({
+      message: "If this email exists, we've sent a reset link.",
+    });
+  }
+});
+
+// GET /api/auth/reset-password/:token - Verify reset token
+router.get("/auth/reset-password/:token", async (req, res) => {
+  const { token } = req.params;
+
+  if (!token) {
+    return res.status(400).json({ error: "Reset token is required" });
+  }
+
+  try {
+    // Hash the token to compare with stored hash
+    const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
+
+    // Find user with this token
+    const user = await User.findOne({
+      passwordResetToken: hashedToken,
+      passwordResetTokenUsed: false,
+      passwordResetTokenExpiry: { $gt: new Date() },
+    });
+
+    if (!user) {
+      return res.status(400).json({
+        error: "Reset link expired. Request a new one.",
+      });
+    }
+
+    return res.json({
+      valid: true,
+      message: "Token is valid",
+    });
+  } catch (error) {
+    console.error("Reset token verification error:", error);
+    return res.status(400).json({
+      error: "Reset link expired. Request a new one.",
+    });
+  }
+});
+
+// POST /api/auth/reset-password - Reset password with token
+router.post("/auth/reset-password", async (req, res) => {
+  const { token, newPassword, confirmPassword } = req.body || {};
+
+  if (!token || !newPassword || !confirmPassword) {
+    return res.status(400).json({
+      error: "Token, new password, and confirm password are required",
+    });
+  }
+
+  if (newPassword !== confirmPassword) {
+    return res.status(400).json({ error: "Passwords do not match" });
+  }
+
+  if (newPassword.length < 6) {
+    return res.status(400).json({
+      error: "Password must be at least 6 characters",
+    });
+  }
+
+  try {
+    // Hash the token to compare with stored hash
+    const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
+
+    // Find user with valid token
+    const user = await User.findOne({
+      passwordResetToken: hashedToken,
+      passwordResetTokenUsed: false,
+      passwordResetTokenExpiry: { $gt: new Date() },
+    });
+
+    if (!user) {
+      return res.status(400).json({
+        error: "Reset link expired. Request a new one.",
+      });
+    }
+
+    // Check if new password is same as old password
+    const isSamePassword = await user.comparePassword(newPassword);
+    if (isSamePassword) {
+      return res.status(400).json({
+        error: "New password must be different from your current password",
+      });
+    }
+
+    // Update password (will be hashed by pre-save hook)
+    user.password = newPassword;
+    user.passwordResetToken = undefined;
+    user.passwordResetTokenExpiry = undefined;
+    user.passwordResetTokenUsed = true;
+    await user.save();
+
+    // Send confirmation email
+    try {
+      await sendPasswordResetConfirmationEmail(user.email, user.username);
+    } catch (emailError) {
+      console.error("Failed to send confirmation email:", emailError);
+      // Don't fail the request if email fails
+    }
+
+    return res.json({
+      message: "Password reset successfully. You can now sign in with your new password.",
+    });
+  } catch (error) {
+    console.error("Reset password error:", error);
+    return res.status(500).json({ error: "Failed to reset password" });
   }
 });
 
@@ -605,23 +771,7 @@ router.post(
         return res.status(400).json({ error: "Email is already verified" });
       }
 
-      // Check if email was sent within the last 24 hours
-      if (user.lastVerificationEmailSent) {
-        const lastSentTime = new Date(user.lastVerificationEmailSent);
-        const now = new Date();
-        const hoursSinceLastSent = (now - lastSentTime) / (1000 * 60 * 60);
-
-        if (hoursSinceLastSent < 24) {
-          const hoursRemaining = Math.ceil(24 - hoursSinceLastSent);
-          return res.status(429).json({
-            error: `Please wait ${hoursRemaining} hour${
-              hoursRemaining !== 1 ? "s" : ""
-            } before requesting another verification email.`,
-            hoursRemaining,
-            canResendAt: new Date(lastSentTime.getTime() + 24 * 60 * 60 * 1000),
-          });
-        }
-      }
+      // Removed 24h resend limit - users can resend verification emails anytime
 
       // Generate verification token
       const verificationToken = crypto.randomBytes(32).toString("hex");

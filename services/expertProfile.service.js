@@ -1,6 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import axios from "axios";
 import dotenv from "dotenv";
+import rateLimiter from "../utils/geminiRateLimiter.js";
 import { searchGoogleScholarPublications } from "./googleScholar.service.js";
 import { searchClinicalTrials } from "./clinicalTrials.service.js";
 
@@ -47,7 +48,8 @@ async function generateBioSummary(expertData) {
   if (!genAI) return null;
 
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+    const modelName = "gemini-2.5-flash-lite";
+    const model = genAI.getGenerativeModel({ model: modelName });
     const prompt = `Generate a concise 2-3 sentence professional summary for this researcher:
     
 Name: ${expertData.name || "Unknown"}
@@ -57,12 +59,21 @@ Biography: ${expertData.biography || ""}
 
 Create a professional, factual summary highlighting their expertise and impact. Keep it to 2-3 sentences maximum.`;
 
-    const result = await model.generateContent(prompt, {
-      generationConfig: {
-        maxOutputTokens: 150,
-        temperature: 0.7,
+    const expertDataLength = JSON.stringify(expertData).length;
+    const estimatedTokens = 100 + expertDataLength / 4 + 150;
+    
+    const result = await rateLimiter.execute(
+      async () => {
+        return await model.generateContent(prompt, {
+          generationConfig: {
+            maxOutputTokens: 150,
+            temperature: 0.7,
+          },
+        });
       },
-    });
+      modelName,
+      estimatedTokens
+    );
 
     let summary = result.response.text().trim();
     // Clean up common AI artifacts

@@ -21,12 +21,15 @@ import meetingRequestsRoutes from "./routes/meeting-requests.routes.js";
 import connectionRequestsRoutes from "./routes/connection-requests.routes.js";
 import expertInvitesRoutes from "./routes/expert-invites.routes.js";
 import adminRoutes from "./routes/admin.routes.js";
+import rateLimitRoutes from "./routes/rateLimit.routes.js";
+import chatbotRoutes from "./routes/chatbot.routes.js";
 import waitlistRoutes from "./routes/waitlist.routes.js";
 import uploadRoutes from "./routes/upload.routes.js";
 import trendingRoutes from "./routes/trending.routes.js";
 import orcidRoutes from "./routes/orcid.routes.js";
 import { optionalSession } from "./middleware/auth.js";
 import { searchLimitMiddleware } from "./middleware/searchLimit.js";
+
 
 dotenv.config();
 
@@ -79,6 +82,7 @@ app.use("/api", forumsRoutes);
 app.use("/api", postsRoutes);
 app.use("/api", communitiesRoutes);
 app.use("/api", trialsRoutes);
+app.use("/api", chatbotRoutes);
 app.use("/api", aiRoutes);
 app.use("/api", insightsRoutes);
 app.use("/api", expertInvitesRoutes);
@@ -91,6 +95,7 @@ app.use("/api", waitlistRoutes);
 app.use("/api", trendingRoutes);
 app.use("/api", orcidRoutes);
 app.use("/api", uploadRoutes);
+app.use("/api/rate-limit", rateLimitRoutes); // Rate limiter monitoring
 
 const PORT = process.env.PORT || 5000;
 

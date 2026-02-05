@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import dotenv from "dotenv";
+import rateLimiter from "../utils/geminiRateLimiter.js";
 
 dotenv.config();
 
@@ -58,8 +59,9 @@ export async function simplifyPublicationTitle(publication) {
   }
 
   try {
+    const modelName = "gemini-2.5-flash-lite";
     const model = geminiInstance.getGenerativeModel({
-      model: "gemini-2.5-flash-lite",
+      model: modelName,
     });
 
     const prompt = `Rewrite this medical research or clinical trial title so a normal patient (high school level) can easily understand it.
@@ -85,12 +87,20 @@ Original title:
 Return only the simplified title.
 No extra text, no explanations, no quotes.`;
 
-    const result = await model.generateContent(prompt, {
-      generationConfig: {
-        maxOutputTokens: 100,
-        temperature: 0.7,
+    const estimatedTokens = 150 + (publication.title?.length || 100) / 4 + 100;
+    
+    const result = await rateLimiter.execute(
+      async () => {
+        return await model.generateContent(prompt, {
+          generationConfig: {
+            maxOutputTokens: 100,
+            temperature: 0.7,
+          },
+        });
       },
-    });
+      modelName,
+      estimatedTokens
+    );
 
     let simplifiedTitle = result.response.text().trim();
 
@@ -129,8 +139,9 @@ export async function simplifyPublicationDetails(publication) {
   }
 
   try {
+    const modelName = "gemini-2.5-flash-lite";
     const model = geminiInstance.getGenerativeModel({
-      model: "gemini-2.5-flash-lite",
+      model: modelName,
     });
 
     // Build comprehensive publication information for AI processing
@@ -179,12 +190,21 @@ Keywords: ${pubInfo.keywords}
 
 Return ONLY valid JSON, no markdown formatting, no code blocks.`;
 
-    const result = await model.generateContent(prompt, {
-      generationConfig: {
-        maxOutputTokens: 2500,
-        temperature: 0.7,
+    const pubInfoLength = JSON.stringify(pubInfo).length;
+    const estimatedTokens = 400 + pubInfoLength / 4 + 2500;
+    
+    const result = await rateLimiter.execute(
+      async () => {
+        return await model.generateContent(prompt, {
+          generationConfig: {
+            maxOutputTokens: 2500,
+            temperature: 0.7,
+          },
+        });
       },
-    });
+      modelName,
+      estimatedTokens
+    );
 
     let responseText = result.response.text().trim();
 

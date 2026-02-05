@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import dotenv from "dotenv";
+import rateLimiter from "../utils/geminiRateLimiter.js";
 
 // Load environment variables before creating the instance
 dotenv.config();
@@ -168,9 +169,19 @@ Return ONLY valid JSON, no markdown formatting. Use appropriate technical and sc
 
       let result;
       try {
-        result = await retryWithBackoff(async () => {
-          return await model.generateContent(prompt);
-        });
+        // Estimate tokens: prompt + text content + response
+        const textLength = text.substring(0, 2000).length;
+        const estimatedTokens = 500 + textLength / 4 + 1500;
+        
+        result = await rateLimiter.execute(
+          async () => {
+            return await retryWithBackoff(async () => {
+              return await model.generateContent(prompt);
+            });
+          },
+          modelName,
+          estimatedTokens
+        );
     } catch (firstError) {
       // If we have two API keys and first one failed, try the alternate
       if (genAI && genAI2 && !attemptWithAlternate) {
@@ -195,9 +206,15 @@ Return ONLY valid JSON, no markdown formatting. Use appropriate technical and sc
           model = geminiInstance.getGenerativeModel({
             model: alternateModelName,
           });
-          result = await retryWithBackoff(async () => {
-            return await model.generateContent(prompt);
-          });
+          result = await rateLimiter.execute(
+            async () => {
+              return await retryWithBackoff(async () => {
+                return await model.generateContent(prompt);
+              });
+            },
+            alternateModelName,
+            estimatedTokens
+          );
         } else {
           throw firstError;
         }
@@ -232,11 +249,20 @@ Return ONLY valid JSON, no markdown formatting. Use appropriate technical and sc
 
     let result;
     try {
-      result = await retryWithBackoff(async () => {
-        return await model.generateContent(
-          `${languageInstruction}: ${text}`
-        );
-      });
+      const textLength = text.length;
+      const estimatedTokens = 100 + textLength / 4 + 500;
+      
+      result = await rateLimiter.execute(
+        async () => {
+          return await retryWithBackoff(async () => {
+            return await model.generateContent(
+              `${languageInstruction}: ${text}`
+            );
+          });
+        },
+        modelName,
+        estimatedTokens
+      );
     } catch (firstError) {
       // If we have two API keys and first one failed, try the alternate
       if (genAI && genAI2 && !attemptWithAlternate) {
@@ -261,11 +287,17 @@ Return ONLY valid JSON, no markdown formatting. Use appropriate technical and sc
           model = geminiInstance.getGenerativeModel({
             model: alternateModelName,
           });
-          result = await retryWithBackoff(async () => {
-            return await model.generateContent(
-              `${languageInstruction}: ${text}`
-            );
-          });
+          result = await rateLimiter.execute(
+            async () => {
+              return await retryWithBackoff(async () => {
+                return await model.generateContent(
+                  `${languageInstruction}: ${text}`
+                );
+              });
+            },
+            alternateModelName,
+            estimatedTokens
+          );
         } else {
           throw firstError;
         }
@@ -305,11 +337,21 @@ export async function extractConditions(naturalLanguage) {
       return keywords.filter((k) => naturalLanguage.toLowerCase().includes(k));
     }
 
+    const modelName = "gemini-2.5-flash-lite";
     const model = geminiInstance.getGenerativeModel({
-      model: "gemini-2.5-flash-lite",
+      model: modelName,
     });
-    const result = await model.generateContent(
-      `Extract specific medical conditions/diseases from this patient description. Convert symptoms to their corresponding medical conditions when appropriate (e.g., "high BP" or "high blood pressure" → "Hypertension", "chest pain" → consider "Heart Disease" or "Angina", "breathing issues" → consider "Asthma" or "COPD", "prostate issues" → consider "Prostate Cancer" if cancer-related). Return ONLY a comma-separated list of condition names (diagnoses), no explanations: "${naturalLanguage}"`
+    
+    const prompt = `Extract specific medical conditions/diseases from this patient description. Convert symptoms to their corresponding medical conditions when appropriate (e.g., "high BP" or "high blood pressure" → "Hypertension", "chest pain" → consider "Heart Disease" or "Angina", "breathing issues" → consider "Asthma" or "COPD", "prostate issues" → consider "Prostate Cancer" if cancer-related). Return ONLY a comma-separated list of condition names (diagnoses), no explanations: "${naturalLanguage}"`;
+    
+    const estimatedTokens = 100 + naturalLanguage.length / 4 + 100;
+    
+    const result = await rateLimiter.execute(
+      async () => {
+        return await model.generateContent(prompt);
+      },
+      modelName,
+      estimatedTokens
     );
     const text = result.response.text().trim();
     return text
@@ -361,8 +403,9 @@ export async function extractExpertInfo(biography, name = "") {
       };
     }
 
+    const modelName = "gemini-2.5-flash-lite";
     const model = geminiInstance.getGenerativeModel({
-      model: "gemini-2.5-flash-lite",
+      model: modelName,
     });
     // Truncate biography to 500 chars to speed up AI processing
     const truncatedBio =
@@ -383,11 +426,19 @@ ${name ? `Name: "${name}"` : ""}
 
 Return ONLY valid JSON, no explanations or markdown formatting.`;
 
-    const result = await model.generateContent(prompt, {
-      generationConfig: {
-        maxOutputTokens: 500, // Limit response size for faster processing
+    const estimatedTokens = 200 + truncatedBio.length / 4 + 500;
+    
+    const result = await rateLimiter.execute(
+      async () => {
+        return await model.generateContent(prompt, {
+          generationConfig: {
+            maxOutputTokens: 500, // Limit response size for faster processing
+          },
+        });
       },
-    });
+      modelName,
+      estimatedTokens
+    );
     const responseText = result.response.text().trim();
 
     // Clean the response - remove markdown code blocks if present
@@ -455,8 +506,9 @@ export async function simplifyTitle(title) {
       return words.slice(0, 10).join(" ") + "...";
     }
 
+    const modelName = "gemini-2.5-flash-lite";
     const model = geminiInstance.getGenerativeModel({
-      model: "gemini-2.5-flash-lite",
+      model: modelName,
     });
 
     const prompt = `Rewrite this medical research or clinical trial title so a normal patient (high school level) can easily understand it.
@@ -482,12 +534,20 @@ Original title:
 Return only the simplified title.
 No extra text, no explanations, no quotes.`;
 
-    const result = await model.generateContent(prompt, {
-      generationConfig: {
-        maxOutputTokens: 100,
-        temperature: 0.3, // Lower temperature for more consistent results
+    const estimatedTokens = 150 + title.length / 4 + 100;
+    
+    const result = await rateLimiter.execute(
+      async () => {
+        return await model.generateContent(prompt, {
+          generationConfig: {
+            maxOutputTokens: 100,
+            temperature: 0.3, // Lower temperature for more consistent results
+          },
+        });
       },
-    });
+      modelName,
+      estimatedTokens
+    );
 
     let simplified = result.response.text().trim();
 
@@ -587,8 +647,9 @@ export async function batchSimplifyPublicationTitles(titles) {
       });
     }
 
+    const modelName = "gemini-2.5-flash-lite";
     const model = geminiInstance.getGenerativeModel({
-      model: "gemini-2.5-flash-lite",
+      model: modelName,
     });
 
     // Build batch prompt with all titles (limit to reasonable size)
@@ -619,12 +680,22 @@ Return ONLY a numbered list (1-${uncachedTitles.length}), one simplified title p
 1. [simplified title 1]
 2. [simplified title 2]`;
 
-    const result = await model.generateContent(prompt, {
-      generationConfig: {
-        maxOutputTokens: Math.min(50 * uncachedTitles.length, 1500),
-        temperature: 0.3,
+    const maxOutputTokens = Math.min(50 * uncachedTitles.length, 1500);
+    const totalTitlesLength = uncachedTitles.reduce((sum, t) => sum + t.length, 0);
+    const estimatedTokens = 300 + totalTitlesLength / 4 + maxOutputTokens;
+    
+    const result = await rateLimiter.execute(
+      async () => {
+        return await model.generateContent(prompt, {
+          generationConfig: {
+            maxOutputTokens: maxOutputTokens,
+            temperature: 0.3,
+          },
+        });
       },
-    });
+      modelName,
+      estimatedTokens
+    );
 
     let responseText = result.response.text().trim();
 
@@ -763,8 +834,9 @@ Best regards,
 ${userName || "Patient"}`;
     }
 
+    const modelName = "gemini-2.5-flash-lite";
     const model = geminiInstance.getGenerativeModel({
-      model: "gemini-2.5-flash-lite",
+      model: modelName,
     });
 
     // Build location string
@@ -815,12 +887,21 @@ Generate a concise, professional message (3-4 paragraphs) that:
 
 Return ONLY the message text, no explanations or markdown formatting.`;
 
-    const result = await model.generateContent(prompt, {
-      generationConfig: {
-        maxOutputTokens: 500,
-        temperature: 0.7,
+    const trialInfoLength = JSON.stringify(trialInfo).length;
+    const estimatedTokens = 300 + trialInfoLength / 4 + 500;
+    
+    const result = await rateLimiter.execute(
+      async () => {
+        return await model.generateContent(prompt, {
+          generationConfig: {
+            maxOutputTokens: 500,
+            temperature: 0.7,
+          },
+        });
       },
-    });
+      modelName,
+      estimatedTokens
+    );
 
     return result.response.text().trim();
   } catch (e) {
