@@ -97,14 +97,15 @@ router.get("/forums/categories", async (_req, res) => {
 
 // Get threads with populated data
 router.get("/forums/threads", async (req, res) => {
-  const { categoryId, condition } = req.query;
+  const { categoryId, condition, userId } = req.query;
   const normalizedConditions = normalizeConditions(condition);
   const conditionKey =
     normalizedConditions.length > 0
       ? normalizedConditions.join("|").toLowerCase()
       : "all";
   const cacheKey = `forums:threads:${categoryId || "all"}:${conditionKey}`;
-  const cached = getCache(cacheKey);
+  // Skip cache when userId provided (per-user hasCurrentUserReplied)
+  const cached = !userId ? getCache(cacheKey) : null;
   if (cached) {
     return res.json({ threads: cached });
   }
@@ -125,7 +126,7 @@ router.get("/forums/threads", async (req, res) => {
 
   // Get reply counts and researcher-reply flags for each thread
   const threadIds = threads.map((t) => t._id);
-  const [replyCounts, researcherReplies] = await Promise.all([
+  const aggregates = [
     Reply.aggregate([
       { $match: { threadId: { $in: threadIds } } },
       { $group: { _id: "$threadId", count: { $sum: 1 } } },
@@ -134,14 +135,33 @@ router.get("/forums/threads", async (req, res) => {
       { $match: { threadId: { $in: threadIds }, authorRole: "researcher" } },
       { $group: { _id: "$threadId" } },
     ]),
-  ]);
+  ];
+  // When userId provided, also get threads where current user (researcher) replied
+  if (userId && mongoose.Types.ObjectId.isValid(userId)) {
+    aggregates.push(
+      Reply.aggregate([
+        {
+          $match: {
+            threadId: { $in: threadIds },
+            authorUserId: new mongoose.Types.ObjectId(userId),
+            authorRole: "researcher",
+          },
+        },
+        { $group: { _id: "$threadId" } },
+      ])
+    );
+  }
+  const aggResults = await Promise.all(aggregates);
 
   const countMap = {};
-  replyCounts.forEach((item) => {
+  aggResults[0].forEach((item) => {
     countMap[item._id.toString()] = item.count;
   });
   const researcherReplyThreadIds = new Set(
-    researcherReplies.map((r) => r._id.toString())
+    aggResults[1].map((r) => r._id.toString())
+  );
+  const currentUserReplyThreadIds = new Set(
+    aggResults.length > 2 ? aggResults[2].map((r) => r._id.toString()) : []
   );
 
   const threadsWithCounts = threads.map((thread) => ({
@@ -151,9 +171,10 @@ router.get("/forums/threads", async (req, res) => {
     hasResearcherReply:
       researcherReplyThreadIds.has(thread._id.toString()) ||
       thread.authorRole === "researcher",
+    hasCurrentUserReplied: currentUserReplyThreadIds.has(thread._id.toString()),
   }));
 
-  setCache(cacheKey, threadsWithCounts, CACHE_TTL.threads);
+  if (!userId) setCache(cacheKey, threadsWithCounts, CACHE_TTL.threads);
   res.json({ threads: threadsWithCounts });
 });
 

@@ -59,9 +59,10 @@ export async function searchPubMed({
   maxdate = "",
   page = 1,
   pageSize = 9,
+  sort = "relevance", // "relevance" | "date" - use "date" for recent/latest
 } = {}) {
   // Build cache key with all parameters
-  const key = `pm:${q}:${mindate}:${maxdate}:${page}:${pageSize}`;
+  const key = `pm:${q}:${mindate}:${maxdate}:${page}:${pageSize}:${sort}`;
   const cached = getCache(key);
   if (cached) return cached;
 
@@ -137,7 +138,7 @@ export async function searchPubMed({
       retmode: "json",
       retmax: String(Math.min(Number(pageSize), 500)), // PubMed allows up to 10k; we cap at 500 for performance
       retstart: String(retstart),
-      sort: "relevance", // Explicit relevance sort (matches user expectation from pubmed.gov)
+      sort: sort === "date" ? "date" : "relevance", // "date" for newest first, "relevance" for relevance
     });
 
     const idsResp = await retryWithBackoff(async () => {

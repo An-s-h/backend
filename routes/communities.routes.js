@@ -72,8 +72,8 @@ function normalizeConditions(input) {
 // Get all communities with member counts and thread counts
 router.get("/communities", async (req, res) => {
   try {
-    const { userId, search } = req.query;
-    const cacheKey = `communities:all:${search || ""}`;
+    const { userId, search, type } = req.query;
+    const cacheKey = `communities:all:${search || ""}:${type || ""}`;
     
     let cached = getCache(cacheKey);
     if (cached && !userId) {
@@ -81,14 +81,20 @@ router.get("/communities", async (req, res) => {
     }
 
     let query = {};
+    if (type === "patient") {
+      query.$or = [{ communityType: "patient" }, { communityType: { $exists: false } }];
+    } else if (type === "researcher") {
+      query.communityType = "researcher";
+    }
     if (search) {
-      query = {
+      const searchClause = {
         $or: [
           { name: { $regex: search, $options: "i" } },
           { description: { $regex: search, $options: "i" } },
           { tags: { $elemMatch: { $regex: search, $options: "i" } } },
         ],
       };
+      query = Object.keys(query).length > 0 ? { $and: [query, searchClause] } : searchClause;
     }
 
     const communities = await Community.find(query).sort({ name: 1 }).lean();
@@ -897,7 +903,7 @@ router.post("/communities/:communityId/threads", async (req, res) => {
 // Create a new community (admin or researcher)
 router.post("/communities", async (req, res) => {
   try {
-    const { name, description, icon, color, tags, createdBy, isOfficial } = req.body;
+    const { name, description, icon, color, tags, createdBy, isOfficial, communityType, createdByResearcher } = req.body;
 
     if (!name) {
       return res.status(400).json({ error: "name is required" });
@@ -924,6 +930,8 @@ router.post("/communities", async (req, res) => {
       tags: tags || [],
       createdBy,
       isOfficial: isOfficial || false,
+      communityType: communityType || "patient",
+      createdByResearcher: !!createdByResearcher,
     });
 
     // Auto-join creator
@@ -1106,6 +1114,17 @@ router.post("/communities/:communityId/subcategories/seed", async (req, res) => 
         { name: "Phase I–III trials", tags: [] },
         { name: "Real-world evidence studies", tags: [] },
       ],
+      "basic-preclinical-research": [
+        { name: "Molecular biology", tags: [] },
+        { name: "Animal models", tags: [] },
+        { name: "Gene editing (CRISPR)", tags: [] },
+        { name: "Cell signaling", tags: [] },
+      ],
+      "translational-research": [
+        { name: "Biomarker discovery", tags: [] },
+        { name: "Drug screening", tags: [] },
+        { name: "Lab findings to human relevance", tags: [] },
+      ],
     };
 
     const communitySubcategories = defaultSubcategories[community.slug] || [];
@@ -1280,6 +1299,29 @@ router.post("/communities/seed", async (req, res) => {
         color: "#E91E63",
         tags: ["cancer research", "oncology research", "clinical trials", "breakthroughs"],
         isOfficial: true,
+      },
+      // Researcher communities
+      {
+        name: "Basic & Pre-clinical Research",
+        slug: "basic-preclinical-research",
+        description: "Molecular biology, animal models, gene editing (CRISPR), and cell signaling",
+        icon: "🔬",
+        color: "#673AB7",
+        tags: ["molecular biology", "animal models", "CRISPR", "gene editing", "cell signaling", "pre-clinical"],
+        isOfficial: true,
+        communityType: "researcher",
+        createdByResearcher: false,
+      },
+      {
+        name: "Translational Research",
+        slug: "translational-research",
+        description: "Biomarker discovery, drug screening, and moving lab findings into human relevance",
+        icon: "🧪",
+        color: "#009688",
+        tags: ["biomarker discovery", "drug screening", "translational research", "lab to clinic"],
+        isOfficial: true,
+        communityType: "researcher",
+        createdByResearcher: false,
       },
     ];
 

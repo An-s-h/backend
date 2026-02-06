@@ -321,6 +321,7 @@ export async function searchClinicalTrials({
   userLocation, // Layer 2: User's location for radius calculation
   biomarkers = [], // Layer 3: User's biomarkers (e.g., ["IDH1", "BRCA"])
   keyword, // Layer 3: Additional keyword for biomarker matching
+  sortByDate = false, // When true, sort by lastUpdatePostDate (newest first)
 } = {}) {
   // Layer 1: Translation Layer - Expand query with synonyms
   // Only expand if user query is short/simple (1-3 words) to avoid over-expanding complex queries
@@ -383,7 +384,7 @@ export async function searchClinicalTrials({
     eligibilityAgeMax || ""
   }:${radiusMiles || ""}:${
     biomarkers && biomarkers.length > 0 ? biomarkers.join(",") : ""
-  }`;
+  }:${sortByDate}`;
   const cached = getCache(cacheKey);
   if (cached) {
     // Apply all filters
@@ -559,9 +560,11 @@ export async function searchClinicalTrials({
         });
 
         const nctId = identificationModule.nctId || s.nctId || "";
+        const lastUpdatePostDate = statusModule.lastUpdatePostDate || null;
         return {
           id: nctId,
           _id: nctId,
+          lastUpdatePostDate,
           title:
             identificationModule.officialTitle ||
             identificationModule.briefTitle ||
@@ -765,9 +768,15 @@ export async function searchClinicalTrials({
     const afterFilter = filteredItems.length;
 
     // Layer 5: Rank by query relevance FIRST, then other factors
-    // Sort priority: Query relevance > biomarker match > PI expertise > phase weight > status
+    // When sortByDate: prioritize lastUpdatePostDate (newest first)
     const beforeSort = filteredItems.length;
     filteredItems.sort((a, b) => {
+      if (sortByDate) {
+        const aDate = a.lastUpdatePostDate ? new Date(a.lastUpdatePostDate).getTime() : 0;
+        const bDate = b.lastUpdatePostDate ? new Date(b.lastUpdatePostDate).getTime() : 0;
+        if (bDate !== aDate) return bDate - aDate; // Newest first
+      }
+
       // First: Query relevance (PRIMARY - most important)
       const aQuery = a.queryRelevanceScore || 0;
       const bQuery = b.queryRelevanceScore || 0;

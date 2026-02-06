@@ -12,6 +12,8 @@ const communitySchema = new mongoose.Schema(
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     isOfficial: { type: Boolean, default: false }, // Official CuraLink communities
     isPrivate: { type: Boolean, default: false },
+    communityType: { type: String, enum: ["patient", "researcher"], default: "patient" },
+    createdByResearcher: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

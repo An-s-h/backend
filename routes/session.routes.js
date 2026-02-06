@@ -15,6 +15,15 @@ function generateToken(userId, isAdmin = false) {
   return jwt.sign({ userId, isAdmin: !!isAdmin }, JWT_SECRET, { expiresIn: "7d" });
 }
 
+// Check if user has admin access (DB flag or ADMIN_EMAILS env)
+function isUserAdmin(user) {
+  const adminEmails = process.env.ADMIN_EMAILS
+    ? process.env.ADMIN_EMAILS.split(",").map((e) => e.trim().toLowerCase()).filter(Boolean)
+    : [];
+  const userEmail = (user?.email || "").toLowerCase();
+  return !!user?.isAdmin || (adminEmails.length > 0 && userEmail && adminEmails.includes(userEmail));
+}
+
 // POST /api/auth/register - Register new user
 router.post("/auth/register", async (req, res) => {
   const { username, email, password, role, medicalInterests } = req.body || {};
@@ -54,8 +63,8 @@ router.post("/auth/register", async (req, res) => {
       medicalInterests: medicalInterests || [],
     });
 
-    // Generate JWT token
-    const token = generateToken(user._id.toString());
+    // Generate JWT token (include isAdmin if email is in ADMIN_EMAILS)
+    const token = generateToken(user._id.toString(), isUserAdmin(user));
 
     // Remove password from response
     const userResponse = user.toObject();
@@ -97,11 +106,8 @@ router.post("/auth/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid email or password" });
     }
 
-    // Admin: DB flag or optional ADMIN_EMAILS env (comma-separated)
-    const adminEmails = process.env.ADMIN_EMAILS
-      ? process.env.ADMIN_EMAILS.split(",").map((e) => e.trim()).filter(Boolean)
-      : [];
-    const isAdmin = !!user.isAdmin || (adminEmails.length > 0 && adminEmails.includes(user.email));
+    // Admin: DB flag or ADMIN_EMAILS env (comma-separated)
+    const isAdmin = isUserAdmin(user);
 
     // Generate JWT token with isAdmin claim for admin routes
     const token = generateToken(user._id.toString(), isAdmin);
@@ -609,8 +615,9 @@ router.post("/auth/oauth-sync", async (req, res) => {
       await user.save();
     }
 
-    // Generate JWT token
-    const token = generateToken(user._id.toString());
+    // Generate JWT token (include isAdmin for OAuth users who are admins)
+    const isAdmin = isUserAdmin(user);
+    const token = generateToken(user._id.toString(), isAdmin);
 
     // Remove sensitive fields from response
     const userResponse = user.toObject();
@@ -620,6 +627,7 @@ router.post("/auth/oauth-sync", async (req, res) => {
       user: userResponse,
       token,
       isNewUser,
+      isAdmin,
     });
   } catch (error) {
     console.error("OAuth sync error:", error);
@@ -715,8 +723,8 @@ router.post("/auth/complete-oauth-profile", async (req, res) => {
       { upsert: true, new: true }
     );
 
-    // Generate JWT token for the user
-    const token = generateToken(user._id.toString());
+    // Generate JWT token for the user (include isAdmin for admin users)
+    const token = generateToken(user._id.toString(), isUserAdmin(user));
 
     // Remove sensitive fields from response
     const userResponse = user.toObject();

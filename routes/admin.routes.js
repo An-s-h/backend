@@ -19,20 +19,21 @@ import { uploadSingle } from "../middleware/upload.js";
 import { uploadImage } from "../services/upload.service.js";
 
 const router = Router();
-const JWT_SECRET =
-  process.env.JWT_SECRET || "your-secret-key-change-in-production";
 
-// Middleware: verify JWT and require isAdmin claim (admin signs in via main /api/auth/login)
+// Middleware: verify JWT and require isAdmin claim (admin signs in via main /api/auth/login or OAuth)
 const verifyAdmin = (req, res, next) => {
   const token =
-    req.headers.authorization?.replace("Bearer ", "") || req.query.token;
+    req.headers.authorization?.replace("Bearer ", "") ||
+    req.headers["x-auth-token"] ||
+    req.query.token;
 
   if (!token) {
     return res.status(401).json({ error: "Unauthorized. Admin access required." });
   }
 
+  const secret = process.env.JWT_SECRET || "your-secret-key-change-in-production";
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, secret);
     if (decoded.isAdmin !== true) {
       return res.status(401).json({ error: "Unauthorized. Admin access required." });
     }
@@ -707,10 +708,12 @@ router.post("/admin/upload", verifyAdmin, uploadSingle, async (req, res) => {
 // COMMUNITY MANAGEMENT (admin)
 // ============================================
 
-// List communities
+// List communities (optional ?type=patient|researcher)
 router.get("/admin/communities", verifyAdmin, async (req, res) => {
   try {
-    const communities = await Community.find({}).sort({ name: 1 }).lean();
+    const { type } = req.query;
+    const query = type === "researcher" ? { communityType: "researcher" } : type === "patient" ? { $or: [{ communityType: "patient" }, { communityType: { $exists: false } }] } : {};
+    const communities = await Community.find(query).sort({ name: 1 }).lean();
     const communityIds = communities.map((c) => c._id);
     const [memberCounts, threadCounts] = await Promise.all([
       CommunityMembership.aggregate([
@@ -738,10 +741,10 @@ router.get("/admin/communities", verifyAdmin, async (req, res) => {
   }
 });
 
-// Create community (admin)
+// Create community (admin) — supports communityType: "patient" | "researcher"
 router.post("/admin/communities", verifyAdmin, async (req, res) => {
   try {
-    const { name, description, coverImage, thumbnailUrl, tags, isOfficial } = req.body;
+    const { name, description, coverImage, thumbnailUrl, tags, isOfficial, communityType } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ error: "name is required" });
     }
@@ -753,6 +756,7 @@ router.post("/admin/communities", verifyAdmin, async (req, res) => {
     if (existing) {
       return res.status(400).json({ error: "A community with this name already exists" });
     }
+    const type = communityType === "researcher" ? "researcher" : "patient";
     const community = await Community.create({
       name: name.trim(),
       slug,
@@ -760,6 +764,8 @@ router.post("/admin/communities", verifyAdmin, async (req, res) => {
       coverImage: coverImage || thumbnailUrl || "",
       tags: Array.isArray(tags) ? tags : [],
       isOfficial: !!isOfficial,
+      communityType: type,
+      createdByResearcher: false, // Admin-created, not researcher-proposed
     });
     res.status(201).json({ ok: true, community });
   } catch (error) {
@@ -837,6 +843,7 @@ router.post("/admin/community-proposals/:id/approve", verifyAdmin, async (req, r
       });
     }
 
+    const isResearcherProposal = proposal.proposedByRole === "researcher";
     const community = await Community.create({
       name,
       slug,
@@ -844,6 +851,8 @@ router.post("/admin/community-proposals/:id/approve", verifyAdmin, async (req, r
       coverImage: thumbnailUrl || proposal.thumbnailUrl || "",
       createdBy: proposal.proposedBy,
       isOfficial: false,
+      communityType: isResearcherProposal ? "researcher" : "patient",
+      createdByResearcher: isResearcherProposal,
     });
 
     await CommunityMembership.create({

@@ -94,6 +94,34 @@ function detectTrialSectionFocus(query) {
   return ["overview"];
 }
 
+/**
+ * Detect "general knowledge" / "web overview" questions - e.g. trends, research patterns.
+ * EXCLUDES "recent publications" and "recent trials" - those fetch from our APIs instead.
+ */
+function detectGeneralKnowledgeIntent(query) {
+  const q = query.toLowerCase().trim();
+  if (q.length < 10) return false;
+  // Exclude explicit publications/trials searches - those use our API
+  if (/\b(recent|latest)\s+(publications?|trials?)\s+(on|for|about)\b/.test(q)) return false;
+  if (/\bshow\s+me\s+(recent|latest)\s+(publications?|trials?)\b/.test(q)) return false;
+  const patterns = [
+    /\b(recent|latest|newest|current)\s+(research|studies?|findings?|developments?)\b/,
+    /\b(recent|latest|trends?)\s+(in|on)\s+(?!publications?|trials?)/,
+    /\b(overview|summary)\s+of\s+.+\s+research\b/,
+    /\b(what('s| is)\s+new|what('s| are)\s+the\s+trends)\s+(in|on)\b/,
+    /\b(trends?|developments?)\s+(in|in the)\s+(latest|current)\b/,
+    /\bresearch\s+patterns?\b/,
+    /\b(trends?|latest)\s+in\s+(parkinson|diabetes|alzheimer|cancer|heart)\b/i,
+  ];
+  return patterns.some((p) => p.test(q));
+}
+
+/** Detect if query asks for "recent" or "latest" - use date sort when fetching from APIs */
+function wantsRecentSort(query) {
+  const q = query.toLowerCase().trim();
+  return /\b(recent|latest|newest|current)\b/.test(q);
+}
+
 /** Show full publication card only for "display/show" requests. Summarize, findings, conclusions, methods, takeaways get AI analysis. */
 function detectPublicationSummaryFocus(query) {
   const q = query.toLowerCase().trim();
@@ -198,13 +226,17 @@ function extractSearchQuery(query, intent) {
 
 /**
  * Fetch publications from backend
+ * @param {string} query - Search query
+ * @param {number} limit - Max items to return
+ * @param {boolean} sortByDate - When true, sort by date (newest first)
  */
-async function fetchPublications(query, limit = 4) {
+async function fetchPublications(query, limit = 4, sortByDate = false) {
   try {
     const result = await searchPubMed({
       q: query,
       page: 1,
       pageSize: limit,
+      sort: sortByDate ? "date" : "relevance",
     });
     
     const publications = (result.items || []).slice(0, limit);
@@ -226,13 +258,17 @@ async function fetchPublications(query, limit = 4) {
 
 /**
  * Fetch clinical trials from backend
+ * @param {string} query - Search query
+ * @param {number} limit - Max items to return
+ * @param {boolean} sortByDate - When true, sort by lastUpdatePostDate (newest first)
  */
-async function fetchTrials(query, limit = 4) {
+async function fetchTrials(query, limit = 4, sortByDate = false) {
   try {
     const result = await searchClinicalTrials({
       q: query,
       page: 1,
       pageSize: limit,
+      sortByDate,
     });
     
     const trials = (result.items || []).slice(0, limit);
@@ -504,22 +540,68 @@ export async function generateChatResponse(messages, res, req = null) {
     }
   }
   
+  // Check for "general knowledge" / "web overview" questions - use Gemini with Google Search grounding
+  const useGroundedOverview = detectGeneralKnowledgeIntent(userQuery) && !itemContext && (apiKey || apiKey2);
+
   // Check if user is asking for publications, trials, or experts
   const searchIntent = detectSearchIntent(userQuery);
   
   let searchResults = null;
   let searchQuery = null;
   
+  // If general knowledge intent: use Gemini with Google Search grounding (paragraph + sources)
+  if (useGroundedOverview) {
+    try {
+      const { GoogleGenAI } = await import("@google/genai");
+      const key = apiKey || apiKey2;
+      const ai = new GoogleGenAI({ apiKey: key });
+      const groundingTool = { googleSearch: {} };
+      const config = { tools: [groundingTool] };
+
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+
+      const prompt = `${userQuery}\n\nProvide a clear paragraph overview using recent web sources. Focus on summarizing key information (e.g. recent research, publications, trials, or trends). Use accessible language. End with a brief note that sources are listed below.`;
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: prompt,
+        config,
+      });
+
+      const text = response?.text || "";
+      const groundingMetadata = response?.candidates?.[0]?.groundingMetadata;
+      const chunks = groundingMetadata?.groundingChunks || [];
+      const sources = chunks
+        .filter((c) => c?.web?.uri)
+        .map((c, i) => ({ index: i + 1, url: c.web.uri, title: c.web.title || `Source ${i + 1}` }));
+
+      if (text) {
+        res.write(`data: ${JSON.stringify({ text })}\n\n`);
+      }
+      if (sources.length > 0) {
+        res.write(`data: ${JSON.stringify({ groundingSources: sources })}\n\n`);
+      }
+      res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+      res.end();
+      return;
+    } catch (groundErr) {
+      console.warn("[Chatbot] Grounded overview failed, falling back to standard flow:", groundErr.message);
+      // Fall through to standard flow
+    }
+  }
+
   // If search intent detected and no item context, fetch real data
   if (searchIntent && !itemContext) {
     searchQuery = extractSearchQuery(userQuery, searchIntent);
-    console.log(`[Chatbot] Detected ${searchIntent} intent for query: "${searchQuery}"`);
+    const sortByDate = wantsRecentSort(userQuery);
+    console.log(`[Chatbot] Detected ${searchIntent} intent for query: "${searchQuery}"${sortByDate ? " (recent/latest sort)" : ""}`);
     
     try {
       if (searchIntent === "publications") {
-        searchResults = await fetchPublications(searchQuery, 4);
+        searchResults = await fetchPublications(searchQuery, 4, sortByDate);
       } else if (searchIntent === "trials") {
-        searchResults = await fetchTrials(searchQuery, 4);
+        searchResults = await fetchTrials(searchQuery, 4, sortByDate);
       } else if (searchIntent === "experts") {
         searchResults = await fetchExperts(searchQuery, 4);
       }
@@ -553,11 +635,43 @@ export async function generateChatResponse(messages, res, req = null) {
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
 
-    // If we have search results, send them as structured data and skip AI generation
-    if (searchResults && Array.isArray(searchResults) && searchResults.length > 0 && !itemContext) {
-      console.log(`[Chatbot] Sending ${searchResults.length} structured ${searchIntent} results`);
+    // If we have search results (publications or trials), generate AI paragraph summary first, then send cards
+    if (searchResults && Array.isArray(searchResults) && searchResults.length > 0 && !itemContext && (searchIntent === "publications" || searchIntent === "trials")) {
+      console.log(`[Chatbot] Generating AI summary for ${searchResults.length} ${searchIntent} results, then sending cards`);
       
-      // Send structured search results FIRST
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      
+      // Build context for AI to summarize the fetched results
+      const resultsContext = searchResults.map((item, i) => {
+        if (searchIntent === "publications") {
+          return `[${i + 1}] "${item.title}" - ${item.authors} (${item.journal}, ${item.year}). ${item.abstract || ""}`;
+        } else {
+          return `[${i + 1}] "${item.title}" - ${item.status}, ${item.phase}. Conditions: ${item.conditions}. ${item.summary || ""}`;
+        }
+      }).join("\n\n");
+      
+      const summaryPrompt = `The user asked for ${searchIntent} related to "${searchQuery}". I found these ${searchResults.length} results. Provide a clear paragraph (3-5 sentences) that summarizes the key findings/overview of these ${searchIntent}. Focus on common themes, notable findings, or what users should know. Use accessible language. Do not list them individually - synthesize into a coherent overview.\n\nResults:\n${resultsContext}`;
+      
+      try {
+        const summaryModel = geminiInstance.getGenerativeModel({
+          model: CHATBOT_MODELS[0],
+          systemInstruction: "You are iora, a health research assistant. Summarize search results concisely in a paragraph. Be accurate and accessible.",
+        });
+        const summaryResult = await summaryModel.generateContent(summaryPrompt);
+        const summaryText = summaryResult?.response?.text?.() ?? "";
+        
+        if (summaryText) {
+          res.write(`data: ${JSON.stringify({ text: summaryText })}\n\n`);
+        }
+      } catch (summaryErr) {
+        console.warn("[Chatbot] AI summary failed, sending intro only:", summaryErr.message);
+        const introMessage = `I found ${searchResults.length} ${searchIntent} related to "${searchQuery}". Here they are:`;
+        res.write(`data: ${JSON.stringify({ text: introMessage })}\n\n`);
+      }
+      
+      // Send structured search results (cards)
       res.write(`data: ${JSON.stringify({ 
         searchResults: {
           type: searchIntent,
@@ -566,11 +680,17 @@ export async function generateChatResponse(messages, res, req = null) {
         }
       })}\n\n`);
       
-      // Send a brief intro message (no AI generation needed)
+      res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+      res.end();
+      return;
+    } else if (searchResults && Array.isArray(searchResults) && searchResults.length > 0 && !itemContext) {
+      // Experts or other intents - send cards with brief intro (no AI summary)
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
       const introMessage = `I found ${searchResults.length} ${searchIntent} related to "${searchQuery}". Here they are:`;
       res.write(`data: ${JSON.stringify({ text: introMessage })}\n\n`);
-      
-      // Send completion signal immediately
+      res.write(`data: ${JSON.stringify({ searchResults: { type: searchIntent, query: searchQuery, items: searchResults } })}\n\n`);
       res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
       res.end();
       return;
@@ -780,19 +900,18 @@ export function generateSuggestedPrompts(userRole = "patient", condition = null)
       `Show me recent trials for ${c}`,
       `Find experts in ${c}`,
       `What are the latest research findings on ${c}?`,
+      `Trends in the latest ${c} research`,
     ];
     return personalized;
   }
 
   const patientPrompts = [
     "Find clinical trials for my condition",
-    "Show me recent publications on health topics",
     "Find experts in my area of interest",
     "Help me understand this medical term",
   ];
 
   const researcherPrompts = [
-    "Find recent publications on immunotherapy",
     "Show me ongoing trials in neuroscience",
     "Find collaborators in my research area",
     "Explain this research methodology",
