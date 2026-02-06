@@ -159,9 +159,9 @@ router.get("/forums/threads", async (req, res) => {
 
 // Get researcher forum threads (for Researcher Forums page)
 router.get("/researcher-forums/threads", async (req, res) => {
-  const { communityId, subcategoryId } = req.query;
+  const { communityId, subcategoryId, skipCache } = req.query;
   const cacheKey = `researcher-forums:threads:${communityId || "all"}:${subcategoryId || "all"}`;
-  const cached = getCache(cacheKey);
+  const cached = skipCache !== "true" ? getCache(cacheKey) : null;
   if (cached) {
     return res.json({ threads: cached });
   }
@@ -201,7 +201,9 @@ router.get("/researcher-forums/threads", async (req, res) => {
     voteScore: (thread.upvotes?.length || 0) - (thread.downvotes?.length || 0),
   }));
 
-  setCache(cacheKey, threadsWithCounts, CACHE_TTL.threads);
+  if (skipCache !== "true") {
+    setCache(cacheKey, threadsWithCounts, CACHE_TTL.threads);
+  }
   res.json({ threads: threadsWithCounts });
 });
 

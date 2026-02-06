@@ -3,7 +3,7 @@ import { Profile } from "../models/Profile.js";
 import { User } from "../models/User.js";
 import { searchClinicalTrials } from "../services/clinicalTrials.service.js";
 import { searchPubMed } from "../services/pubmed.service.js";
-import { findResearchersWithGemini } from "../services/geminiExperts.service.js";
+import { findDeterministicExperts } from "../services/deterministicExperts.service.js";
 import {
   calculateTrialMatch,
   calculatePublicationMatch,
@@ -173,15 +173,6 @@ router.get("/recommendations/:userId", async (req, res) => {
       }
     }
 
-    // Build search query for experts with location (can include city)
-    // For multiple interests, use the combined query
-    let globalExpertsQuery = combinedQuery;
-    if (locationStringForExperts) {
-      globalExpertsQuery = `${combinedQuery} in ${locationStringForExperts}`;
-    } else {
-      globalExpertsQuery = `${combinedQuery} global`;
-    }
-
     // Build PubMed query without location (e.g., "Neurology OR Alzheimer's Disease")
     let pubmedQuery = combinedQuery;
 
@@ -236,11 +227,16 @@ router.get("/recommendations/:userId", async (req, res) => {
             hasMore: false,
           };
         }),
-        // Fetch global experts using the same service as Experts.jsx
-        findResearchersWithGemini(globalExpertsQuery).catch((error) => {
+        // Fetch global experts using deterministic approach (same as Experts.jsx)
+        findDeterministicExperts(
+          primaryTopic, // Use primary topic (first interest)
+          locationStringForExperts || null, // Pass location separately (not in query string)
+          1, // page 1
+          6 // Fetch 6 experts for recommendations
+        ).catch((error) => {
           console.error("Error fetching global experts:", error);
           // Return empty array on error, don't fail the entire request
-          return [];
+          return { experts: [], totalFound: 0, page: 1, pageSize: 6, hasMore: false };
         }),
       ]
     );
@@ -251,6 +247,8 @@ router.get("/recommendations/:userId", async (req, res) => {
     const publications = (publicationsResult?.items || []).filter(
       (pub) => pub.abstract && pub.abstract.trim().length > 0
     );
+    // Extract experts array from deterministic result (returns { experts, totalFound, ... })
+    const globalExpertsList = globalExperts?.experts || [];
 
     // Fetch local researchers (CuraLink Experts) instead of mocked experts
 
@@ -355,7 +353,7 @@ router.get("/recommendations/:userId", async (req, res) => {
       };
     });
 
-    const globalExpertsWithMatch = (globalExperts || []).map((expert) => {
+    const globalExpertsWithMatch = (globalExpertsList || []).map((expert) => {
       const match = calculateExpertMatch(expert, profile);
       return {
         ...expert,

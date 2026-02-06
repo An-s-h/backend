@@ -1242,30 +1242,32 @@ router.get("/search/experts/deterministic", async (req, res) => {
       }
     }
 
-    const { q = "", location, limit = "10" } = req.query;
+    const { q = "", location, page = "1", pageSize = "5" } = req.query;
 
     if (!q || !q.trim()) {
-      return res.json({ results: [], message: "Query is required" });
+      return res.json({ results: [], totalFound: 0, page: 1, pageSize: 5, hasMore: false, message: "Query is required" });
     }
 
-    const parsedLimit = Math.max(5, Math.min(10, parseInt(limit, 10) || 10));
+    const parsedPage = Math.max(1, parseInt(page, 10) || 1);
+    const parsedPageSize = Math.max(1, Math.min(10, parseInt(pageSize, 10) || 5));
 
     console.log(
-      `🔍 Deterministic expert search: topic="${q}", location="${location || "global"}", limit=${parsedLimit}`
+      `🔍 Deterministic expert search: topic="${q}", location="${location || "global"}", page=${parsedPage}, pageSize=${parsedPageSize}`
     );
 
-    // Execute deterministic expert discovery
-    const experts = await findDeterministicExperts(
+    // Execute deterministic expert discovery (with pagination)
+    const { experts, totalFound, hasMore } = await findDeterministicExperts(
       q.trim(),
       location || null,
-      parsedLimit
+      parsedPage,
+      parsedPageSize
     );
 
     // Format for API response
     const formattedExperts = formatExpertsForResponse(experts);
 
-    // Increment search count for anonymous users after successful search
-    if (!req.user) {
+    // Increment search count for anonymous users only on page 1 (first search)
+    if (!req.user && parsedPage === 1) {
       await incrementSearchCount(req);
     }
 
@@ -1278,7 +1280,10 @@ router.get("/search/experts/deterministic", async (req, res) => {
 
     return res.json({
       results: formattedExperts,
-      totalFound: formattedExperts.length,
+      totalFound,
+      page: parsedPage,
+      pageSize: parsedPageSize,
+      hasMore,
       method: "deterministic",
       ...(remaining !== null && { remaining }),
     });

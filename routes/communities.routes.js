@@ -450,7 +450,12 @@ router.get("/communities/feed/:userId", async (req, res) => {
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    const threads = await Thread.find({ communityId: { $in: communityIds } })
+    // Health Forums (patient) feed: exclude researcher-only posts
+    const feedQuery = {
+      communityId: { $in: communityIds },
+      isResearcherForum: { $ne: true },
+    };
+    const threads = await Thread.find(feedQuery)
       .populate("authorUserId", "username email")
       .populate("communityId", "name slug icon color")
       .sort({ createdAt: -1 })
@@ -487,7 +492,7 @@ router.get("/communities/feed/:userId", async (req, res) => {
         thread.authorRole === "researcher",
     }));
 
-    const total = await Thread.countDocuments({ communityId: { $in: communityIds } });
+    const total = await Thread.countDocuments(feedQuery);
 
     res.json({
       threads: threadsWithData,
@@ -528,8 +533,8 @@ router.get("/communities/recommended/:userId", async (req, res) => {
     }
 
     if (interests.length === 0) {
-      // Return popular threads if no interests
-      const threads = await Thread.find({})
+      // Return popular threads if no interests (exclude researcher-only for Health Forums)
+      const threads = await Thread.find({ isResearcherForum: { $ne: true } })
         .populate("authorUserId", "username email")
         .populate("communityId", "name slug icon color")
         .sort({ viewCount: -1 })
@@ -573,8 +578,9 @@ router.get("/communities/recommended/:userId", async (req, res) => {
 
     const communityIds = matchingCommunities.map((c) => c._id);
 
-    // Get threads from matching communities or with matching keywords
+    // Get threads from matching communities or with matching keywords (exclude researcher-only)
     const threads = await Thread.find({
+      isResearcherForum: { $ne: true },
       $or: [
         { communityId: { $in: communityIds } },
         { title: { $regex: interests.join("|"), $options: "i" } },
@@ -627,8 +633,11 @@ router.get("/communities/involving/:userId", async (req, res) => {
     const { userId } = req.params;
     const { limit = 20 } = req.query;
 
-    // Get threads created by user
-    const userThreads = await Thread.find({ authorUserId: userId })
+    // Get threads created by user (Health Forums: exclude researcher-only posts)
+    const userThreads = await Thread.find({
+      authorUserId: userId,
+      isResearcherForum: { $ne: true },
+    })
       .populate("authorUserId", "username email")
       .populate("communityId", "name slug icon color")
       .sort({ createdAt: -1 })
@@ -638,7 +647,8 @@ router.get("/communities/involving/:userId", async (req, res) => {
     const userReplies = await Reply.find({ authorUserId: userId }).distinct("threadId");
     const repliedThreads = await Thread.find({
       _id: { $in: userReplies },
-      authorUserId: { $ne: userId }, // Exclude threads already in userThreads
+      authorUserId: { $ne: userId },
+      isResearcherForum: { $ne: true },
     })
       .populate("authorUserId", "username email")
       .populate("communityId", "name slug icon color")
