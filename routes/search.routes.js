@@ -23,6 +23,7 @@ import {
   simplifyPublicationDetails,
   simplifyPublicationTitle,
 } from "../services/publicationSimplification.service.js";
+import { batchSimplifyPublicationTitles } from "../services/summary.service.js";
 import { ReadItem } from "../models/ReadItem.js";
 import {
   calculateTrialMatch,
@@ -153,12 +154,12 @@ function calculatePublicationRelevanceSignals(pub, queryMeta) {
     yearsOld === null
       ? 0.2
       : yearsOld <= 2
-      ? 1
-      : yearsOld <= 5
-      ? 0.7
-      : yearsOld <= 10
-      ? 0.4
-      : 0.15;
+        ? 1
+        : yearsOld <= 5
+          ? 0.7
+          : yearsOld <= 10
+            ? 0.4
+            : 0.15;
 
   // Check for exact phrase match first (highest priority) - like trials backend
   const exactPhraseMatch =
@@ -178,7 +179,7 @@ function calculatePublicationRelevanceSignals(pub, queryMeta) {
       // Use word boundary regex to match whole words only
       const termRegex = new RegExp(
         `\\b${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
-        "i"
+        "i",
       );
       if (termRegex.test(searchText)) {
         matchCount++;
@@ -236,7 +237,7 @@ function calculatePublicationRelevanceSignals(pub, queryMeta) {
       const nctBoost = hasNctLink ? 0.05 : 0; // Small boost for NCT linkage
       queryRelevanceScore = Math.min(
         1.0,
-        queryRelevanceScore + recencyBoost + nctBoost
+        queryRelevanceScore + recencyBoost + nctBoost,
       );
     }
   }
@@ -282,6 +283,8 @@ router.get("/search/trials", async (req, res) => {
       eligibilityAgeMax,
       page = "1",
       pageSize = "9",
+      recentMonths,
+      sortByDate,
     } = req.query;
 
     // Layer 3: Extract biomarkers from conditions/keywords if provided
@@ -348,6 +351,8 @@ router.get("/search/trials", async (req, res) => {
       biomarkers, // Layer 3: Pass extracted biomarkers
       page: 1, // Always fetch from page 1 for the batch
       pageSize: batchSize, // Fetch larger batch for sorting
+      recentMonths: recentMonths ? parseInt(recentMonths, 10) : undefined,
+      sortByDate: sortByDate === "true" || sortByDate === true,
     });
     const allResults = result.items || [];
 
@@ -395,7 +400,7 @@ router.get("/search/trials", async (req, res) => {
 
     // Sort by match percentage (descending - highest first) before pagination
     const sortedResults = resultsWithMatch.sort(
-      (a, b) => (b.matchPercentage || -1) - (a.matchPercentage || -1)
+      (a, b) => (b.matchPercentage || -1) - (a.matchPercentage || -1),
     );
 
     // Paginate FIRST, then simplify only the titles that will be shown to the user
@@ -500,6 +505,8 @@ router.get("/search/publications", async (req, res) => {
       maxdate,
       page = "1",
       pageSize = "9",
+      recentMonths,
+      sortByDate,
     } = req.query;
 
     // Log incoming search parameters for debugging
@@ -522,6 +529,17 @@ router.get("/search/publications", async (req, res) => {
       pubmedQuery = `${pubmedQuery} ${location}`.trim();
     }
 
+    // Calculate mindate from recentMonths if provided (overrides explicit mindate)
+    let effectiveMindate = mindate || "";
+    if (recentMonths && Number.isInteger(parseInt(recentMonths, 10))) {
+      const months = parseInt(recentMonths, 10);
+      const cutoff = new Date();
+      cutoff.setMonth(cutoff.getMonth() - months);
+      const year = cutoff.getFullYear();
+      const month = String(cutoff.getMonth() + 1).padStart(2, "0");
+      effectiveMindate = `${year}/${month}`;
+    }
+
     // Fetch a larger batch to sort by match percentage before pagination
     // This ensures results are sorted across all pages, not just within each page
     const requestedPage = parseInt(page, 10);
@@ -531,22 +549,23 @@ router.get("/search/publications", async (req, res) => {
 
     const pubmedResult = await searchPubMed({
       q: pubmedQuery,
-      mindate: mindate || "",
+      mindate: effectiveMindate,
       maxdate: maxdate || "",
       page: 1, // Always fetch from page 1 for the batch
       pageSize: batchSize, // Fetch larger batch for sorting
+      sort: sortByDate === "true" || sortByDate === true ? "date" : "relevance",
     });
 
     console.log(
       "PubMed result count:",
       pubmedResult.totalCount,
       "items fetched:",
-      pubmedResult.items?.length
+      pubmedResult.items?.length,
     );
 
     // Filter out publications without abstracts
     const allResults = (pubmedResult.items || []).filter(
-      (pub) => pub.abstract && pub.abstract.trim().length > 0
+      (pub) => pub.abstract && pub.abstract.trim().length > 0,
     );
 
     // Build user profile for matching
@@ -621,7 +640,7 @@ router.get("/search/publications", async (req, res) => {
       scoredResults = resultsWithMatch.map((publication) => {
         const signals = calculatePublicationRelevanceSignals(
           publication,
-          atmQueryMeta
+          atmQueryMeta,
         );
         return { ...publication, ...signals };
       });
@@ -672,42 +691,39 @@ router.get("/search/publications", async (req, res) => {
       return (bRecency || 0) - (aRecency || 0);
     });
 
-    // Simplify titles for all publications in parallel (only for the batch we fetched)
-    // This adds simplified titles to each publication object
-    const resultsWithSimplifiedTitles = await Promise.all(
-      sortedResults.map(async (publication) => {
-        try {
-          const simplifiedTitle = await simplifyPublicationTitle(publication);
-          return {
-            ...publication,
-            simplifiedTitle: simplifiedTitle,
-          };
-        } catch (error) {
-          // If title simplification fails, just use original title
-          console.error(
-            `Error simplifying title for publication ${publication.pmid}:`,
-            error
-          );
-          return {
-            ...publication,
-            simplifiedTitle: publication.title, // Fallback to original title
-          };
-        }
-      })
-    );
-
-    // Paginate the sorted results
+    // Paginate FIRST, then simplify only the titles that will be shown to the user
+    // This is much faster than simplifying all publications in the batch
     const startIndex = (requestedPage - 1) * requestedPageSize;
     const endIndex = startIndex + requestedPageSize;
-    const paginatedResults = resultsWithSimplifiedTitles.slice(
-      startIndex,
-      endIndex
-    );
+    const paginatedResults = sortedResults.slice(startIndex, endIndex);
+
+    // Simplify titles only for the paginated results (much faster!)
+    // This adds simplified titles to each publication object
+    let resultsWithSimplifiedTitles;
+    try {
+      // Use batch processing for much better performance - only for paginated results
+      const titlesToSimplify = paginatedResults.map((pub) => pub.title);
+      const simplifiedTitles =
+        await batchSimplifyPublicationTitles(titlesToSimplify);
+      resultsWithSimplifiedTitles = paginatedResults.map(
+        (publication, index) => ({
+          ...publication,
+          simplifiedTitle: simplifiedTitles[index] || publication.title,
+        }),
+      );
+    } catch (error) {
+      // If batch simplification fails, fallback to original titles
+      console.error("Error batch simplifying publication titles:", error);
+      resultsWithSimplifiedTitles = paginatedResults.map((publication) => ({
+        ...publication,
+        simplifiedTitle: publication.title,
+      }));
+    }
 
     // Add read status for signed-in users (only for paginated results to reduce DB queries)
-    let resultsWithReadStatus = paginatedResults;
+    let resultsWithReadStatus = resultsWithSimplifiedTitles;
     if (req.user && req.user._id) {
-      const publicationIds = paginatedResults
+      const publicationIds = resultsWithSimplifiedTitles
         .map((p) => p.pmid || p.id || p._id)
         .filter(Boolean);
       if (publicationIds.length > 0) {
@@ -718,12 +734,14 @@ router.get("/search/publications", async (req, res) => {
         }).select("itemId");
 
         const readItemIds = new Set(readItems.map((r) => r.itemId));
-        resultsWithReadStatus = paginatedResults.map((publication) => ({
-          ...publication,
-          isRead: readItemIds.has(
-            String(publication.pmid || publication.id || publication._id)
-          ),
-        }));
+        resultsWithReadStatus = resultsWithSimplifiedTitles.map(
+          (publication) => ({
+            ...publication,
+            isRead: readItemIds.has(
+              String(publication.pmid || publication.id || publication._id),
+            ),
+          }),
+        );
       }
     }
 
@@ -741,14 +759,11 @@ router.get("/search/publications", async (req, res) => {
 
     // Calculate if there are more results
     // Note: We're only showing results from the batch we fetched, so hasMore is based on batch size
-    const hasMore = endIndex < resultsWithSimplifiedTitles.length;
+    const hasMore = endIndex < sortedResults.length;
 
     res.json({
       results: resultsWithReadStatus,
-      totalCount: Math.min(
-        pubmedResult.totalCount || 0,
-        resultsWithSimplifiedTitles.length
-      ), // Use batch size as total count for pagination purposes
+      totalCount: Math.min(pubmedResult.totalCount || 0, sortedResults.length), // Use batch size as total count for pagination purposes
       page: requestedPage,
       pageSize: requestedPageSize,
       hasMore: hasMore,
@@ -1020,7 +1035,7 @@ router.get("/search/experts/platform", async (req, res) => {
                   (edu) =>
                     `${edu.degree || ""} ${edu.field || ""} ${
                       edu.institution || ""
-                    } ${edu.year || ""}`
+                    } ${edu.year || ""}`,
                 )
                 .filter(Boolean)
                 .join(", ")
@@ -1245,14 +1260,26 @@ router.get("/search/experts/deterministic", async (req, res) => {
     const { q = "", location, page = "1", pageSize = "5" } = req.query;
 
     if (!q || !q.trim()) {
-      return res.json({ results: [], totalFound: 0, page: 1, pageSize: 5, hasMore: false, message: "Query is required" });
+      return res.json({
+        results: [],
+        totalFound: 0,
+        page: 1,
+        pageSize: 5,
+        hasMore: false,
+        message: "Query is required",
+      });
     }
 
     const parsedPage = Math.max(1, parseInt(page, 10) || 1);
-    const parsedPageSize = Math.max(1, Math.min(10, parseInt(pageSize, 10) || 5));
+    const parsedPageSize = Math.max(
+      1,
+      Math.min(10, parseInt(pageSize, 10) || 5),
+    );
 
     console.log(
-      `🔍 Deterministic expert search: topic="${q}", location="${location || "global"}", page=${parsedPage}, pageSize=${parsedPageSize}`
+      `🔍 Deterministic expert search: topic="${q}", location="${
+        location || "global"
+      }", page=${parsedPage}, pageSize=${parsedPageSize}`,
     );
 
     // Execute deterministic expert discovery (with pagination)
@@ -1260,7 +1287,7 @@ router.get("/search/experts/deterministic", async (req, res) => {
       q.trim(),
       location || null,
       parsedPage,
-      parsedPageSize
+      parsedPageSize,
     );
 
     // Format for API response
@@ -1293,7 +1320,8 @@ router.get("/search/experts/deterministic", async (req, res) => {
       error:
         "Failed to search experts using deterministic method. Please try again later.",
       results: [],
-      details: process.env.NODE_ENV === "development" ? error.message : undefined,
+      details:
+        process.env.NODE_ENV === "development" ? error.message : undefined,
     });
   }
 });
@@ -1314,7 +1342,7 @@ router.get("/search/expert/publications", async (req, res) => {
 
     // Filter out publications without abstracts
     const publications = (allPublications || []).filter(
-      (pub) => pub.abstract && pub.abstract.trim().length > 0
+      (pub) => pub.abstract && pub.abstract.trim().length > 0,
     );
 
     res.json({ publications });
@@ -1562,7 +1590,7 @@ router.get("/search/publication/:pmid/simplified", async (req, res) => {
 // Helper function to normalize and calculate name similarity
 function calculateNameSimilarity(searchName, authorName) {
   // Normalize: lowercase and remove accents
-  const normalize = (str) => 
+  const normalize = (str) =>
     str
       .toLowerCase()
       .normalize("NFD")
@@ -1575,8 +1603,8 @@ function calculateNameSimilarity(searchName, authorName) {
   const authorNorm = normalize(authorName);
 
   // Split into tokens
-  const searchTokens = searchNorm.split(" ").filter(t => t.length > 1);
-  const authorTokens = authorNorm.split(" ").filter(t => t.length > 1);
+  const searchTokens = searchNorm.split(" ").filter((t) => t.length > 1);
+  const authorTokens = authorNorm.split(" ").filter((t) => t.length > 1);
 
   if (searchTokens.length === 0 || authorTokens.length === 0) {
     return 0;
@@ -1613,7 +1641,7 @@ function calculateNameSimilarity(searchName, authorName) {
 router.get("/search/experts/by-name", async (req, res) => {
   try {
     const { name } = req.query;
-    
+
     if (!name || !name.trim()) {
       return res.status(400).json({ error: "Name parameter is required" });
     }
@@ -1626,9 +1654,9 @@ router.get("/search/experts/by-name", async (req, res) => {
     // 1. Search OpenAlex
     try {
       const openAlexUrl = `https://api.openalex.org/authors?search=${encodeURIComponent(
-        searchName
+        searchName,
       )}&per_page=20`;
-      
+
       const openAlexResponse = await fetch(openAlexUrl, {
         headers: {
           "User-Agent": "CuraLink/1.0 (mailto:support@curalink.com)",
@@ -1637,27 +1665,29 @@ router.get("/search/experts/by-name", async (req, res) => {
 
       if (openAlexResponse.ok) {
         const openAlexData = await openAlexResponse.json();
-        
+
         for (const author of openAlexData.results || []) {
           const orcid = author.orcid ? author.orcid.split("/").pop() : null;
           const authorName = author.display_name || "";
-          
+
           if (!authorName) continue;
-          
+
           // Calculate name similarity
           const similarity = calculateNameSimilarity(searchName, authorName);
-          
+
           // Only include results with reasonable name match (at least 50% of search tokens match)
           if (similarity < 0.5) continue;
-          
+
           // Deduplicate by ORCID or name
           const key = orcid || authorName.toLowerCase();
-          if (seenOrcids.has(key) || seenNames.has(authorName.toLowerCase())) continue;
-          
+          if (seenOrcids.has(key) || seenNames.has(authorName.toLowerCase()))
+            continue;
+
           if (orcid) seenOrcids.add(orcid);
           seenNames.add(authorName.toLowerCase());
 
-          const institution = author.last_known_institution?.display_name || null;
+          const institution =
+            author.last_known_institution?.display_name || null;
           const citationCount = author.cited_by_count || 0;
           const hIndex = author.summary_stats?.h_index || 0;
           const topics = (author.topics || [])
@@ -1686,33 +1716,35 @@ router.get("/search/experts/by-name", async (req, res) => {
     // 2. Search Semantic Scholar (fallback/verification)
     try {
       const semanticScholarUrl = `https://api.semanticscholar.org/graph/v1/author/search?query=${encodeURIComponent(
-        searchName
+        searchName,
       )}&limit=20&fields=authorId,name,affiliations,citationCount,hIndex,paperCount,externalIds`;
 
       const semanticResponse = await fetch(semanticScholarUrl);
 
       if (semanticResponse.ok) {
         const semanticData = await semanticResponse.json();
-        
+
         for (const author of semanticData.data || []) {
           const orcid = author.externalIds?.ORCID || null;
           const authorName = author.name || "";
-          
+
           if (!authorName) continue;
-          
+
           // Calculate name similarity
           const similarity = calculateNameSimilarity(searchName, authorName);
-          
+
           // Only include results with reasonable name match (at least 50% of search tokens match)
           if (similarity < 0.5) continue;
-          
+
           const key = orcid || authorName.toLowerCase();
-          if (seenOrcids.has(key) || seenNames.has(authorName.toLowerCase())) continue;
-          
+          if (seenOrcids.has(key) || seenNames.has(authorName.toLowerCase()))
+            continue;
+
           if (orcid) seenOrcids.add(orcid);
           seenNames.add(authorName.toLowerCase());
 
-          const institution = (author.affiliations || []).map((a) => a).join(", ") || null;
+          const institution =
+            (author.affiliations || []).map((a) => a).join(", ") || null;
           const citationCount = author.citationCount || 0;
           const hIndex = author.hIndex || 0;
 
@@ -1739,7 +1771,7 @@ router.get("/search/experts/by-name", async (req, res) => {
       // Sort by similarity first (higher is better)
       const simDiff = (b.similarity || 0) - (a.similarity || 0);
       if (Math.abs(simDiff) > 0.1) return simDiff;
-      
+
       // If similarity is close, sort by citation count
       return (b.citationCount || 0) - (a.citationCount || 0);
     });
@@ -1753,7 +1785,9 @@ router.get("/search/experts/by-name", async (req, res) => {
     });
   } catch (error) {
     console.error("Expert name search error:", error);
-    return res.status(500).json({ error: "Failed to search for expert by name" });
+    return res
+      .status(500)
+      .json({ error: "Failed to search for expert by name" });
   }
 });
 
@@ -1773,7 +1807,7 @@ router.post("/search/reset-for-testing", async (req, res) => {
 
     const result = await IPLimit.updateMany(
       {},
-      { $set: { searchCount: 0, lastSearchAt: null } }
+      { $set: { searchCount: 0, lastSearchAt: null } },
     );
 
     res.json({

@@ -9,7 +9,7 @@ const router = Router();
  */
 router.post("/chatbot/chat", async (req, res) => {
   try {
-    const { messages } = req.body;
+    const { messages, context } = req.body;
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: "Messages array is required" });
@@ -26,7 +26,10 @@ router.post("/chatbot/chat", async (req, res) => {
       });
     }
 
-    // Pass req object for user context (if needed in future)
+    // Pass req object with context for user context (detail pages)
+    if (context) {
+      req.body.context = context;
+    }
     await generateChatResponse(messages, res, req);
   } catch (error) {
     console.error("Error in chat endpoint:", error);

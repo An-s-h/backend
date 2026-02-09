@@ -125,7 +125,7 @@ function filterByRecruitmentStatus(trials, statusFilter) {
     // Default: Only show RECRUITING or NOT_YET_RECRUITING
     return trials.filter(
       (trial) =>
-        trial.status === "RECRUITING" || trial.status === "NOT_YET_RECRUITING"
+        trial.status === "RECRUITING" || trial.status === "NOT_YET_RECRUITING",
     );
   }
 
@@ -156,7 +156,20 @@ function applyQueryRelevanceFilter(trials, q) {
   }
   const queryLower = q.toLowerCase().trim();
   const stopWords = new Set([
-    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
+    "the",
+    "a",
+    "an",
+    "and",
+    "or",
+    "but",
+    "in",
+    "on",
+    "at",
+    "to",
+    "for",
+    "of",
+    "with",
+    "by",
   ]);
   const queryTerms = queryLower
     .split(/\s+/)
@@ -178,11 +191,12 @@ function applyQueryRelevanceFilter(trials, q) {
       for (const term of queryTerms) {
         const termRegex = new RegExp(
           `\\b${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
-          "i"
+          "i",
         );
         if (termRegex.test(searchText)) {
           matchCount++;
-          if (termRegex.test(title) || termRegex.test(conditions)) significantTermMatches++;
+          if (termRegex.test(title) || termRegex.test(conditions))
+            significantTermMatches++;
         }
       }
     }
@@ -193,12 +207,17 @@ function applyQueryRelevanceFilter(trials, q) {
       const allTermsMatch = matchCount === queryTerms.length;
       const significantRatio = significantTermMatches / queryTerms.length;
       const matchRatio = matchCount / queryTerms.length;
-      if (allTermsMatch && significantRatio >= 0.6) queryRelevanceScore = 0.85 + significantRatio * 0.15;
-      else if (allTermsMatch && significantRatio >= 0.4) queryRelevanceScore = 0.75 + significantRatio * 0.1;
-      else if (allTermsMatch && significantRatio > 0) queryRelevanceScore = 0.5 + significantRatio * 0.2;
+      if (allTermsMatch && significantRatio >= 0.6)
+        queryRelevanceScore = 0.85 + significantRatio * 0.15;
+      else if (allTermsMatch && significantRatio >= 0.4)
+        queryRelevanceScore = 0.75 + significantRatio * 0.1;
+      else if (allTermsMatch && significantRatio > 0)
+        queryRelevanceScore = 0.5 + significantRatio * 0.2;
       else if (allTermsMatch) queryRelevanceScore = 0.3;
-      else if (matchRatio >= 0.75) queryRelevanceScore = 0.5 + significantRatio * 0.3;
-      else if (matchRatio >= 0.5) queryRelevanceScore = 0.3 + significantRatio * 0.3;
+      else if (matchRatio >= 0.75)
+        queryRelevanceScore = 0.5 + significantRatio * 0.3;
+      else if (matchRatio >= 0.5)
+        queryRelevanceScore = 0.3 + significantRatio * 0.3;
       else queryRelevanceScore = matchRatio * 0.5;
     }
     return {
@@ -241,7 +260,7 @@ function calculateBiomarkerMatch(trial, userBiomarkers = []) {
   // Check if any user biomarker matches trial biomarkers
   const userBiomarkersUpper = userBiomarkers.map((b) => b.toUpperCase());
   const matches = trialBiomarkers.filter((tb) =>
-    userBiomarkersUpper.includes(tb)
+    userBiomarkersUpper.includes(tb),
   );
 
   return matches.length > 0 ? 1 : 0; // Boost if match found
@@ -295,7 +314,7 @@ async function calculatePIExpertiseScore(trial) {
     (c) =>
       c.role?.toLowerCase().includes("principal") ||
       c.role?.toLowerCase().includes("investigator") ||
-      c.name
+      c.name,
   );
 
   if (piContact?.name) {
@@ -322,24 +341,18 @@ export async function searchClinicalTrials({
   biomarkers = [], // Layer 3: User's biomarkers (e.g., ["IDH1", "BRCA"])
   keyword, // Layer 3: Additional keyword for biomarker matching
   sortByDate = false, // When true, sort by lastUpdatePostDate (newest first)
+  recentMonths, // When set (e.g. 6), only return trials updated in the last N months (trials with no date are included)
 } = {}) {
-  // Layer 1: Translation Layer - Expand query with synonyms
-  // Only expand if user query is short/simple (1-3 words) to avoid over-expanding complex queries
+  // Layer 1: Always expand condition synonyms (e.g. "multiple sclerosis" -> MS, Disseminated Sclerosis)
   let expandedQuery = q;
   if (q) {
+    expandedQuery = expandQueryWithSynonyms(q);
     const queryWords = q.trim().split(/\s+/).length;
-    // Only expand synonyms for simple queries (1-3 words) to avoid false positives
-    // For complex queries, let the API handle the search directly
     if (queryWords <= 3) {
-      expandedQuery = expandQueryWithSynonyms(q);
-      // Also map to MeSH terminology
       const meshTerm = mapToMeSHTerminology(q);
       if (meshTerm !== q) {
         expandedQuery = `${expandedQuery} OR ${meshTerm}`;
       }
-    } else {
-      // For complex queries, use original query to maintain relevance
-      expandedQuery = q;
     }
   }
 
@@ -384,7 +397,7 @@ export async function searchClinicalTrials({
     eligibilityAgeMax || ""
   }:${radiusMiles || ""}:${
     biomarkers && biomarkers.length > 0 ? biomarkers.join(",") : ""
-  }:${sortByDate}`;
+  }:${sortByDate}:${recentMonths || ""}`;
   const cached = getCache(cacheKey);
   if (cached) {
     // Apply all filters
@@ -408,6 +421,27 @@ export async function searchClinicalTrials({
     // Apply same query relevance filter as cold path so totalCount is consistent across pages
     if (q) {
       filtered = applyQueryRelevanceFilter(filtered, q);
+    }
+
+    // recentMonths: include when date missing, else require within cutoff
+    if (recentMonths && Number.isInteger(recentMonths) && recentMonths > 0) {
+      const cutoff = new Date();
+      cutoff.setMonth(cutoff.getMonth() - recentMonths);
+      const cutoffTime = cutoff.getTime();
+      filtered = filtered.filter((trial) => {
+        const raw = trial.lastUpdatePostDate;
+        if (raw == null || raw === "") return true;
+        const updated = new Date(raw).getTime();
+        if (Number.isNaN(updated)) return true;
+        return updated >= cutoffTime;
+      });
+    }
+    if (sortByDate) {
+      filtered.sort((a, b) => {
+        const aDate = a.lastUpdatePostDate ? new Date(a.lastUpdatePostDate).getTime() : 0;
+        const bDate = b.lastUpdatePostDate ? new Date(b.lastUpdatePostDate).getTime() : 0;
+        return bDate - aDate;
+      });
     }
 
     // Apply pagination
@@ -527,7 +561,7 @@ export async function searchClinicalTrials({
         const piContact = contacts.find(
           (c) =>
             c.role?.toLowerCase().includes("principal") ||
-            c.role?.toLowerCase().includes("investigator")
+            c.role?.toLowerCase().includes("investigator"),
         );
 
         // Extract design and phase (Layer 4)
@@ -560,7 +594,11 @@ export async function searchClinicalTrials({
         });
 
         const nctId = identificationModule.nctId || s.nctId || "";
-        const lastUpdatePostDate = statusModule.lastUpdatePostDate || null;
+        // API v2: last update is in lastUpdatePostDateStruct.date (object) or lastUpdateSubmitDate (string)
+        const lastUpdatePostDate =
+          statusModule.lastUpdatePostDateStruct?.date ??
+          statusModule.lastUpdateSubmitDate ??
+          null;
         return {
           id: nctId,
           _id: nctId,
@@ -591,7 +629,7 @@ export async function searchClinicalTrials({
             ? `https://clinicaltrials.gov/study/${nctId}`
             : null,
         };
-      })
+      }),
     );
 
     setCache(cacheKey, items);
@@ -680,7 +718,7 @@ export async function searchClinicalTrials({
             // Use word boundary regex to match whole words only
             const termRegex = new RegExp(
               `\\b${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
-              "i"
+              "i",
             );
             if (termRegex.test(searchText)) {
               matchCount++;
@@ -767,13 +805,31 @@ export async function searchClinicalTrials({
     }
     const afterFilter = filteredItems.length;
 
+    // recentMonths: include when date missing, else require within cutoff (so we don't wipe results when API has no date)
+    if (recentMonths && Number.isInteger(recentMonths) && recentMonths > 0) {
+      const cutoff = new Date();
+      cutoff.setMonth(cutoff.getMonth() - recentMonths);
+      const cutoffTime = cutoff.getTime();
+      filteredItems = filteredItems.filter((trial) => {
+        const raw = trial.lastUpdatePostDate;
+        if (raw == null || raw === "") return true;
+        const updated = new Date(raw).getTime();
+        if (Number.isNaN(updated)) return true;
+        return updated >= cutoffTime;
+      });
+    }
+
     // Layer 5: Rank by query relevance FIRST, then other factors
     // When sortByDate: prioritize lastUpdatePostDate (newest first)
     const beforeSort = filteredItems.length;
     filteredItems.sort((a, b) => {
       if (sortByDate) {
-        const aDate = a.lastUpdatePostDate ? new Date(a.lastUpdatePostDate).getTime() : 0;
-        const bDate = b.lastUpdatePostDate ? new Date(b.lastUpdatePostDate).getTime() : 0;
+        const aDate = a.lastUpdatePostDate
+          ? new Date(a.lastUpdatePostDate).getTime()
+          : 0;
+        const bDate = b.lastUpdatePostDate
+          ? new Date(b.lastUpdatePostDate).getTime()
+          : 0;
         if (bDate !== aDate) return bDate - aDate; // Newest first
       }
 

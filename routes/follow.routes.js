@@ -8,7 +8,7 @@ const router = Router();
 // Follow a user
 router.post("/follow", async (req, res) => {
   try {
-    const { followerId, followingId, followerRole, followingRole } = req.body;
+    const { followerId, followingId, followerRole, followingRole, source } = req.body;
 
     if (!followerId || !followingId || !followerRole || !followingRole) {
       return res.status(400).json({ error: "Missing required fields" });
@@ -32,15 +32,24 @@ router.post("/follow", async (req, res) => {
 
     // Create notification for the person being followed (researcher or patient)
     const follower = await User.findById(followerId).lean();
+    const followerName = follower?.username || "Someone";
+    
+    // Build notification message with source if provided
+    let notificationMessage = `${followerName} followed you`;
+    if (source) {
+      notificationMessage += ` THROUGH ${source}`;
+    }
+    
     await Notification.create({
       userId: followingId,
       type: "new_follower",
       relatedUserId: followerId,
       title: "New Follower",
-      message: `${follower?.username || "Someone"} started following you`,
+      message: notificationMessage,
       metadata: {
         followerUsername: follower?.username,
         followerRole,
+        source: source || null,
       },
     });
 

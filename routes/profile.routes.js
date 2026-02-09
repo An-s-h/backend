@@ -6,7 +6,8 @@ import { Thread } from "../models/Thread.js";
 import { Reply } from "../models/Reply.js";
 import { Community } from "../models/Community.js";
 import { CommunityMembership } from "../models/CommunityMembership.js";
-import { fetchFullORCIDProfile } from "../services/orcid.service.js";
+import { fetchFullORCIDProfile, fetchORCIDWorks } from "../services/orcid.service.js";
+import { fetchAllWorksByOrcid } from "../services/openalex.service.js";
 import { verifySession } from "../middleware/auth.js";
 
 const router = Router();
@@ -99,11 +100,134 @@ router.get("/profile/:userId/forum-profile", async (req, res) => {
   }
 });
 
+// GET /api/profile/publications — must be before /profile/:userId so "publications" is not captured as userId
+router.get("/profile/publications", verifySession, async (req, res) => {
+  try {
+    const user = req.user;
+    if (!user) return res.status(401).json({ error: "Authentication required" });
+
+    const profile = await Profile.findOne({ userId: user._id }).lean();
+    if (!profile || profile.role !== "researcher")
+      return res.status(403).json({ error: "Only researchers can fetch profile publications" });
+
+    const orcid = profile.researcher?.orcid?.trim();
+    if (!orcid)
+      return res.status(400).json({ error: "ORCID is required. Add your ORCID in your profile first." });
+
+    const normalizedOrcid = orcid.replace(/\s+/g, "");
+
+    // Fetch from both ORCID and OpenAlex in parallel
+    const [orcidWorks, openalexWorks] = await Promise.allSettled([
+      fetchORCIDWorks(normalizedOrcid),
+      fetchAllWorksByOrcid(orcid),
+    ]);
+
+    const orcidList = orcidWorks.status === "fulfilled" ? orcidWorks.value : [];
+    const openalexList = openalexWorks.status === "fulfilled" ? openalexWorks.value : [];
+
+    // Deduplicate and merge: prefer doi > pmid > openalexId/orcidWorkId as match key
+    const map = new Map();
+    const getKey = (p) => {
+      if (p.doi) return `doi:${String(p.doi).toLowerCase().trim()}`;
+      if (p.pmid) return `pmid:${String(p.pmid).trim()}`;
+      if (p.openalexId) return `oa:${p.openalexId}`;
+      if (p.orcidWorkId) return `orcid:${p.orcidWorkId}`;
+      return `title:${(p.title || "").slice(0, 80)}`;
+    };
+    const addToMap = (pub, source) => {
+      const key = getKey(pub);
+      const existing = map.get(key);
+      if (existing) {
+        const sources = new Set((existing.source || "").split(", ").filter(Boolean));
+        sources.add(source);
+        existing.source = [...sources].sort().join(", ");
+        // Prefer OpenAlex fields when merging (has citedByCount)
+        if (source === "openalex" && pub.openalexId) existing.openalexId = pub.openalexId;
+        if (source === "orcid" && pub.orcidWorkId) existing.orcidWorkId = pub.orcidWorkId;
+      } else {
+        map.set(key, { ...pub, source });
+      }
+    };
+
+    for (const w of orcidList) addToMap(w, "orcid");
+    for (const w of openalexList) addToMap(w, "openalex");
+
+    const publications = Array.from(map.values());
+    return res.json({ publications });
+  } catch (err) {
+    console.error("Fetch profile publications error:", err);
+    return res.status(500).json({ error: "Failed to fetch publications" });
+  }
+});
+
 // GET /api/profile/:userId
 router.get("/profile/:userId", async (req, res) => {
   const { userId } = req.params;
   const profile = await Profile.findOne({ userId });
   return res.json({ profile });
+});
+
+// PUT /api/profile/:userId/selected-publications — Save selected publications to display on profile
+router.put("/profile/:userId/selected-publications", verifySession, async (req, res) => {
+  try {
+    const user = req.user;
+    if (!user) return res.status(401).json({ error: "Authentication required" });
+
+    const { userId } = req.params;
+    const userIdStr = user._id?.toString?.() || String(user.id);
+    if (userId !== userIdStr)
+      return res.status(403).json({ error: "You can only update your own profile publications" });
+
+    const profile = await Profile.findOne({ userId: user._id });
+    if (!profile || profile.role !== "researcher")
+      return res.status(403).json({ error: "Only researchers can update profile publications" });
+
+    let selectedPublications = req.body?.selectedPublications;
+    if (typeof selectedPublications === "string") {
+      try {
+        selectedPublications = JSON.parse(selectedPublications);
+      } catch {
+        return res.status(400).json({ error: "Invalid selectedPublications format" });
+      }
+    }
+    if (!Array.isArray(selectedPublications)) {
+      return res.status(400).json({ error: "selectedPublications must be an array" });
+    }
+
+    // Normalize and validate each publication (plain objects, correct types for Mongoose)
+    const sanitized = selectedPublications.slice(0, 100).map((p) => {
+      const item = {
+        title: String(p.title || "Untitled"),
+        year: p.year != null ? Number(p.year) || null : null,
+        journal: String(p.journal || p.journalTitle || ""),
+        journalTitle: String(p.journalTitle || p.journal || ""),
+        doi: p.doi ? String(p.doi) : null,
+        pmid: p.pmid ? String(p.pmid) : null,
+        link: p.link || p.url ? String(p.link || p.url) : null,
+        url: p.url || p.link ? String(p.url || p.link) : null,
+        authors: Array.isArray(p.authors) ? p.authors.map((a) => String(a)) : [],
+        type: p.type ? String(p.type) : null,
+        openalexId: p.openalexId ? String(p.openalexId) : null,
+        orcidWorkId: p.orcidWorkId != null ? String(p.orcidWorkId) : null,
+        source: p.source ? String(p.source) : null,
+      };
+      return item;
+    });
+
+    const updated = await Profile.findOneAndUpdate(
+      { userId: user._id },
+      { $set: { "researcher.selectedPublications": sanitized } },
+      { new: true }
+    ).lean();
+
+    return res.json({
+      ok: true,
+      selectedPublications: updated?.researcher?.selectedPublications || sanitized,
+    });
+  } catch (err) {
+    console.error("Save selected publications error:", err);
+    return res.status(500).json({ error: "Failed to save selected publications" });
+  }
 });
 
 // POST /api/profile/link-academic — must be before /profile/:userId so "link-academic" is not captured as userId
@@ -151,6 +275,15 @@ router.post("/profile/:userId", async (req, res) => {
   const { userId } = req.params;
   const payload = req.body || {};
   if (!payload.role) return res.status(400).json({ error: "role is required" });
+  
+  // Auto-verify researchers with ORCID
+  if (payload.role === "researcher" && payload.researcher?.orcid) {
+    // If ORCID exists and is being set/updated, auto-verify
+    if (payload.researcher.orcid.trim()) {
+      payload.researcher.isVerified = true;
+    }
+  }
+  
   const doc = await Profile.findOneAndUpdate(
     { userId },
     { ...payload, userId },
@@ -164,6 +297,15 @@ router.put("/profile/:userId", async (req, res) => {
   const { userId } = req.params;
   const payload = req.body || {};
   if (!payload.role) return res.status(400).json({ error: "role is required" });
+  
+  // Auto-verify researchers with ORCID
+  if (payload.role === "researcher" && payload.researcher?.orcid) {
+    // If ORCID exists and is being set/updated, auto-verify
+    if (payload.researcher.orcid.trim()) {
+      payload.researcher.isVerified = true;
+    }
+  }
+  
   const doc = await Profile.findOneAndUpdate(
     { userId },
     { ...payload, userId },
@@ -261,12 +403,49 @@ router.get("/collabiora-expert/profile/:userId", async (req, res) => {
             ].slice(0, 10), // Limit to top 10
             // Keep ORCID ID for reference
             orcidId: orcidProfileData.orcidId || normalizedOrcid,
-            // Add works/publications from ORCID
-            works: orcidProfileData.works || [],
-            publications: orcidProfileData.works || [], // Alias for works
+            // Use researcher-selected publications if any; otherwise fall back to ORCID works
+            works:
+              researcher.selectedPublications?.length > 0
+                ? researcher.selectedPublications.map((p) => ({
+                    title: p.title || "Untitled",
+                    year: p.year || null,
+                    journal: p.journalTitle || p.journal || null,
+                    journalTitle: p.journalTitle || p.journal || null,
+                    doi: p.doi || null,
+                    pmid: p.pmid || null,
+                    link: p.link || p.url || null,
+                    url: p.url || p.link || null,
+                    authors: p.authors || [],
+                    type: p.type || null,
+                    id: p.pmid || p.doi || p.openalexId || p.orcidWorkId,
+                    citations: 0,
+                    source: p.source || null,
+                  }))
+                : orcidProfileData.works || [],
+            publications:
+              researcher.selectedPublications?.length > 0
+                ? researcher.selectedPublications.map((p) => ({
+                    title: p.title || "Untitled",
+                    year: p.year || null,
+                    journal: p.journalTitle || p.journal || null,
+                    journalTitle: p.journalTitle || p.journal || null,
+                    doi: p.doi || null,
+                    pmid: p.pmid || null,
+                    link: p.link || p.url || null,
+                    url: p.url || p.link || null,
+                    authors: p.authors || [],
+                    type: p.type || null,
+                    id: p.pmid || p.doi || p.openalexId || p.orcidWorkId,
+                    citations: 0,
+                    source: p.source || null,
+                  }))
+                : orcidProfileData.works || [],
             // Add impact metrics
             impactMetrics: orcidProfileData.impactMetrics || {
-              totalPublications: orcidProfileData.publications?.length || 0,
+              totalPublications:
+                researcher.selectedPublications?.length > 0
+                  ? researcher.selectedPublications.length
+                  : orcidProfileData.publications?.length || 0,
               hIndex: 0,
               totalCitations: 0,
               maxCitations: 0,
@@ -283,32 +462,69 @@ router.get("/collabiora-expert/profile/:userId", async (req, res) => {
             totalFundings: orcidProfileData.totalFundings || 0,
             totalPeerReviews: orcidProfileData.totalPeerReviews || 0,
             totalWorks:
-              orcidProfileData.totalWorks ||
-              orcidProfileData.publications?.length ||
-              0,
+              researcher.selectedPublications?.length > 0
+                ? researcher.selectedPublications.length
+                : orcidProfileData.totalWorks ||
+                  orcidProfileData.publications?.length ||
+                  0,
+            publicationsAreSelected: !!(researcher.selectedPublications?.length > 0),
           };
         } else {
-          // Even if fetchFullORCIDProfile returns null, still include publications count as 0
-          profileData.publications = [];
-          profileData.works = [];
+          // ORCID fetch failed; use selectedPublications if any, else empty
+          const sel = researcher.selectedPublications || [];
+          const mapped = sel.map((p) => ({
+            title: p.title || "Untitled",
+            year: p.year || null,
+            journal: p.journalTitle || p.journal || null,
+            journalTitle: p.journalTitle || p.journal || null,
+            doi: p.doi || null,
+            pmid: p.pmid || null,
+            link: p.link || p.url || null,
+            url: p.url || p.link || null,
+            authors: p.authors || [],
+            type: p.type || null,
+            id: p.pmid || p.doi || p.openalexId || p.orcidWorkId,
+            citations: 0,
+            source: p.source || null,
+          }));
+          profileData.publications = mapped;
+          profileData.works = mapped;
           profileData.impactMetrics = {
-            totalPublications: 0,
+            totalPublications: mapped.length,
             hIndex: 0,
             totalCitations: 0,
             maxCitations: 0,
           };
+          profileData.publicationsAreSelected = mapped.length > 0;
         }
       } catch (error) {
         console.error("Error fetching ORCID profile:", error.message);
-        // Continue with basic database info if ORCID fetch fails, but include empty arrays
-        profileData.publications = [];
-        profileData.works = [];
+        // Use selectedPublications if any; otherwise empty
+        const sel = researcher.selectedPublications || [];
+        const mapped = sel.map((p) => ({
+          title: p.title || "Untitled",
+          year: p.year || null,
+          journal: p.journalTitle || p.journal || null,
+          journalTitle: p.journalTitle || p.journal || null,
+          doi: p.doi || null,
+          pmid: p.pmid || null,
+          link: p.link || p.url || null,
+          url: p.url || p.link || null,
+          authors: p.authors || [],
+          type: p.type || null,
+          id: p.pmid || p.doi || p.openalexId || p.orcidWorkId,
+          citations: 0,
+          source: p.source || null,
+        }));
+        profileData.publications = mapped;
+        profileData.works = mapped;
         profileData.impactMetrics = {
-          totalPublications: 0,
+          totalPublications: mapped.length,
           hIndex: 0,
           totalCitations: 0,
           maxCitations: 0,
         };
+        profileData.publicationsAreSelected = mapped.length > 0;
       }
     }
 

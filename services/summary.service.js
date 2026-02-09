@@ -11,7 +11,7 @@ const apiKey2 = process.env.GOOGLE_AI_API_KEY_2; // Second API key for load bala
 
 if (!apiKey) {
   console.warn(
-    "⚠️  GOOGLE_AI_API_KEY not found in environment variables. AI features will use fallback."
+    "⚠️  GOOGLE_AI_API_KEY not found in environment variables. AI features will use fallback.",
   );
 }
 
@@ -62,15 +62,18 @@ async function retryWithBackoff(fn, maxRetries = 3, initialDelay = 1000) {
       const isLastAttempt = attempt === maxRetries - 1;
       const errorMessage = error.message || String(error);
       // Check multiple possible locations for status code
-      const errorStatus = error.status || error.statusCode || error.code || 
-                         (error.response?.status) || 
-                         (error.errorDetails?.status);
+      const errorStatus =
+        error.status ||
+        error.statusCode ||
+        error.code ||
+        error.response?.status ||
+        error.errorDetails?.status;
       const isOverloadError =
         errorMessage?.includes("overloaded") ||
         errorMessage?.includes("503") ||
         errorMessage?.includes("Service Unavailable") ||
         errorStatus === 503;
-      const isRateLimitError = 
+      const isRateLimitError =
         errorMessage?.includes("429") ||
         errorMessage?.includes("rate limit") ||
         errorMessage?.includes("quota") ||
@@ -84,9 +87,9 @@ async function retryWithBackoff(fn, maxRetries = 3, initialDelay = 1000) {
       // Exponential backoff: 1s, 2s, 4s
       const delay = initialDelay * Math.pow(2, attempt);
       console.log(
-        `Gemini ${isRateLimitError ? 'rate limited' : 'overloaded'}, retrying in ${delay}ms... (attempt ${
+        `Gemini ${isRateLimitError ? "rate limited" : "overloaded"}, retrying in ${delay}ms... (attempt ${
           attempt + 1
-        }/${maxRetries})`
+        }/${maxRetries})`,
       );
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
@@ -110,7 +113,7 @@ export async function summarizeText(text, type = "general", simplify = false) {
   let geminiInstance = null;
   let attemptWithAlternate = false;
   let modelName = "gemini-2.5-flash-lite"; // Default model, can fallback to gemini-2.5-flash
-  
+
   try {
     geminiInstance = getGeminiInstance(false);
     if (!geminiInstance) {
@@ -172,7 +175,7 @@ Return ONLY valid JSON, no markdown formatting. Use appropriate technical and sc
         // Estimate tokens: prompt + text content + response
         const textLength = text.substring(0, 2000).length;
         const estimatedTokens = 500 + textLength / 4 + 1500;
-        
+
         result = await rateLimiter.execute(
           async () => {
             return await retryWithBackoff(async () => {
@@ -180,49 +183,56 @@ Return ONLY valid JSON, no markdown formatting. Use appropriate technical and sc
             });
           },
           modelName,
-          estimatedTokens
+          estimatedTokens,
         );
-    } catch (firstError) {
-      // If we have two API keys and first one failed, try the alternate
-      if (genAI && genAI2 && !attemptWithAlternate) {
-        const errorMessage = firstError.message || String(firstError);
-        const errorStatus = firstError.status || firstError.statusCode || firstError.code ||
-                           (firstError.response?.status) || (firstError.errorDetails?.status);
-        const isRetryableError = 
-          errorMessage?.includes("429") ||
-          errorMessage?.includes("503") ||
-          errorMessage?.includes("rate limit") ||
-          errorMessage?.includes("quota") ||
-          errorMessage?.includes("overloaded") ||
-          errorMessage?.includes("Service Unavailable") ||
-          errorStatus === 429 ||
-          errorStatus === 503;
-        
-        if (isRetryableError) {
-          attemptWithAlternate = true;
-          geminiInstance = getGeminiInstance(true);
-          // Try alternate model if flash-lite is overloaded
-          const alternateModelName = modelName === "gemini-2.5-flash-lite" ? "gemini-2.5-flash" : "gemini-2.5-flash-lite";
-          model = geminiInstance.getGenerativeModel({
-            model: alternateModelName,
-          });
-          result = await rateLimiter.execute(
-            async () => {
-              return await retryWithBackoff(async () => {
-                return await model.generateContent(prompt);
-              });
-            },
-            alternateModelName,
-            estimatedTokens
-          );
+      } catch (firstError) {
+        // If we have two API keys and first one failed, try the alternate
+        if (genAI && genAI2 && !attemptWithAlternate) {
+          const errorMessage = firstError.message || String(firstError);
+          const errorStatus =
+            firstError.status ||
+            firstError.statusCode ||
+            firstError.code ||
+            firstError.response?.status ||
+            firstError.errorDetails?.status;
+          const isRetryableError =
+            errorMessage?.includes("429") ||
+            errorMessage?.includes("503") ||
+            errorMessage?.includes("rate limit") ||
+            errorMessage?.includes("quota") ||
+            errorMessage?.includes("overloaded") ||
+            errorMessage?.includes("Service Unavailable") ||
+            errorStatus === 429 ||
+            errorStatus === 503;
+
+          if (isRetryableError) {
+            attemptWithAlternate = true;
+            geminiInstance = getGeminiInstance(true);
+            // Try alternate model if flash-lite is overloaded
+            const alternateModelName =
+              modelName === "gemini-2.5-flash-lite"
+                ? "gemini-2.5-flash"
+                : "gemini-2.5-flash-lite";
+            model = geminiInstance.getGenerativeModel({
+              model: alternateModelName,
+            });
+            result = await rateLimiter.execute(
+              async () => {
+                return await retryWithBackoff(async () => {
+                  return await model.generateContent(prompt);
+                });
+              },
+              alternateModelName,
+              estimatedTokens,
+            );
+          } else {
+            throw firstError;
+          }
         } else {
           throw firstError;
         }
-      } else {
-        throw firstError;
       }
-    }
-      
+
       let responseText = result.response.text().trim();
 
       // Clean markdown if present
@@ -251,25 +261,29 @@ Return ONLY valid JSON, no markdown formatting. Use appropriate technical and sc
     try {
       const textLength = text.length;
       const estimatedTokens = 100 + textLength / 4 + 500;
-      
+
       result = await rateLimiter.execute(
         async () => {
           return await retryWithBackoff(async () => {
             return await model.generateContent(
-              `${languageInstruction}: ${text}`
+              `${languageInstruction}: ${text}`,
             );
           });
         },
         modelName,
-        estimatedTokens
+        estimatedTokens,
       );
     } catch (firstError) {
       // If we have two API keys and first one failed, try the alternate
       if (genAI && genAI2 && !attemptWithAlternate) {
         const errorMessage = firstError.message || String(firstError);
-        const errorStatus = firstError.status || firstError.statusCode || firstError.code ||
-                           (firstError.response?.status) || (firstError.errorDetails?.status);
-        const isRetryableError = 
+        const errorStatus =
+          firstError.status ||
+          firstError.statusCode ||
+          firstError.code ||
+          firstError.response?.status ||
+          firstError.errorDetails?.status;
+        const isRetryableError =
           errorMessage?.includes("429") ||
           errorMessage?.includes("503") ||
           errorMessage?.includes("rate limit") ||
@@ -278,12 +292,15 @@ Return ONLY valid JSON, no markdown formatting. Use appropriate technical and sc
           errorMessage?.includes("Service Unavailable") ||
           errorStatus === 429 ||
           errorStatus === 503;
-        
+
         if (isRetryableError) {
           attemptWithAlternate = true;
           geminiInstance = getGeminiInstance(true);
           // Try alternate model if flash-lite is overloaded
-          const alternateModelName = modelName === "gemini-2.5-flash-lite" ? "gemini-2.5-flash" : "gemini-2.5-flash-lite";
+          const alternateModelName =
+            modelName === "gemini-2.5-flash-lite"
+              ? "gemini-2.5-flash"
+              : "gemini-2.5-flash-lite";
           model = geminiInstance.getGenerativeModel({
             model: alternateModelName,
           });
@@ -291,12 +308,12 @@ Return ONLY valid JSON, no markdown formatting. Use appropriate technical and sc
             async () => {
               return await retryWithBackoff(async () => {
                 return await model.generateContent(
-                  `${languageInstruction}: ${text}`
+                  `${languageInstruction}: ${text}`,
                 );
               });
             },
             alternateModelName,
-            estimatedTokens
+            estimatedTokens,
           );
         } else {
           throw firstError;
@@ -305,7 +322,7 @@ Return ONLY valid JSON, no markdown formatting. Use appropriate technical and sc
         throw firstError;
       }
     }
-    
+
     return result.response.text();
   } catch (e) {
     console.error("AI summary error:", e);
@@ -341,17 +358,17 @@ export async function extractConditions(naturalLanguage) {
     const model = geminiInstance.getGenerativeModel({
       model: modelName,
     });
-    
+
     const prompt = `Extract specific medical conditions/diseases from this patient description. Convert symptoms to their corresponding medical conditions when appropriate (e.g., "high BP" or "high blood pressure" → "Hypertension", "chest pain" → consider "Heart Disease" or "Angina", "breathing issues" → consider "Asthma" or "COPD", "prostate issues" → consider "Prostate Cancer" if cancer-related). Return ONLY a comma-separated list of condition names (diagnoses), no explanations: "${naturalLanguage}"`;
-    
+
     const estimatedTokens = 100 + naturalLanguage.length / 4 + 100;
-    
+
     const result = await rateLimiter.execute(
       async () => {
         return await model.generateContent(prompt);
       },
       modelName,
-      estimatedTokens
+      estimatedTokens,
     );
     const text = result.response.text().trim();
     return text
@@ -427,7 +444,7 @@ ${name ? `Name: "${name}"` : ""}
 Return ONLY valid JSON, no explanations or markdown formatting.`;
 
     const estimatedTokens = 200 + truncatedBio.length / 4 + 500;
-    
+
     const result = await rateLimiter.execute(
       async () => {
         return await model.generateContent(prompt, {
@@ -437,7 +454,7 @@ Return ONLY valid JSON, no explanations or markdown formatting.`;
         });
       },
       modelName,
-      estimatedTokens
+      estimatedTokens,
     );
     const responseText = result.response.text().trim();
 
@@ -535,7 +552,7 @@ Return only the simplified title.
 No extra text, no explanations, no quotes.`;
 
     const estimatedTokens = 150 + title.length / 4 + 100;
-    
+
     const result = await rateLimiter.execute(
       async () => {
         return await model.generateContent(prompt, {
@@ -546,7 +563,7 @@ No extra text, no explanations, no quotes.`;
         });
       },
       modelName,
-      estimatedTokens
+      estimatedTokens,
     );
 
     let simplified = result.response.text().trim();
@@ -593,7 +610,7 @@ export async function batchSimplifyPublicationTitles(titles) {
 
   // Filter out titles that don't need simplification
   const titlesToSimplify = titles.filter(
-    (title) => title && typeof title === "string" && title.length > 60
+    (title) => title && typeof title === "string" && title.length > 60,
   );
 
   // If no titles need simplification, return original titles
@@ -681,9 +698,12 @@ Return ONLY a numbered list (1-${uncachedTitles.length}), one simplified title p
 2. [simplified title 2]`;
 
     const maxOutputTokens = Math.min(50 * uncachedTitles.length, 1500);
-    const totalTitlesLength = uncachedTitles.reduce((sum, t) => sum + t.length, 0);
+    const totalTitlesLength = uncachedTitles.reduce(
+      (sum, t) => sum + t.length,
+      0,
+    );
     const estimatedTokens = 300 + totalTitlesLength / 4 + maxOutputTokens;
-    
+
     const result = await rateLimiter.execute(
       async () => {
         return await model.generateContent(prompt, {
@@ -694,7 +714,7 @@ Return ONLY a numbered list (1-${uncachedTitles.length}), one simplified title p
         });
       },
       modelName,
-      estimatedTokens
+      estimatedTokens,
     );
 
     let responseText = result.response.text().trim();
@@ -768,7 +788,7 @@ Return ONLY a numbered list (1-${uncachedTitles.length}), one simplified title p
 export async function generateTrialContactMessage(
   userName,
   userLocation,
-  trial
+  trial,
 ) {
   // Fallback if API key missing
   const apiKey = process.env.GOOGLE_AI_API_KEY;
@@ -889,7 +909,7 @@ Return ONLY the message text, no explanations or markdown formatting.`;
 
     const trialInfoLength = JSON.stringify(trialInfo).length;
     const estimatedTokens = 300 + trialInfoLength / 4 + 500;
-    
+
     const result = await rateLimiter.execute(
       async () => {
         return await model.generateContent(prompt, {
@@ -900,7 +920,7 @@ Return ONLY the message text, no explanations or markdown formatting.`;
         });
       },
       modelName,
-      estimatedTokens
+      estimatedTokens,
     );
 
     return result.response.text().trim();
@@ -942,7 +962,7 @@ ${userName || "Patient"}`;
 export async function generateTrialDetails(
   trial,
   section = "all",
-  simplify = false
+  simplify = false,
 ) {
   // Check if any API key is available
   if (!apiKey && !apiKey2) {
@@ -1076,7 +1096,7 @@ Return ONLY the explanation text, no markdown formatting, no labels, just the ex
             maxOutputTokens: 300,
             temperature: 0.7,
           },
-        }
+        },
       );
       result.risksBenefits = risksBenefitsResult.response.text().trim();
     }
@@ -1123,7 +1143,7 @@ Return ONLY the explanation text, no markdown formatting, no labels, just the ex
             maxOutputTokens: 300,
             temperature: 0.7,
           },
-        }
+        },
       );
       result.participantRequirements = requirementsResult.response
         .text()

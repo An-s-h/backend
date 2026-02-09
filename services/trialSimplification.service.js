@@ -57,7 +57,7 @@ export async function simplifyTrialTitle(trial) {
   }
 
   // Skip simplification for short titles (already simple enough)
-  if (trial.title.length <= 80) {
+  if (trial.title.length <= 60) {
     return trial.title;
   }
 
@@ -157,7 +157,7 @@ export async function batchSimplifyTrialTitles(trials) {
 
   // Filter out trials that don't need simplification
   const trialsToSimplify = trials.filter(
-    (trial) => trial && trial.title && trial.title.length > 80
+    (trial) => trial && trial.title && trial.title.length > 60
   );
 
   // If no trials need simplification, return original titles
@@ -183,7 +183,7 @@ export async function batchSimplifyTrialTitles(trials) {
   if (uncachedTrials.length === 0) {
     return trials.map((t) => {
       if (!t || !t.title) return "";
-      if (t.title.length <= 80) return t.title;
+      if (t.title.length <= 60) return t.title;
       return results.get(t.title) || t.title;
     });
   }
@@ -294,13 +294,17 @@ Return ONLY a numbered list (1-${uncachedTrials.length}), one simplified title p
     // Return results in original order
     return trials.map((t) => {
       if (!t || !t.title) return "";
-      if (t.title.length <= 80) return t.title;
+      if (t.title.length <= 60) return t.title;
       return results.get(t.title) || t.title;
     });
   } catch (error) {
     console.error("Error batch simplifying trial titles:", error);
     // Fallback: return original titles
-    return trials.map((t) => t?.title || "");
+    return trials.map((t) => {
+      if (!t || !t.title) return "";
+      if (t.title.length <= 60) return t.title;
+      return t.title;
+    });
   }
 }
 

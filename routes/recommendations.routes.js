@@ -9,12 +9,8 @@ import {
   calculatePublicationMatch,
   calculateExpertMatch,
 } from "../services/matching.service.js";
-import {
-  extractBiomarkers,
-} from "../services/medicalTerminology.service.js";
-import {
-  batchSimplifyTrialTitles,
-} from "../services/trialSimplification.service.js";
+import { extractBiomarkers } from "../services/medicalTerminology.service.js";
+import { batchSimplifyTrialTitles } from "../services/trialSimplification.service.js";
 
 const router = Router();
 
@@ -51,7 +47,7 @@ function setRecommendationsCache(userId, value) {
     }
     // Delete expired entries
     keysToDelete.forEach((k) => recommendationsCache.delete(k));
-    
+
     // If still too large, remove oldest entries (FIFO)
     if (recommendationsCache.size > 100) {
       const entries = Array.from(recommendationsCache.entries());
@@ -198,7 +194,7 @@ router.get("/recommendations/:userId", async (req, res) => {
     // Fetch a larger batch for trials (same as search route) - up to 500 results for sorting
     // This ensures we get top results sorted by match percentage
     const batchSize = 500;
-    
+
     // Fetch all data in parallel for better performance
     // For trials, use the same logic as search route: fetch large batch, calculate matches, sort, then limit
     // Wrap each promise with error handling to prevent crashes
@@ -217,16 +213,18 @@ router.get("/recommendations/:userId", async (req, res) => {
         }),
         // Fetch more publications to ensure we have at least 9 after filtering by abstract
         // Similar to search route, fetch a larger batch to account for filtering
-        searchPubMed({ q: pubmedQuery, page: 1, pageSize: 50 }).catch((error) => {
-          console.error("Error fetching PubMed publications:", error);
-          return {
-            items: [],
-            totalCount: 0,
-            page: 1,
-            pageSize: 50,
-            hasMore: false,
-          };
-        }),
+        searchPubMed({ q: pubmedQuery, page: 1, pageSize: 50 }).catch(
+          (error) => {
+            console.error("Error fetching PubMed publications:", error);
+            return {
+              items: [],
+              totalCount: 0,
+              page: 1,
+              pageSize: 50,
+              hasMore: false,
+            };
+          }
+        ),
         // Fetch global experts using deterministic approach (same as Experts.jsx)
         findDeterministicExperts(
           primaryTopic, // Use primary topic (first interest)
@@ -236,7 +234,13 @@ router.get("/recommendations/:userId", async (req, res) => {
         ).catch((error) => {
           console.error("Error fetching global experts:", error);
           // Return empty array on error, don't fail the entire request
-          return { experts: [], totalFound: 0, page: 1, pageSize: 6, hasMore: false };
+          return {
+            experts: [],
+            totalFound: 0,
+            page: 1,
+            pageSize: 6,
+            hasMore: false,
+          };
         }),
       ]
     );

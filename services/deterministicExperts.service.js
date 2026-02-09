@@ -234,9 +234,10 @@ async function searchOpenAlexWorks(constraints, location) {
  * STEP 3: Extract author IDs and aggregate metrics from works
  * @param {Array} works - OpenAlex works from Step 2
  * @param {Object} constraints - Search constraints for relevance scoring
+ * @param {string} location - Location filter (optional)
  * @returns {Array} Array of author candidates with aggregated metrics
  */
-function extractAndAggregateAuthors(works, constraints) {
+function extractAndAggregateAuthors(works, constraints, location = null) {
   const authorMap = new Map();
   const currentYear = new Date().getFullYear();
 
@@ -275,6 +276,7 @@ function extractAndAggregateAuthors(works, constraints) {
           dois: new Set(),
           relevanceScore: 0,
           countryCode: null,
+          countryCodes: new Set(), // Track all country codes for this author
         });
       }
 
@@ -321,21 +323,37 @@ function extractAndAggregateAuthors(works, constraints) {
           }
           authorData.institutionNamesLower.add(inst.display_name.toLowerCase());
         }
-        if (inst.country_code && !authorData.countryCode) {
-          authorData.countryCode = inst.country_code;
+        // Track all country codes (authors can have multiple institutions in different countries)
+        if (inst.country_code) {
+          authorData.countryCodes.add(inst.country_code);
+          // Set primary countryCode to the first one found (for backward compatibility)
+          if (!authorData.countryCode) {
+            authorData.countryCode = inst.country_code;
+          }
         }
       }
     }
   }
 
   // Convert to array and calculate average relevance
-  const authors = Array.from(authorMap.values()).map((author) => ({
+  let authors = Array.from(authorMap.values()).map((author) => ({
     ...author,
     institutions: Array.from(author.institutions),
     institutionNamesLower: author.institutionNamesLower ? Array.from(author.institutionNamesLower) : [],
     dois: Array.from(author.dois),
+    countryCodes: Array.from(author.countryCodes), // Convert Set to Array
     avgRelevance: author.relevanceScore / author.works.length,
   }));
+  
+  // FILTER: Apply location filter if specified (STRICT filtering)
+  if (location) {
+    const beforeFilter = authors.length;
+    authors = authors.filter((author) => authorMatchesLocation(author, location));
+    const afterFilter = authors.length;
+    if (beforeFilter !== afterFilter) {
+      console.log(`Location filter "${location}": ${beforeFilter} → ${afterFilter} authors (filtered out ${beforeFilter - afterFilter})`);
+    }
+  }
   
   return authors;
 }
@@ -688,7 +706,7 @@ function applySanityChecks(author) {
 
 /**
  * Calculate recency decay score for a publication year
- * Uses exponential decay based on years since publication
+ * Extended duration scoring for experts: 0-4 years (weight 1), 5-7 years (0.7), 8-10 years (0.4), >10 years (0.2)
  * @param {number} publicationYear - Year the work was published
  * @param {number} currentYear - Current year
  * @returns {number} Recency score between 0 and 1.0
@@ -699,12 +717,12 @@ function calculateRecencyDecay(publicationYear, currentYear) {
   const yearsAgo = currentYear - publicationYear;
   
   if (yearsAgo < 0) return 1.0; // Future publications (shouldn't happen, but handle gracefully)
-  if (yearsAgo === 0) return 1.0; // Last 12 months (current year)
-  if (yearsAgo === 1) return 0.7; // 1-2 years ago
-  if (yearsAgo === 2) return 0.4; // 2-3 years ago
-  if (yearsAgo === 3) return 0.2; // 3-4 years ago
-  if (yearsAgo === 4) return 0.1; // 4-5 years ago
-  return 0; // 5+ years ago
+  
+  // Extended duration scoring for experts
+  if (yearsAgo <= 4) return 1.0; // 0-4 years ago: weight 1.0
+  if (yearsAgo >= 5 && yearsAgo <= 7) return 0.7; // 5-7 years ago: weight 0.7
+  if (yearsAgo >= 8 && yearsAgo <= 10) return 0.4; // 8-10 years ago: weight 0.4
+  return 0.2; // >10 years ago: weight 0.2
 }
 
 /**
@@ -1047,6 +1065,63 @@ function extractCityName(location) {
 }
 
 /**
+ * Check if an author matches the specified location based on their institutions
+ * @param {Object} authorData - Author data with institutions and countryCodes
+ * @param {string} location - Location string like "New Delhi, India" or "India"
+ * @returns {boolean} True if author matches location
+ */
+function authorMatchesLocation(authorData, location) {
+  if (!location) return true; // No location filter = include all
+  
+  const searchCity = extractCityName(location);
+  const searchCountryCode = extractCountryCode(location);
+  
+  // Check if author has any institution in the specified country
+  const hasCountryMatch = searchCountryCode && 
+    (authorData.countryCodes || []).includes(searchCountryCode);
+  
+  // If city is specified, try to match city name in institution
+  if (searchCity) {
+    // Normalize city name for matching (handle "New Delhi" -> "delhi", "New York" -> "york" or "new york")
+    const normalizedCity = searchCity.replace(/^(new|old|north|south|east|west)\s+/i, "").trim();
+    
+    // Check if any institution name contains the city name (exact or normalized)
+    if (authorData.institutionNamesLower && authorData.institutionNamesLower.length > 0) {
+      const cityMatch = authorData.institutionNamesLower.some((inst) => {
+        // Check for exact city match
+        if (inst.includes(searchCity)) return true;
+        // Check for normalized city match (e.g., "delhi" in "university of delhi")
+        if (normalizedCity !== searchCity && inst.includes(normalizedCity)) return true;
+        return false;
+      });
+      
+      if (cityMatch && hasCountryMatch) {
+        return true; // City match + country match = strong match
+      }
+    }
+    
+    // If city specified but no city match found, still check country
+    // This handles cases where institution names don't include city (e.g., "AIIMS" instead of "AIIMS New Delhi")
+    if (hasCountryMatch) {
+      // Country matches - include but will be ranked lower (handled in ranking function)
+      return true;
+    }
+    
+    // City specified but no city or country match
+    return false;
+  }
+  
+  // Only country specified - check country code match (strict)
+  // Check all country codes, not just the primary one
+  if (searchCountryCode) {
+    return hasCountryMatch;
+  }
+  
+  // No valid location extracted - include all
+  return true;
+}
+
+/**
  * MAIN FUNCTION: Deterministic expert discovery with pagination
  * Steps 1-5 (search + rank) are cached so subsequent pages are fast.
  * Only the current page's experts get Gemini summaries (the slow part).
@@ -1080,10 +1155,10 @@ export async function findDeterministicExperts(topic, location = null, page = 1,
         return { experts: [], totalFound: 0, page, pageSize, hasMore: false };
       }
 
-      // Step 3: Extract and aggregate authors
+      // Step 3: Extract and aggregate authors (with location filtering)
       console.log("Step 3: Extracting and aggregating authors...");
-      const authorCandidates = extractAndAggregateAuthors(works, constraints);
-      console.log(`Found ${authorCandidates.length} author candidates`);
+      const authorCandidates = extractAndAggregateAuthors(works, constraints, location);
+      console.log(`Found ${authorCandidates.length} author candidates${location ? ` (filtered by location: ${location})` : ""}`);
 
       // Sort by total citations to prioritize top candidates
       authorCandidates.sort((a, b) => b.totalCitations - a.totalCitations);

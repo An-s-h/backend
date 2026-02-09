@@ -348,11 +348,11 @@ export async function fetchFullORCIDProfile(orcidId, skipAI = false) {
 // --------------------------------------
 // 3. FETCH ORCID WORKS (Public API)
 // --------------------------------------
-async function fetchORCIDWorks(orcidId) {
+export async function fetchORCIDWorks(orcidId) {
   try {
     const res = await axios.get(`https://pub.orcid.org/v3.0/${orcidId}/works`, {
       headers: { Accept: "application/json" },
-      timeout: 6000,
+      timeout: 12000,
     });
 
     const groups = res.data.group || [];
@@ -412,6 +412,7 @@ async function fetchORCIDWorks(orcidId) {
           orcidWorkId: w["put-code"],
           id: pmid || doi || w["put-code"],
           citations: 0, // ORCID doesn't provide citations
+          source: "orcid",
         };
       })
       .filter(Boolean);

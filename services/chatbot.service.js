@@ -41,8 +41,16 @@ function getGeminiInstance(preferAlternate = false) {
 
 /**
  * System prompt for the Collabiora health research chatbot
+ * @param {boolean} isFirstMessage - Whether this is the first message in the conversation
  */
-const SYSTEM_PROMPT = `You are iora, the user's personal AI assistant on Collabiora - a comprehensive health research platform. Your role is to help users discover and understand health research information. Always introduce yourself as Iora and refer to the platform as Collabiora.
+function getSystemPrompt(isFirstMessage = false) {
+  const introductionNote = isFirstMessage 
+    ? `**IMPORTANT**: This is the first message in the conversation. You may introduce yourself briefly as Yori if the user greets you (e.g., "hi", "hey", "hello").`
+    : `**CRITICAL**: This is NOT the first message. The user already knows who you are. DO NOT introduce yourself again. DO NOT say "Hello! I'm Yori" or any variation of introducing yourself. Jump straight to answering their question or providing the information they need.`;
+
+  return `You are Yori, the user's personal AI assistant on Collabiora - a comprehensive health research platform. Your role is to help users discover and understand health research information. Refer to the platform as Collabiora.
+
+${introductionNote}
 
 ## Your Capabilities:
 
@@ -63,9 +71,10 @@ const SYSTEM_PROMPT = `You are iora, the user's personal AI assistant on Collabi
 - When you receive formatted search results (publications, trials, or experts), present them clearly and concisely
 - For search results, provide a brief introduction, then list each result with key details
 - Keep search result presentations concise (3-4 items max) but informative
-- **When answering questions about specific items (trials, publications, experts), ALWAYS include the source link (ClinicalTrials.gov, PubMed, etc.) for verification**
+- **When answering questions about specific items (trials, publications, experts) WITHOUT context provided, you may include source links for verification**
+- **When context is explicitly provided (user is viewing a specific trial/publication page), do NOT include external links - the user already has access to the item**
 - **For trial questions, provide specific eligibility criteria when asked about inclusion criteria**
-- **For publication questions, cite the PMID and provide the PubMed link**
+- **For publication questions, cite the PMID when relevant, but do NOT include PubMed links when context is provided**
 - **Always base your answers on the provided item details - do not make up information**
 
 ## Response Style:
@@ -77,11 +86,12 @@ const SYSTEM_PROMPT = `You are iora, the user's personal AI assistant on Collabi
 - When presenting search results, format them nicely with clear headings and key information
 - Use markdown formatting for better readability (bold titles, bullet points, links)
 - Encourage users to explore Collabiora's search features for deeper research
-- **CRITICAL**: When greeting or introducing yourself (e.g. for "hi", "hey", "hello"), say "I'm Iora" and "Collabiora" - never use "CuraBot" or "CuraLink"
+- **CRITICAL**: Never use "CuraBot" or "CuraLink" - always use "Yori" and "Collabiora"
 
 Remember: You're a research assistant, not a replacement for medical advice. Always emphasize the importance of consulting healthcare professionals for personal medical decisions.
 
 **When the user asks about a specific trial**: A formatted card will show the requested information. Keep your text response very brief (1-3 sentences) - do NOT repeat the details that appear in the card. Just add a short contextual note or suggest next steps.`;
+}
 
 /**
  * Detect which trial section(s) the user is asking for - show only that section in the card
@@ -400,7 +410,7 @@ function buildItemContext(itemContext) {
         contextInfo += "\n";
       });
     }
-    contextInfo += `\n\n[Important: Answer only from the trial details above. Use SIMPLIFIED, PLAIN LANGUAGE. Format your response with clear markdown: use ## for main section headers, **bold** for labels, - for bullet points. Include the NCT ID and end with a markdown link: [View full trial on ClinicalTrials.gov](${trialUrl}). Do not dump raw data - synthesize and explain in a helpful way based on the user's question.]`;
+    contextInfo += `\n\n[Important: Answer only from the trial details above. Use SIMPLIFIED, PLAIN LANGUAGE. Format your response with clear markdown: use ## for main section headers, **bold** for labels, - for bullet points. Do NOT include links to ClinicalTrials.gov or any external sites. Do not dump raw data - synthesize and explain in a helpful way based on the user's question.]`;
   } else if (itemContext.type === "publication") {
     contextInfo = `\n\n[User is asking about this specific publication. Use the following information to answer their question accurately. Always cite the PubMed link for verification:]\n\n`;
     contextInfo += `Title: ${item.title || "Unknown"}\n`;
@@ -414,7 +424,7 @@ function buildItemContext(itemContext) {
     if (item.keywords && item.keywords.length > 0) {
       contextInfo += `\nKeywords: ${Array.isArray(item.keywords) ? item.keywords.join(", ") : item.keywords}\n`;
     }
-    contextInfo += `\n\n[Important: Always provide accurate information based on the publication details above. Use SIMPLIFIED, PLAIN LANGUAGE that a general audience can understand - avoid jargon, explain medical/scientific terms when needed, and keep sentences clear and concise. Format your response with clear markdown structure: use ## for main section headers (e.g. ## Key Takeaways), **bold** for subsection labels (e.g. **Nature and Prevalence:**), and - for bullet points. End with a markdown link to PubMed, e.g. [View on PubMed](https://pubmed.ncbi.nlm.nih.gov/PMID/) - do not include raw URLs as plain text.]`;
+    contextInfo += `\n\n[Important: Always provide accurate information based on the publication details above. Use SIMPLIFIED, PLAIN LANGUAGE that a general audience can understand - avoid jargon, explain medical/scientific terms when needed, and keep sentences clear and concise. Format your response with clear markdown structure: use ## for main section headers (e.g. ## Key Takeaways), **bold** for subsection labels (e.g. **Nature and Prevalence:**), and - for bullet points. Do NOT include links to PubMed or any external sites. Do not include raw URLs as plain text.]`;
   } else if (itemContext.type === "expert") {
     const expertName = item.name || "Unknown";
     const profilePath = item.userId || item.id || item._id
@@ -493,10 +503,15 @@ export async function generateChatResponse(messages, res, req = null) {
   const userQuery = lastMessage.content;
   
   // Check if message has context (user asking about a specific item)
+  // Also check request body for context (from detail pages)
   let itemContext = null;
   if (lastMessage.context && lastMessage.context.item) {
     itemContext = lastMessage.context;
     console.log(`[Chatbot] User asking about specific ${itemContext.type}:`, itemContext.item.title || itemContext.item.name);
+  } else if (req && req.body && req.body.context) {
+    // Context passed from request body (detail pages)
+    itemContext = req.body.context;
+    console.log(`[Chatbot] Context from request body: ${itemContext.type}`);
     
     // Fetch detailed information for the item (single-trial detail API for trials)
     try {
@@ -617,18 +632,44 @@ export async function generateChatResponse(messages, res, req = null) {
   try {
     // Convert messages to Gemini format
     // Filter out the initial assistant greeting and only keep actual conversation
-    const chatHistory = messages.slice(0, -1)
-      .filter((msg, index) => {
+    // When context is provided (detail pages), limit history to only messages with matching context
+    let filteredMessages = messages.slice(0, -1);
+    
+    if (itemContext && itemContext.item) {
+      // Limit conversation history to only messages related to the current item
+      const currentItemId = itemContext.item.nctId || itemContext.item.id || itemContext.item.pmid;
+      filteredMessages = filteredMessages.filter((msg, index) => {
         // Skip the first message if it's from assistant (initial greeting)
         if (index === 0 && msg.role === "assistant") {
           return false;
         }
+        // For user messages with context, only keep if they match the current item
+        if (msg.role === "user" && msg.context && msg.context.item) {
+          const msgItemId = msg.context.item.nctId || msg.context.item.id || msg.context.item.pmid;
+          return msgItemId === currentItemId;
+        }
+        // Keep assistant messages (they're responses to context questions)
+        // Keep user messages without context (they'll get context added)
         return true;
-      })
-      .map(msg => ({
-        role: msg.role === "assistant" ? "model" : "user",
-        parts: [{ text: msg.content }],
-      }));
+      });
+    } else {
+      // No context - filter normally (just skip initial greeting)
+      filteredMessages = filteredMessages.filter((msg, index) => {
+        if (index === 0 && msg.role === "assistant") {
+          return false;
+        }
+        return true;
+      });
+    }
+    
+    const chatHistory = filteredMessages.map(msg => ({
+      role: msg.role === "assistant" ? "model" : "user",
+      parts: [{ text: msg.content }],
+    }));
+
+    // Check if this is the first user message (no previous user messages in history)
+    const hasPreviousUserMessages = filteredMessages.some(msg => msg.role === "user");
+    const isFirstMessage = !hasPreviousUserMessages;
 
     // Set headers for SSE (Server-Sent Events)
     res.setHeader("Content-Type", "text/event-stream");
@@ -657,7 +698,7 @@ export async function generateChatResponse(messages, res, req = null) {
       try {
         const summaryModel = geminiInstance.getGenerativeModel({
           model: CHATBOT_MODELS[0],
-          systemInstruction: "You are iora, a health research assistant. Summarize search results concisely in a paragraph. Be accurate and accessible.",
+          systemInstruction: "You are Yori, a health research assistant. Summarize search results concisely in a paragraph. Be accurate and accessible.",
         });
         const summaryResult = await summaryModel.generateContent(summaryPrompt);
         const summaryText = summaryResult?.response?.text?.() ?? "";
@@ -736,15 +777,22 @@ export async function generateChatResponse(messages, res, req = null) {
     let enhancedQuery = userQuery;
     
     // If user is asking about a specific item, enhance the query with item details
-    if (itemContext && itemContext.item) {
+    // Also add instruction to NOT include external links when context is provided
+    if (itemContext && itemContext.item && Object.keys(itemContext.item).length > 0) {
       enhancedQuery = userQuery + buildItemContext(itemContext);
+    } else if (itemContext && itemContext.type) {
+      // Context provided but item might be empty - still add instruction to not include links
+      const noLinksInstruction = itemContext.type === "trial" 
+        ? "\n\n[Important: The user is viewing a specific trial page. Do NOT include links to ClinicalTrials.gov or any external sites in your response. Answer their question directly using the information available. Do not mention visiting external websites.]"
+        : "\n\n[Important: The user is viewing a specific publication page. Do NOT include links to PubMed or any external sites in your response. Answer their question directly using the information available. Do not mention visiting external websites.]";
+      enhancedQuery = userQuery + noLinksInstruction;
     }
 
     for (const modelName of CHATBOT_MODELS) {
       try {
         const model = geminiInstance.getGenerativeModel({
           model: modelName,
-          systemInstruction: SYSTEM_PROMPT,
+          systemInstruction: getSystemPrompt(isFirstMessage),
         });
         const chat = model.startChat({
           history: chatHistory,
@@ -780,24 +828,45 @@ export async function generateChatResponse(messages, res, req = null) {
     if (genAI && genAI2) {
       try {
         const alternateInstance = getGeminiInstance(true);
-        const model = alternateInstance.getGenerativeModel({
-          model: "gemini-2.5-flash",
-          systemInstruction: SYSTEM_PROMPT,
-        });
-
+        
         // Filter out the initial assistant greeting
-        const chatHistory = messages.slice(0, -1)
-          .filter((msg, index) => {
-            // Skip the first message if it's from assistant (initial greeting)
+        // When context is provided, limit history to matching context messages
+        let filteredMessages = messages.slice(0, -1);
+        
+        if (itemContext && itemContext.item) {
+          const currentItemId = itemContext.item.nctId || itemContext.item.id || itemContext.item.pmid;
+          filteredMessages = filteredMessages.filter((msg, index) => {
+            if (index === 0 && msg.role === "assistant") {
+              return false;
+            }
+            if (msg.role === "user" && msg.context && msg.context.item) {
+              const msgItemId = msg.context.item.nctId || msg.context.item.id || msg.context.item.pmid;
+              return msgItemId === currentItemId;
+            }
+            return true;
+          });
+        } else {
+          filteredMessages = filteredMessages.filter((msg, index) => {
             if (index === 0 && msg.role === "assistant") {
               return false;
             }
             return true;
-          })
-          .map(msg => ({
-            role: msg.role === "assistant" ? "model" : "user",
-            parts: [{ text: msg.content }],
-          }));
+          });
+        }
+        
+        const chatHistory = filteredMessages.map(msg => ({
+          role: msg.role === "assistant" ? "model" : "user",
+          parts: [{ text: msg.content }],
+        }));
+
+        // Check if this is the first user message (no previous user messages in history)
+        const hasPreviousUserMessages = filteredMessages.some(msg => msg.role === "user");
+        const isFirstMessage = !hasPreviousUserMessages;
+
+        const model = alternateInstance.getGenerativeModel({
+          model: "gemini-2.5-flash",
+          systemInstruction: getSystemPrompt(isFirstMessage),
+        });
 
         res.setHeader("Content-Type", "text/event-stream");
         res.setHeader("Cache-Control", "no-cache");
@@ -841,8 +910,14 @@ export async function generateChatResponse(messages, res, req = null) {
 
         // Generate AI response with item context if available
         let enhancedQuery = userQuery;
-        if (itemContext && itemContext.item) {
+        if (itemContext && itemContext.item && Object.keys(itemContext.item).length > 0) {
           enhancedQuery = userQuery + buildItemContext(itemContext);
+        } else if (itemContext && itemContext.type) {
+          // Context provided but item might be empty - still add instruction to not include links
+          const noLinksInstruction = itemContext.type === "trial" 
+            ? "\n\n[Important: The user is viewing a specific trial page. Do NOT include links to ClinicalTrials.gov or any external sites in your response. Answer their question directly using the information available. Do not mention visiting external websites.]"
+            : "\n\n[Important: The user is viewing a specific publication page. Do NOT include links to PubMed or any external sites in your response. Answer their question directly using the information available. Do not mention visiting external websites.]";
+          enhancedQuery = userQuery + noLinksInstruction;
         }
 
         const chat = model.startChat({

@@ -119,6 +119,7 @@ router.get("/admin/experts", verifyAdmin, async (req, res) => {
         email: user.email,
         accountCreated: user.createdAt || null,
         orcid: researcher.orcid || null,
+        verificationDocumentUrl: researcher.verificationDocumentUrl || null,
         researchGate: researcher.researchGate || null,
         researchGateVerification,
         academiaEdu: researcher.academiaEdu || null,
