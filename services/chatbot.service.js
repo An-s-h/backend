@@ -88,6 +88,10 @@ ${introductionNote}
 - Encourage users to explore Collabiora's search features for deeper research
 - **CRITICAL**: Never use "CuraBot" or "CuraLink" - always use "Yori" and "Collabiora"
 
+**Conversation consistency**: Stay consistent throughout the entire conversation. Do not contradict your prior answers. If the user follows up on a topic you already discussed, build on that context rather than restarting. Maintain the same tone, depth, and approach across turns.
+
+**Citations and publications**: When making medical or research claims (treatments, conditions, study findings, trends), include supporting publications when possible. Cite PMIDs, journal names, or provide links so users can verify and explore further. When sources are provided with your response (e.g., "Sources" section), reference them inline (e.g., "According to recent research [1]..."). If you cannot cite a specific source, recommend that users search PubMed or consult their healthcare provider for verification.
+
 Remember: You're a research assistant, not a replacement for medical advice. Always emphasize the importance of consulting healthcare professionals for personal medical decisions.
 
 **When the user asks about a specific trial**: A formatted card will show the requested information. Keep your text response very brief (1-3 sentences) - do NOT repeat the details that appear in the card. Just add a short contextual note or suggest next steps.`;
@@ -105,8 +109,9 @@ function detectTrialSectionFocus(query) {
 }
 
 /**
- * Detect "general knowledge" / "web overview" questions - e.g. trends, research patterns.
- * EXCLUDES "recent publications" and "recent trials" - those fetch from our APIs instead.
+ * Detect "general knowledge" / "web overview" questions - e.g. trends, research patterns, medical info.
+ * Uses Google Search grounding to provide citations. EXCLUDES "recent publications" and "recent trials"
+ * - those fetch from our APIs instead.
  */
 function detectGeneralKnowledgeIntent(query) {
   const q = query.toLowerCase().trim();
@@ -115,6 +120,7 @@ function detectGeneralKnowledgeIntent(query) {
   if (/\b(recent|latest)\s+(publications?|trials?)\s+(on|for|about)\b/.test(q)) return false;
   if (/\bshow\s+me\s+(recent|latest)\s+(publications?|trials?)\b/.test(q)) return false;
   const patterns = [
+    // Trends and research overviews
     /\b(recent|latest|newest|current)\s+(research|studies?|findings?|developments?)\b/,
     /\b(recent|latest|trends?)\s+(in|on)\s+(?!publications?|trials?)/,
     /\b(overview|summary)\s+of\s+.+\s+research\b/,
@@ -122,6 +128,11 @@ function detectGeneralKnowledgeIntent(query) {
     /\b(trends?|developments?)\s+(in|in the)\s+(latest|current)\b/,
     /\bresearch\s+patterns?\b/,
     /\b(trends?|latest)\s+in\s+(parkinson|diabetes|alzheimer|cancer|heart)\b/i,
+    // Medical/health info that benefits from grounded citations
+    /\bwhat\s+(are|is)\s+(the\s+)?(symptoms?|treatments?|causes?|risk\s+factors?)\s+(of|for)\b/,
+    /\b(how\s+is|how\s+do\s+you\s+treat|what\s+treatments?)\s+(exist\s+for)?\b/,
+    /\blatest\s+(research|evidence|studies?)\s+(on|about|for)\b/,
+    /\bcurrent\s+(understanding|evidence|research)\s+(on|about)\b/,
   ];
   return patterns.some((p) => p.test(q));
 }
@@ -577,7 +588,7 @@ export async function generateChatResponse(messages, res, req = null) {
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
 
-      const prompt = `${userQuery}\n\nProvide a clear paragraph overview using recent web sources. Focus on summarizing key information (e.g. recent research, publications, trials, or trends). Use accessible language. End with a brief note that sources are listed below.`;
+      const prompt = `${userQuery}\n\nYou are Yori, a health research assistant on Collabiora. Provide a clear, accurate overview using recent web sources. Focus on summarizing key information (research, treatments, trends, or medical concepts). Use accessible language. When making claims, reference sources inline where possible (e.g., "According to [1]..."). End with a brief note that sources are listed below for further reading.`;
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: prompt,
@@ -798,9 +809,9 @@ export async function generateChatResponse(messages, res, req = null) {
           history: chatHistory,
           generationConfig: {
             maxOutputTokens: 2048,
-            temperature: 0.7,
-            topP: 0.9,
-            topK: 40,
+            temperature: 0.35,
+            topP: 0.85,
+            topK: 32,
           },
         });
         const result = await chat.sendMessageStream(enhancedQuery);
@@ -924,9 +935,9 @@ export async function generateChatResponse(messages, res, req = null) {
           history: chatHistory,
           generationConfig: {
             maxOutputTokens: 2048,
-            temperature: 0.7,
-            topP: 0.9,
-            topK: 40,
+            temperature: 0.35,
+            topP: 0.85,
+            topK: 32,
           },
         });
 

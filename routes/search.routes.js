@@ -544,8 +544,7 @@ router.get("/search/publications", async (req, res) => {
     // This ensures results are sorted across all pages, not just within each page
     const requestedPage = parseInt(page, 10);
     const requestedPageSize = parseInt(pageSize, 10);
-    // Fetch up to 300 results; efetch uses POST to avoid 414 URI Too Long
-    const batchSize = Math.min(300, Math.max(100, requestedPageSize * 50));
+    const batchSize = Math.min(500, Math.max(100, requestedPageSize * 50));
 
     const pubmedResult = await searchPubMed({
       q: pubmedQuery,

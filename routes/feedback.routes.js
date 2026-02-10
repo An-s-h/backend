@@ -7,7 +7,22 @@ const router = Router();
 // Submit feedback
 router.post("/feedback", async (req, res) => {
   try {
-    const { userId, rating, comment, pageUrl } = req.body;
+    const {
+      userId,
+      rating,
+      comment,
+      pageUrl,
+
+      // Structured survey fields from Collabiora feedback modal
+      role,
+      purposes,
+      experience,
+      found,
+      mostValuable,
+      confusing,
+      returnLikelihood,
+      improvement,
+    } = req.body;
 
     if (!userId || !rating) {
       return res.status(400).json({ error: "Missing required fields" });
@@ -25,9 +40,25 @@ router.post("/feedback", async (req, res) => {
       username: user.username || "Unknown",
       email: user.email,
       rating,
-      comment: comment || "",
+      // Prefer explicit improvement text if provided; fall back to raw comment
+      comment: improvement || comment || "",
       pageUrl: pageUrl || req.headers.referer || "Unknown",
       userAgent: req.headers["user-agent"] || "Unknown",
+
+      // Persist structured survey data separately for admin analytics
+      surveyRole: role || null,
+      surveyPurposes: Array.isArray(purposes) ? purposes : [],
+      surveyExperience: experience || null,
+      surveyFound: found || null,
+      surveyMostValuable: Array.isArray(mostValuable) ? mostValuable : [],
+      surveyConfusing: Array.isArray(confusing) ? confusing : [],
+      surveyReturnLikelihood:
+        typeof returnLikelihood === "number"
+          ? returnLikelihood
+          : returnLikelihood != null
+            ? Number(returnLikelihood)
+            : null,
+      surveyImprovement: improvement || "",
     });
 
     res.json({ ok: true, feedback });
@@ -87,6 +118,22 @@ router.get("/feedback/stats", async (req, res) => {
   } catch (error) {
     console.error("Error fetching feedback stats:", error);
     res.status(500).json({ error: "Failed to fetch feedback stats" });
+  }
+});
+
+// Check if a user has already submitted any feedback
+router.get("/feedback/has-submitted/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!userId) {
+      return res.status(400).json({ error: "Missing userId" });
+    }
+
+    const count = await Feedback.countDocuments({ userId });
+    res.json({ hasSubmitted: count > 0 });
+  } catch (error) {
+    console.error("Error checking feedback submission:", error);
+    res.status(500).json({ error: "Failed to check feedback submission" });
   }
 });
 

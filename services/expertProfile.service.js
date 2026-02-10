@@ -233,7 +233,6 @@ export async function getExpertProfile(expertData) {
   if (!expertData || !expertData.name) {
     throw new Error("Expert name is required");
   }
-
   const cacheKey = getCacheKey(expertData.name);
   const cached = getCache(cacheKey);
   if (cached) {
@@ -241,11 +240,26 @@ export async function getExpertProfile(expertData) {
   }
 
   try {
-    // Fetch publications
-    const publications = await searchGoogleScholarPublications({
-      author: expertData.name,
-      num: 20,
-    });
+    // Fetch publications (Google Scholar) with timeout and reduced count to improve latency
+    let publications = [];
+    const PUBLICATIONS_TIMEOUT_MS = 4000;
+    try {
+      publications = await Promise.race([
+        searchGoogleScholarPublications({
+          author: expertData.name,
+          num: 10,
+        }),
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error("searchGoogleScholarPublications timeout")),
+            PUBLICATIONS_TIMEOUT_MS,
+          ),
+        ),
+      ]);
+    } catch (error) {
+      console.error("Error searching Google Scholar:", error.message);
+      publications = [];
+    }
 
     // Extract additional data
     const researchInterests = extractResearchInterests(publications);
@@ -260,11 +274,23 @@ export async function getExpertProfile(expertData) {
       publications: topPublications,
     }).catch(() => null); // Fallback if AI generation fails
 
-    // Find associated clinical trials
-    const associatedTrials = await findAssociatedTrials(
-      expertData.name,
-      researchInterests
-    );
+    // Find associated clinical trials (with timeout to avoid blocking profile load too long)
+    let associatedTrials = [];
+    const TRIALS_TIMEOUT_MS = 3000;
+    try {
+      associatedTrials = await Promise.race([
+        findAssociatedTrials(expertData.name, researchInterests),
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error("findAssociatedTrials timeout")),
+            TRIALS_TIMEOUT_MS,
+          ),
+        ),
+      ]);
+    } catch (error) {
+      console.error("Error finding associated trials:", error.message);
+      associatedTrials = [];
+    }
 
     // Build comprehensive profile
     const profile = {

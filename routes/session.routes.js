@@ -82,19 +82,22 @@ router.post("/auth/register", async (req, res) => {
   }
 });
 
-// POST /api/auth/login - Login with email and password
+// POST /api/auth/login - Login with email and password (role optional; resolved from account)
 router.post("/auth/login", async (req, res) => {
   const { email, password, role } = req.body || {};
 
-  if (!email || !password || !["patient", "researcher"].includes(role)) {
+  if (!email || !password) {
     return res
       .status(400)
-      .json({ error: "email, password, and role are required" });
+      .json({ error: "Email and password are required" });
   }
 
   try {
-    // Find user by email and role
-    const user = await User.findOne({ email, role });
+    // Find user by email; if role provided, use it to disambiguate (same email can be patient + researcher)
+    const query = role && ["patient", "researcher"].includes(role)
+      ? { email, role }
+      : { email };
+    const user = await User.findOne(query).sort({ updatedAt: -1 });
 
     if (!user) {
       return res.status(401).json({ error: "Invalid email or password" });
