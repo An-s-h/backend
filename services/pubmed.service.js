@@ -60,9 +60,10 @@ export async function searchPubMed({
   page = 1,
   pageSize = 9,
   sort = "relevance", // "relevance" | "date" - use "date" for recent/latest
+  skipParsing = false, // Skip query parsing for pre-formatted queries with field tags
 } = {}) {
   // Build cache key with all parameters
-  const key = `pm:${q}:${mindate}:${maxdate}:${page}:${pageSize}:${sort}`;
+  const key = `pm:${q}:${mindate}:${maxdate}:${page}:${pageSize}:${sort}:${skipParsing}`;
   const cached = getCache(key);
   if (cached) return cached;
 
@@ -71,7 +72,8 @@ export async function searchPubMed({
     const esearchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi`;
 
     // Parse query to handle Google Scholar operators and minus sign NOT
-    let searchTerm = q ? parseQuery(q) : "";
+    // Skip parsing if the query already has field tags (e.g., PMC ID, PMID, exact title searches)
+    let searchTerm = q ? (skipParsing ? q : parseQuery(q)) : "";
 
     // Check if query already contains date filter [dp] tag
     const queryHasDateFilter = hasDateFilter(searchTerm);

@@ -519,9 +519,75 @@ router.get("/search/publications", async (req, res) => {
       pageSize,
     });
 
-    // Build query with ATM-style expansion (MeSH + synonyms) unless user forces field tags
-    const atmQueryMeta = buildATMQuery(q || "");
-    let pubmedQuery = atmQueryMeta.pubmedQuery;
+    // Check if query is a PMC ID (e.g., "PMC3344234" or "3344234")
+    const pmcIdMatch = q?.match(/^(PMC)?(\d{7,8})$/i);
+    // Check if query is a PMID (PubMed ID) - typically 8 digits without PMC prefix
+    const pmidMatch = q?.match(/^(\d{7,8})$/);
+    let pubmedQuery = "";
+    let atmQueryMeta = null;
+
+    if (pmcIdMatch && pmcIdMatch[1]) {
+      // PMC ID search with PMC prefix - use exact PMC ID field tag
+      const pmcId = q;
+      pubmedQuery = `${pmcId}[PMCID]`;
+      console.log("PMC ID search detected:", pmcId);
+      atmQueryMeta = {
+        pubmedQuery,
+        queryTerms: [],
+        rawQueryLower: (q || "").toLowerCase().trim(),
+        hasFieldTags: true,
+        isPmcSearch: true,
+      };
+    } else if (pmidMatch) {
+      // PMID search (just numbers, could be PMID or PMC without prefix)
+      // Try both PMID and PMCID for better coverage
+      const numericId = pmidMatch[1];
+      pubmedQuery = `${numericId}[PMID] OR PMC${numericId}[PMCID]`;
+      console.log("PMID/PMC numeric search detected:", numericId);
+      atmQueryMeta = {
+        pubmedQuery,
+        queryTerms: [],
+        rawQueryLower: (q || "").toLowerCase().trim(),
+        hasFieldTags: true,
+        isPmidSearch: true,
+      };
+    } else if (q && q.length > 30) {
+      // Long query likely to be an exact title - search in title field
+      // PubMed's exact phrase matching with "phrase"[Title] FAILS on special characters
+      // like apostrophes, colons, periods, etc. (returns 0 results).
+      // Instead, split into significant words and AND them together with [ti] field tags.
+      // e.g. "Oncology's trial and error: Analysis" → Oncology[ti] AND trial[ti] AND error[ti] AND Analysis[ti]
+      const titleStopWords = new Set([
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
+        "of", "with", "by", "is", "are", "was", "were", "be", "been", "its",
+        "it", "as", "from", "that", "this", "than", "into", "not", "no",
+      ]);
+      const titleWords = q
+        .replace(/[^\w\s-]/g, " ")  // Strip punctuation (apostrophes, colons, periods, etc.)
+        .split(/\s+/)
+        .map((w) => w.trim())
+        .filter((w) => w.length >= 2 && !titleStopWords.has(w.toLowerCase()));
+
+      if (titleWords.length > 0) {
+        // Use each significant word with [ti] joined by AND for precise title matching
+        pubmedQuery = titleWords.map((w) => `${w}[ti]`).join(" AND ");
+      } else {
+        // Fallback: just use the raw query
+        pubmedQuery = q;
+      }
+      console.log("Exact title search detected:", pubmedQuery);
+      atmQueryMeta = {
+        pubmedQuery,
+        queryTerms: tokenizeForRelevance(q),
+        rawQueryLower: (q || "").toLowerCase().trim(),
+        hasFieldTags: true,
+        isExactTitleSearch: true,
+      };
+    } else {
+      // Build query with ATM-style expansion (MeSH + synonyms) unless user forces field tags
+      atmQueryMeta = buildATMQuery(q || "");
+      pubmedQuery = atmQueryMeta.pubmedQuery;
+    }
 
     // Add location (country) to query if provided and not already in advanced query
     if (location && !atmQueryMeta.hasFieldTags) {
@@ -553,6 +619,9 @@ router.get("/search/publications", async (req, res) => {
       page: 1, // Always fetch from page 1 for the batch
       pageSize: batchSize, // Fetch larger batch for sorting
       sort: sortByDate === "true" || sortByDate === true ? "date" : "relevance",
+      // Skip query parsing for PMC ID, PMID, and exact title searches
+      // to preserve the field tags we've carefully crafted
+      skipParsing: atmQueryMeta.isPmcSearch || atmQueryMeta.isPmidSearch || atmQueryMeta.isExactTitleSearch,
     });
 
     console.log(
@@ -562,10 +631,13 @@ router.get("/search/publications", async (req, res) => {
       pubmedResult.items?.length,
     );
 
-    // Filter out publications without abstracts
-    const allResults = (pubmedResult.items || []).filter(
-      (pub) => pub.abstract && pub.abstract.trim().length > 0,
-    );
+    // Filter out publications without abstracts (but not for exact searches -
+    // when user searches by title/ID they want that specific publication regardless)
+    const allResults = (atmQueryMeta.isExactTitleSearch || atmQueryMeta.isPmcSearch || atmQueryMeta.isPmidSearch)
+      ? (pubmedResult.items || [])
+      : (pubmedResult.items || []).filter(
+          (pub) => pub.abstract && pub.abstract.trim().length > 0,
+        );
 
     // Build user profile for matching
     let userProfile = null;
@@ -637,6 +709,20 @@ router.get("/search/publications", async (req, res) => {
     let scoredResults;
     if (q) {
       scoredResults = resultsWithMatch.map((publication) => {
+        // For PMC ID, PMID, or exact title searches, give perfect relevance score
+        if (atmQueryMeta.isPmcSearch || atmQueryMeta.isPmidSearch || atmQueryMeta.isExactTitleSearch) {
+          return {
+            ...publication,
+            queryRelevanceScore: 1.0, // Perfect match
+            queryMatchCount: 1,
+            queryTermCount: 1,
+            significantTermMatches: 1,
+            recencyWeight: 0,
+            hasNctLink: false,
+          };
+        }
+        
+        // Normal relevance calculation for regular searches
         const signals = calculatePublicationRelevanceSignals(
           publication,
           atmQueryMeta,
@@ -658,7 +744,8 @@ router.get("/search/publications", async (req, res) => {
 
     // Filter out results with very low query relevance (likely false positives)
     // Use 0.25 threshold to keep more relevant results (PubMed shows more; we were too aggressive at 0.5)
-    if (q) {
+    // Skip filtering for PMC ID, PMID, and exact title searches (we want all results)
+    if (q && !atmQueryMeta.isPmcSearch && !atmQueryMeta.isPmidSearch && !atmQueryMeta.isExactTitleSearch) {
       scoredResults = scoredResults.filter((publication) => {
         const relevance = publication.queryRelevanceScore || 0;
         // Keep if: exact phrase match (1.0), or relevance >= 0.25 (relaxed for more PubMed-like results)

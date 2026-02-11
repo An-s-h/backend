@@ -41,7 +41,7 @@ function getCache(key) {
 
 function setCache(key, value) {
   cache.set(key, { value, expires: Date.now() + CACHE_TTL_MS });
-  
+
   // Cleanup old cache entries
   if (cache.size > 500) {
     const now = Date.now();
@@ -111,12 +111,12 @@ Guidelines:
         });
       },
       "gemini-2.5-flash-lite",
-      1200
+      1200,
     );
 
     const responseText = result.response.text().trim();
     let jsonText = responseText;
-    
+
     // Clean markdown code blocks if present
     if (jsonText.startsWith("```")) {
       jsonText = jsonText
@@ -132,9 +132,12 @@ Guidelines:
     }
 
     const constraints = JSON.parse(jsonText);
-    
+
     // Validate structure
-    if (!constraints.primaryKeywords || !Array.isArray(constraints.primaryKeywords)) {
+    if (
+      !constraints.primaryKeywords ||
+      !Array.isArray(constraints.primaryKeywords)
+    ) {
       throw new Error("Invalid constraints structure");
     }
 
@@ -164,7 +167,7 @@ async function searchOpenAlexWorks(constraints, location) {
   const cacheKey = getCacheKey(
     "openalex-works",
     JSON.stringify(constraints),
-    location || "global"
+    location || "global",
   );
   const cached = getCache(cacheKey);
   if (cached) return cached;
@@ -175,10 +178,10 @@ async function searchOpenAlexWorks(constraints, location) {
     .filter(Boolean)
     .slice(0, 3) // Use top 3 most relevant terms
     .join(" ");
-  
+
   // Build filter array (without concepts.display_name)
   const filters = [];
-  
+
   // Location filter (country code)
   if (location) {
     const countryCode = extractCountryCode(location);
@@ -186,14 +189,14 @@ async function searchOpenAlexWorks(constraints, location) {
       filters.push(`authorships.institutions.country_code:${countryCode}`);
     }
   }
-  
+
   // Publication year filter (last 5 years for recent research)
   // OpenAlex uses > not >= for range queries
   const currentYear = new Date().getFullYear();
   filters.push(`publication_year:>${currentYear - 6}`); // Last 5 years: >2019 for 2026
-  
+
   const filterString = filters.join(",");
-  
+
   try {
     const url = "https://api.openalex.org/works";
     const params = {
@@ -203,29 +206,39 @@ async function searchOpenAlexWorks(constraints, location) {
       sort: "cited_by_count:desc", // Sort by citations to get influential works
       mailto: process.env.OPENALEX_MAILTO || "support@curalink.com",
     };
-    
+
     // Build full URL for debugging
     const fullUrl = `${url}?${new URLSearchParams(params).toString()}`;
-    
+
     console.log("Calling OpenAlex:", fullUrl.substring(0, 200) + "...");
 
     const response = await axios.get(url, {
       params,
       headers: {
-        "User-Agent": "CuraLink/1.0 (expert discovery; mailto:support@curalink.com)",
+        "User-Agent":
+          "CuraLink/1.0 (expert discovery; mailto:support@curalink.com)",
       },
       timeout: 30000, // Increased to 30 seconds
     });
-    
-    console.log("OpenAlex responded with", response.data?.results?.length || 0, "works");
-    
+
+    console.log(
+      "OpenAlex responded with",
+      response.data?.results?.length || 0,
+      "works",
+    );
+
     const works = response.data?.results || [];
-    
+
     setCache(cacheKey, works);
     return works;
   } catch (error) {
-    const isTimeout = error.code === 'ECONNABORTED' || error.message?.includes('timeout');
-    console.error("Error searching OpenAlex works:", error.message, isTimeout ? "(TIMEOUT)" : "");
+    const isTimeout =
+      error.code === "ECONNABORTED" || error.message?.includes("timeout");
+    console.error(
+      "Error searching OpenAlex works:",
+      error.message,
+      isTimeout ? "(TIMEOUT)" : "",
+    );
     return [];
   }
 }
@@ -245,10 +258,10 @@ function extractAndAggregateAuthors(works, constraints, location = null) {
     const year = work.publication_year || 0;
     const citationCount = work.cited_by_count || 0;
     const authorships = work.authorships || [];
-    
+
     // Calculate work relevance to topic
     const workRelevance = calculateWorkRelevance(work, constraints);
-    
+
     // Skip irrelevant works
     if (workRelevance < 0.3) continue;
 
@@ -281,7 +294,7 @@ function extractAndAggregateAuthors(works, constraints, location = null) {
       }
 
       const authorData = authorMap.get(authorId);
-      
+
       // Aggregate data
       authorData.works.push({
         id: work.id,
@@ -292,27 +305,27 @@ function extractAndAggregateAuthors(works, constraints, location = null) {
         doi: work.doi,
         relevance: workRelevance,
       });
-      
+
       authorData.totalCitations += citationCount;
       authorData.relevanceScore += workRelevance;
-      
+
       if (year >= currentYear - 2) {
         authorData.recentWorks++;
       }
-      
+
       if (position === "last") {
         authorData.lastAuthorCount++;
       }
-      
+
       if (position === "first") {
         authorData.firstAuthorCount++;
       }
-      
+
       // Track DOIs for cross-referencing
       if (work.doi) {
         authorData.dois.add(work.doi);
       }
-      
+
       // Track institutions and raw institution names for location matching
       for (const inst of institutions) {
         if (inst.display_name) {
@@ -339,22 +352,28 @@ function extractAndAggregateAuthors(works, constraints, location = null) {
   let authors = Array.from(authorMap.values()).map((author) => ({
     ...author,
     institutions: Array.from(author.institutions),
-    institutionNamesLower: author.institutionNamesLower ? Array.from(author.institutionNamesLower) : [],
+    institutionNamesLower: author.institutionNamesLower
+      ? Array.from(author.institutionNamesLower)
+      : [],
     dois: Array.from(author.dois),
     countryCodes: Array.from(author.countryCodes), // Convert Set to Array
     avgRelevance: author.relevanceScore / author.works.length,
   }));
-  
+
   // FILTER: Apply location filter if specified (STRICT filtering)
   if (location) {
     const beforeFilter = authors.length;
-    authors = authors.filter((author) => authorMatchesLocation(author, location));
+    authors = authors.filter((author) =>
+      authorMatchesLocation(author, location),
+    );
     const afterFilter = authors.length;
     if (beforeFilter !== afterFilter) {
-      console.log(`Location filter "${location}": ${beforeFilter} → ${afterFilter} authors (filtered out ${beforeFilter - afterFilter})`);
+      console.log(
+        `Location filter "${location}": ${beforeFilter} → ${afterFilter} authors (filtered out ${beforeFilter - afterFilter})`,
+      );
     }
   }
-  
+
   return authors;
 }
 
@@ -364,7 +383,7 @@ function extractAndAggregateAuthors(works, constraints, location = null) {
  */
 function calculateWorkRelevance(work, constraints) {
   const title = (work.title || "").toLowerCase();
-  
+
   // Check if primary keywords appear in title or concepts
   let score = 0;
 
@@ -379,27 +398,27 @@ function calculateWorkRelevance(work, constraints) {
   const relevantConcepts = (work.concepts || []).filter((concept) => {
     const conceptName = (concept.display_name || "").toLowerCase();
     const conceptScore = concept.score || 0;
-    
+
     // Check if concept matches our keywords
     for (const keyword of constraints.primaryKeywords || []) {
       if (conceptName.includes(keyword.toLowerCase()) && conceptScore > 0.3) {
         return true;
       }
     }
-    
+
     // Check subfields
     for (const subfield of constraints.subfields || []) {
       if (conceptName.includes(subfield.toLowerCase()) && conceptScore > 0.2) {
         return true;
       }
     }
-    
+
     return false;
   });
 
   // If OpenAlex tagged it with our concepts, it's relevant
   if (relevantConcepts.length > 0) {
-    score += 0.4 + (relevantConcepts[0].score * 0.1);
+    score += 0.4 + relevantConcepts[0].score * 0.1;
   }
 
   // If work was returned by OpenAlex search, give it base relevance
@@ -422,7 +441,7 @@ async function crossReferenceSemanticScholar(authorCandidates) {
     try {
       // Search by name in Semantic Scholar
       const s2Author = await searchSemanticScholarByName(candidate.name);
-      
+
       if (!s2Author) continue;
 
       // Cross-check: Check for DOI overlap (preferred but not required)
@@ -431,16 +450,16 @@ async function crossReferenceSemanticScholar(authorCandidates) {
         s2Papers
           .map((p) => p.externalIds?.DOI)
           .filter(Boolean)
-          .map((doi) => doi.toLowerCase())
+          .map((doi) => doi.toLowerCase()),
       );
 
       const candidateDOIs = new Set(
-        Array.from(candidate.dois).map((doi) => doi.toLowerCase())
+        Array.from(candidate.dois).map((doi) => doi.toLowerCase()),
       );
 
       // Calculate DOI intersection
       const intersection = new Set(
-        [...candidateDOIs].filter((doi) => s2DOIs.has(doi))
+        [...candidateDOIs].filter((doi) => s2DOIs.has(doi)),
       );
 
       // Verification strategy: Accept if EITHER:
@@ -448,14 +467,18 @@ async function crossReferenceSemanticScholar(authorCandidates) {
       // 2. Good name match + reasonable paper count (acceptable verification)
       const hasDOIOverlap = intersection.size > 0;
       const hasReasonablePaperCount = (s2Author.paperCount || 0) >= 5;
-      const nameMatchScore = calculateNameSimilarity(candidate.name, s2Author.name || "");
+      const nameMatchScore = calculateNameSimilarity(
+        candidate.name,
+        s2Author.name || "",
+      );
       const hasGoodNameMatch = nameMatchScore >= 0.7;
-      
-      const isVerified = hasDOIOverlap || (hasGoodNameMatch && hasReasonablePaperCount);
-      
+
+      const isVerified =
+        hasDOIOverlap || (hasGoodNameMatch && hasReasonablePaperCount);
+
       if (!isVerified) {
         console.log(
-          `Skipping ${candidate.name}: No DOI overlap and weak verification (nameMatch=${nameMatchScore.toFixed(2)}, papers=${s2Author.paperCount})`
+          `Skipping ${candidate.name}: No DOI overlap and weak verification (nameMatch=${nameMatchScore.toFixed(2)}, papers=${s2Author.paperCount})`,
         );
         continue;
       }
@@ -482,7 +505,7 @@ async function crossReferenceSemanticScholar(authorCandidates) {
     } catch (error) {
       console.error(
         `Error verifying ${candidate.name} with Semantic Scholar:`,
-        error.message
+        error.message,
       );
       // Skip on error - don't include unverified authors
     }
@@ -509,7 +532,8 @@ async function searchSemanticScholarByName(name) {
     const params = {
       query: name,
       limit: 5,
-      fields: "authorId,name,affiliations,paperCount,citationCount,hIndex,url,externalIds",
+      fields:
+        "authorId,name,affiliations,paperCount,citationCount,hIndex,url,externalIds",
     };
 
     const response = await axios.get(url, {
@@ -555,7 +579,7 @@ async function fetchSemanticScholarPapers(authorId) {
     }
 
     const url = `https://api.semanticscholar.org/graph/v1/author/${encodeURIComponent(
-      authorId
+      authorId,
     )}/papers`;
     const params = {
       limit: 100,
@@ -621,7 +645,7 @@ function computeFieldRelevance(author, constraints) {
   const primaryKeywords = (constraints.primaryKeywords || [])
     .filter(Boolean)
     .map((k) => k.toLowerCase());
-  
+
   const allKeywords = [
     ...primaryKeywords,
     ...(constraints.subfields || []),
@@ -643,20 +667,20 @@ function computeFieldRelevance(author, constraints) {
 
   for (const work of allWorks) {
     const title = (work.title || "").toLowerCase();
-    
+
     // STRICT: Check for PRIMARY keywords first (required for strong relevance)
     const hasPrimaryKeyword = primaryKeywords.some((kw) => title.includes(kw));
-    
+
     // Also check work relevance score (from OpenAlex concepts)
     const workRelevance = work.relevance || 0;
-    
+
     if (hasPrimaryKeyword || workRelevance >= 0.6) {
       // Strong match: primary keyword in title OR high OpenAlex relevance
       stronglyRelevantCount++;
     } else {
       // Moderate match: subfield keywords OR medium relevance
-      const hasSubfieldKeyword = (constraints.subfields || []).some((sf) => 
-        title.includes(sf.toLowerCase())
+      const hasSubfieldKeyword = (constraints.subfields || []).some((sf) =>
+        title.includes(sf.toLowerCase()),
       );
       if (hasSubfieldKeyword || workRelevance >= 0.4) {
         moderatelyRelevantCount++;
@@ -667,17 +691,17 @@ function computeFieldRelevance(author, constraints) {
   // Weighted scoring: strongly relevant works count more
   const strongScore = (stronglyRelevantCount / totalWorks) * 1.0;
   const moderateScore = (moderatelyRelevantCount / totalWorks) * 0.3;
-  
+
   // Require at least SOME primary keyword matches to avoid off-topic researchers
   const fieldScore = strongScore + moderateScore;
-  
+
   // Penalty: if less than 10% of works have primary keywords, heavily penalize
   const primaryKeywordRatio = stronglyRelevantCount / totalWorks;
   if (primaryKeywordRatio < 0.1 && totalWorks >= 5) {
     // Researcher has many works but few are topic-relevant → likely off-topic
     return fieldScore * 0.3; // Heavy penalty
   }
-  
+
   return Math.min(1.0, fieldScore);
 }
 
@@ -698,9 +722,10 @@ function applySanityChecks(author) {
     junkProfile: worksCount > 50 && citedByCount < 100,
     impossibleHIndex: hIndex > worksCount,
   };
-  
-  const passed = !checks.noCitations && !checks.junkProfile && !checks.impossibleHIndex;
-  
+
+  const passed =
+    !checks.noCitations && !checks.junkProfile && !checks.impossibleHIndex;
+
   return passed;
 }
 
@@ -713,11 +738,11 @@ function applySanityChecks(author) {
  */
 function calculateRecencyDecay(publicationYear, currentYear) {
   if (!publicationYear || publicationYear <= 0) return 0;
-  
+
   const yearsAgo = currentYear - publicationYear;
-  
+
   if (yearsAgo < 0) return 1.0; // Future publications (shouldn't happen, but handle gracefully)
-  
+
   // Extended duration scoring for experts
   if (yearsAgo <= 4) return 1.0; // 0-4 years ago: weight 1.0
   if (yearsAgo >= 5 && yearsAgo <= 7) return 0.7; // 5-7 years ago: weight 0.7
@@ -734,19 +759,19 @@ function calculateRecencyDecay(publicationYear, currentYear) {
  */
 function calculateAuthorRecencyScore(works, currentYear) {
   if (!works || works.length === 0) return 0;
-  
+
   let totalDecayScore = 0;
   let validWorks = 0;
-  
+
   for (const work of works) {
     const year = work.year || 0;
     if (year <= 0) continue;
-    
+
     const decayScore = calculateRecencyDecay(year, currentYear);
     totalDecayScore += decayScore;
     validWorks++;
   }
-  
+
   // Average decay score across all works
   return validWorks > 0 ? totalDecayScore / validWorks : 0;
 }
@@ -762,11 +787,16 @@ function rankAuthorsByMetrics(authors, location = null) {
 
   const rankedAuthors = authors
     .map((author) => {
+      const citationCount =
+        author.realCitationCount ?? author.totalCitations ?? 0;
       // Balanced scoring across all key dimensions
       const worksScore = Math.min(1, author.works.length / 50); // 50+ topic works = 1.0
-      const citationScore = Math.min(1, author.totalCitations / 1000); // 1000+ citations = 1.0
+      const citationScore = Math.min(1, citationCount / 1000); // 1000+ citations = 1.0
       // Use decay-based recency scoring instead of flat window
-      const recencyScore = calculateAuthorRecencyScore(author.works || [], currentYear);
+      const recencyScore = calculateAuthorRecencyScore(
+        author.works || [],
+        currentYear,
+      );
       const fieldScore = author.fieldRelevance || 0;
 
       // FILTER: Exclude completely off-topic researchers (field relevance too low)
@@ -779,12 +809,17 @@ function rankAuthorsByMetrics(authors, location = null) {
 
       // Location score: how well the expert matches the searched location
       let locationScore = 0;
-      
+
       if (searchCity) {
         // City is specifically searched → ONLY city matches get location boost
         // Non-Toronto experts (even in Canada) get locationScore = 0 (strong penalty)
-        if (author.institutionNamesLower && author.institutionNamesLower.length > 0) {
-          const cityMatch = author.institutionNamesLower.some((inst) => inst.includes(searchCity));
+        if (
+          author.institutionNamesLower &&
+          author.institutionNamesLower.length > 0
+        ) {
+          const cityMatch = author.institutionNamesLower.some((inst) =>
+            inst.includes(searchCity),
+          );
           locationScore = cityMatch ? 1.0 : 0; // 1.0 for city match, 0 for non-match
         } else {
           locationScore = 0; // No institution data → no location boost
@@ -802,19 +837,19 @@ function rankAuthorsByMetrics(authors, location = null) {
         // When location is specified: field relevance gets MORE weight (30%) to prevent off-topic boost
         finalScore =
           worksScore * 0.15 +
-          citationScore * 0.20 +  // Reduced from 25% - citations alone shouldn't dominate
+          citationScore * 0.2 + // Reduced from 25% - citations alone shouldn't dominate
           recencyScore * 0.15 +
-          fieldScore * 0.30 +      // INCREASED from 15% to 30% - field relevance is critical
-          locationScore * 0.20;
+          fieldScore * 0.3 + // INCREASED from 15% to 30% - field relevance is critical
+          locationScore * 0.2;
       } else {
         // No location: field relevance gets even more weight (35%)
         finalScore =
-          worksScore * 0.20 +
-          citationScore * 0.20 +  // Reduced from 30% - prevent citation-only ranking
-          recencyScore * 0.20 +
-          fieldScore * 0.35;      // INCREASED from 20% to 35% - prioritize topic relevance
+          worksScore * 0.2 +
+          citationScore * 0.2 + // Reduced from 30% - prevent citation-only ranking
+          recencyScore * 0.2 +
+          fieldScore * 0.35; // INCREASED from 20% to 35% - prioritize topic relevance
       }
-      
+
       // Additional penalty: if field relevance is low but they still passed the filter, penalize
       if (fieldScore < 0.4) {
         finalScore *= 0.7; // 30% penalty for weak field relevance
@@ -834,17 +869,22 @@ function rankAuthorsByMetrics(authors, location = null) {
     })
     .filter((author) => author !== null) // Remove off-topic researchers (field relevance < 0.2)
     .sort((a, b) => {
-      // Sort by the balanced finalScore (highest first)
+      const bCitations = b.realCitationCount ?? b.totalCitations ?? 0;
+      const aCitations = a.realCitationCount ?? a.totalCitations ?? 0;
+      const citationDiff = bCitations - aCitations;
+      if (citationDiff !== 0) return citationDiff;
+
+      // Tiebreaker: balanced final score, then field relevance
       const scoreDiff = b.scores.final - a.scores.final;
       if (Math.abs(scoreDiff) > 0.001) return scoreDiff;
 
-      // Tiebreaker: field relevance first (prioritize topic-focused), then citations
-      const fieldDiff = (b.scores.fieldRelevance || 0) - (a.scores.fieldRelevance || 0);
+      const fieldDiff =
+        (b.scores.fieldRelevance || 0) - (a.scores.fieldRelevance || 0);
       if (Math.abs(fieldDiff) > 0.01) return fieldDiff;
-      
-      return b.totalCitations - a.totalCitations;
+
+      return 0;
     });
-    
+
   return rankedAuthors;
 }
 
@@ -908,7 +948,7 @@ Output only the 2-sentence biography, no additional text. Use the exact publicat
           });
         },
         "gemini-2.5-flash-lite",
-        400
+        400,
       );
 
       const biography = result.response.text().trim();
@@ -918,7 +958,10 @@ Output only the 2-sentence biography, no additional text. Use the exact publicat
         biography,
       });
     } catch (error) {
-      console.error(`Error generating summary for ${author.name}:`, error.message);
+      console.error(
+        `Error generating summary for ${author.name}:`,
+        error.message,
+      );
       // Fallback bio
       authorsWithSummaries.push({
         ...author,
@@ -943,58 +986,76 @@ async function fetchOpenAlexAuthorProfiles(authors) {
 
   // OpenAlex author IDs look like "https://openalex.org/A1234567890"
   // We need just the ID part for the filter
-  const authorIds = authors
-    .map((a) => a.id)
-    .filter(Boolean)
-    .map((id) => {
-      // Extract just the OpenAlex ID (e.g., "A1234567890")
-      if (id.includes("openalex.org/")) {
-        return id.split("openalex.org/")[1];
-      }
-      return id;
-    });
+  const authorIds = Array.from(
+    new Set(
+      authors
+        .map((a) => a.id)
+        .filter(Boolean)
+        .map((id) => {
+          // Extract just the OpenAlex ID (e.g., "A1234567890")
+          if (id.includes("openalex.org/")) {
+            return id.split("openalex.org/")[1];
+          }
+          return id;
+        }),
+    ),
+  );
 
   if (authorIds.length === 0) return authors;
 
-  const cacheKey = getCacheKey("openalex-authors", authorIds.sort().join(","));
-  const cached = getCache(cacheKey);
+  const BATCH_SIZE = 50;
+  const allProfiles = [];
 
-  let authorProfiles = cached;
+  for (let i = 0; i < authorIds.length; i += BATCH_SIZE) {
+    const batchIds = authorIds.slice(i, i + BATCH_SIZE);
+    const cacheKey = getCacheKey(
+      "openalex-authors",
+      batchIds.sort().join(","),
+    );
+    const cached = getCache(cacheKey);
 
-  if (!authorProfiles) {
-    try {
-      // Batch fetch using OpenAlex filter: openalex:A123|A456|A789
-      const filterValue = authorIds.join("|");
-      const url = "https://api.openalex.org/authors";
-      const params = {
-        filter: `openalex:${filterValue}`,
-        "per-page": authorIds.length,
-        select: "id,display_name,works_count,cited_by_count,summary_stats",
-        mailto: process.env.OPENALEX_MAILTO || "support@curalink.com",
-      };
+    let authorProfiles = cached;
 
-      console.log(`Fetching real profiles for ${authorIds.length} authors from OpenAlex...`);
+    if (!authorProfiles) {
+      try {
+        // Batch fetch using OpenAlex filter: openalex:A123|A456|A789
+        const filterValue = batchIds.join("|");
+        const url = "https://api.openalex.org/authors";
+        const params = {
+          filter: `openalex:${filterValue}`,
+          "per-page": batchIds.length,
+          select: "id,display_name,works_count,cited_by_count,summary_stats",
+          mailto: process.env.OPENALEX_MAILTO || "support@curalink.com",
+        };
 
-      const response = await axios.get(url, {
-        params,
-        headers: {
-          "User-Agent": "CuraLink/1.0 (expert discovery; mailto:support@curalink.com)",
-        },
-        timeout: 15000,
-      });
+        console.log(
+          `Fetching real profiles for ${batchIds.length} authors from OpenAlex...`,
+        );
 
-      authorProfiles = response.data?.results || [];
-      setCache(cacheKey, authorProfiles);
-      console.log(`Got real profiles for ${authorProfiles.length} authors`);
-    } catch (error) {
-      console.error("Error fetching OpenAlex author profiles:", error.message);
-      authorProfiles = [];
+        const response = await axios.get(url, {
+          params,
+          headers: {
+            "User-Agent":
+              "CuraLink/1.0 (expert discovery; mailto:support@curalink.com)",
+          },
+          timeout: 15000,
+        });
+
+        authorProfiles = response.data?.results || [];
+        setCache(cacheKey, authorProfiles);
+        console.log(`Got real profiles for ${authorProfiles.length} authors`);
+      } catch (error) {
+        console.error("Error fetching OpenAlex author profiles:", error.message);
+        authorProfiles = [];
+      }
     }
+
+    allProfiles.push(...authorProfiles);
   }
 
   // Create a lookup map by OpenAlex ID
   const profileMap = new Map();
-  for (const profile of authorProfiles) {
+  for (const profile of allProfiles) {
     profileMap.set(profile.id, profile);
   }
 
@@ -1024,32 +1085,86 @@ async function fetchOpenAlexAuthorProfiles(authors) {
  */
 function extractCountryCode(location) {
   if (!location) return null;
-  
+
   const countryMap = {
-    "canada": "CA", "united states": "US", "usa": "US", "u.s.": "US", "america": "US",
-    "united kingdom": "GB", "uk": "GB", "england": "GB", "scotland": "GB", "wales": "GB",
-    "germany": "DE", "france": "FR", "china": "CN", "japan": "JP", "australia": "AU",
-    "india": "IN", "brazil": "BR", "mexico": "MX", "italy": "IT", "spain": "ES",
-    "south korea": "KR", "korea": "KR", "netherlands": "NL", "holland": "NL",
-    "sweden": "SE", "switzerland": "CH", "norway": "NO", "denmark": "DK", "finland": "FI",
-    "belgium": "BE", "austria": "AT", "portugal": "PT", "ireland": "IE", "poland": "PL",
-    "russia": "RU", "turkey": "TR", "israel": "IL", "saudi arabia": "SA",
-    "south africa": "ZA", "nigeria": "NG", "egypt": "EG", "kenya": "KE",
-    "singapore": "SG", "malaysia": "MY", "thailand": "TH", "indonesia": "ID",
-    "pakistan": "PK", "bangladesh": "BD", "vietnam": "VN", "philippines": "PH",
-    "taiwan": "TW", "hong kong": "HK", "new zealand": "NZ", "argentina": "AR",
-    "colombia": "CO", "chile": "CL", "peru": "PE", "czech republic": "CZ", "czechia": "CZ",
-    "romania": "RO", "hungary": "HU", "greece": "GR", "ukraine": "UA", "iran": "IR",
-    "iraq": "IQ", "uae": "AE", "united arab emirates": "AE", "qatar": "QA", "kuwait": "KW",
+    canada: "CA",
+    "united states": "US",
+    usa: "US",
+    "u.s.": "US",
+    america: "US",
+    "united kingdom": "GB",
+    uk: "GB",
+    england: "GB",
+    scotland: "GB",
+    wales: "GB",
+    germany: "DE",
+    france: "FR",
+    china: "CN",
+    japan: "JP",
+    australia: "AU",
+    india: "IN",
+    brazil: "BR",
+    mexico: "MX",
+    italy: "IT",
+    spain: "ES",
+    "south korea": "KR",
+    korea: "KR",
+    netherlands: "NL",
+    holland: "NL",
+    sweden: "SE",
+    switzerland: "CH",
+    norway: "NO",
+    denmark: "DK",
+    finland: "FI",
+    belgium: "BE",
+    austria: "AT",
+    portugal: "PT",
+    ireland: "IE",
+    poland: "PL",
+    russia: "RU",
+    turkey: "TR",
+    israel: "IL",
+    "saudi arabia": "SA",
+    "south africa": "ZA",
+    nigeria: "NG",
+    egypt: "EG",
+    kenya: "KE",
+    singapore: "SG",
+    malaysia: "MY",
+    thailand: "TH",
+    indonesia: "ID",
+    pakistan: "PK",
+    bangladesh: "BD",
+    vietnam: "VN",
+    philippines: "PH",
+    taiwan: "TW",
+    "hong kong": "HK",
+    "new zealand": "NZ",
+    argentina: "AR",
+    colombia: "CO",
+    chile: "CL",
+    peru: "PE",
+    "czech republic": "CZ",
+    czechia: "CZ",
+    romania: "RO",
+    hungary: "HU",
+    greece: "GR",
+    ukraine: "UA",
+    iran: "IR",
+    iraq: "IQ",
+    uae: "AE",
+    "united arab emirates": "AE",
+    qatar: "QA",
+    kuwait: "KW",
   };
-  
+
   const locationLower = location.toLowerCase();
   for (const [country, code] of Object.entries(countryMap)) {
     if (locationLower.includes(country)) {
       return code;
     }
   }
-  
+
   return null;
 }
 
@@ -1072,51 +1187,58 @@ function extractCityName(location) {
  */
 function authorMatchesLocation(authorData, location) {
   if (!location) return true; // No location filter = include all
-  
+
   const searchCity = extractCityName(location);
   const searchCountryCode = extractCountryCode(location);
-  
+
   // Check if author has any institution in the specified country
-  const hasCountryMatch = searchCountryCode && 
+  const hasCountryMatch =
+    searchCountryCode &&
     (authorData.countryCodes || []).includes(searchCountryCode);
-  
+
   // If city is specified, try to match city name in institution
   if (searchCity) {
     // Normalize city name for matching (handle "New Delhi" -> "delhi", "New York" -> "york" or "new york")
-    const normalizedCity = searchCity.replace(/^(new|old|north|south|east|west)\s+/i, "").trim();
-    
+    const normalizedCity = searchCity
+      .replace(/^(new|old|north|south|east|west)\s+/i, "")
+      .trim();
+
     // Check if any institution name contains the city name (exact or normalized)
-    if (authorData.institutionNamesLower && authorData.institutionNamesLower.length > 0) {
+    if (
+      authorData.institutionNamesLower &&
+      authorData.institutionNamesLower.length > 0
+    ) {
       const cityMatch = authorData.institutionNamesLower.some((inst) => {
         // Check for exact city match
         if (inst.includes(searchCity)) return true;
         // Check for normalized city match (e.g., "delhi" in "university of delhi")
-        if (normalizedCity !== searchCity && inst.includes(normalizedCity)) return true;
+        if (normalizedCity !== searchCity && inst.includes(normalizedCity))
+          return true;
         return false;
       });
-      
+
       if (cityMatch && hasCountryMatch) {
         return true; // City match + country match = strong match
       }
     }
-    
+
     // If city specified but no city match found, still check country
     // This handles cases where institution names don't include city (e.g., "AIIMS" instead of "AIIMS New Delhi")
     if (hasCountryMatch) {
       // Country matches - include but will be ranked lower (handled in ranking function)
       return true;
     }
-    
+
     // City specified but no city or country match
     return false;
   }
-  
+
   // Only country specified - check country code match (strict)
   // Check all country codes, not just the primary one
   if (searchCountryCode) {
     return hasCountryMatch;
   }
-  
+
   // No valid location extracted - include all
   return true;
 }
@@ -1132,12 +1254,23 @@ function authorMatchesLocation(authorData, location) {
  * @param {number} pageSize - Results per page (default 5)
  * @returns {Promise<Object>} { experts: Array, totalFound: number, page, pageSize, hasMore }
  */
-export async function findDeterministicExperts(topic, location = null, page = 1, pageSize = 5) {
+export async function findDeterministicExperts(
+  topic,
+  location = null,
+  page = 1,
+  pageSize = 5,
+) {
   try {
-    console.log(`🔍 Starting deterministic expert discovery for: ${topic} (page ${page}, pageSize ${pageSize})`);
+    console.log(
+      `🔍 Starting deterministic expert discovery for: ${topic} (page ${page}, pageSize ${pageSize})`,
+    );
 
     // --- Cached pipeline: Steps 1-5 run once per query, results are reused for pagination ---
-    const pipelineCacheKey = getCacheKey("pipeline-ranked", topic, location || "global");
+    const pipelineCacheKey = getCacheKey(
+      "pipeline-ranked",
+      topic,
+      location || "global",
+    );
     let rankedAuthors = getCache(pipelineCacheKey);
 
     if (!rankedAuthors) {
@@ -1157,8 +1290,14 @@ export async function findDeterministicExperts(topic, location = null, page = 1,
 
       // Step 3: Extract and aggregate authors (with location filtering)
       console.log("Step 3: Extracting and aggregating authors...");
-      const authorCandidates = extractAndAggregateAuthors(works, constraints, location);
-      console.log(`Found ${authorCandidates.length} author candidates${location ? ` (filtered by location: ${location})` : ""}`);
+      const authorCandidates = extractAndAggregateAuthors(
+        works,
+        constraints,
+        location,
+      );
+      console.log(
+        `Found ${authorCandidates.length} author candidates${location ? ` (filtered by location: ${location})` : ""}`,
+      );
 
       // Sort by total citations to prioritize top candidates
       authorCandidates.sort((a, b) => b.totalCitations - a.totalCitations);
@@ -1169,15 +1308,28 @@ export async function findDeterministicExperts(topic, location = null, page = 1,
         author.fieldRelevance = computeFieldRelevance(author, constraints);
       });
 
+      // Step 4.5: Fetch REAL publication/citation counts from OpenAlex author profiles
+      // (author.works.length is only the count from THIS search, not their total career output)
+      console.log("Step 4.5: Fetching real author stats from OpenAlex...");
+      const authorCandidatesWithRealStats =
+        await fetchOpenAlexAuthorProfiles(authorCandidates);
+
       // Step 5: Ranking by metrics + location priority
-      console.log("Step 5: Ranking authors by metrics (with location boost)...");
-      rankedAuthors = rankAuthorsByMetrics(authorCandidates, location);
+      console.log(
+        "Step 5: Ranking authors by metrics (with location boost)...",
+      );
+      rankedAuthors = rankAuthorsByMetrics(
+        authorCandidatesWithRealStats,
+        location,
+      );
       console.log(`Ranked ${rankedAuthors.length} authors`);
 
       // Cache the ranked list so page 2, 3, etc. are instant
       setCache(pipelineCacheKey, rankedAuthors);
     } else {
-      console.log(`Using cached ranked authors (${rankedAuthors.length} total)`);
+      console.log(
+        `Using cached ranked authors (${rankedAuthors.length} total)`,
+      );
     }
 
     // --- Pagination: slice for current page ---
@@ -1191,16 +1343,16 @@ export async function findDeterministicExperts(topic, location = null, page = 1,
       return { experts: [], totalFound, page, pageSize, hasMore: false };
     }
 
-    // Step 5.5: Fetch REAL publication/citation counts from OpenAlex author profiles
-    // (author.works.length is only the count from THIS search, not their total career output)
-    console.log("Step 5.5: Fetching real author stats from OpenAlex...");
-    const authorsWithRealStats = await fetchOpenAlexAuthorProfiles(pageAuthors);
-
     // Step 6: Generate summaries (Gemini for UX only) - ONLY for this page
-    console.log(`Step 6: Generating summaries for ${authorsWithRealStats.length} experts (page ${page})...`);
-    const expertsWithSummaries = await generateExpertSummaries(authorsWithRealStats);
+    console.log(
+      `Step 6: Generating summaries for ${pageAuthors.length} experts (page ${page})...`,
+    );
+    const expertsWithSummaries =
+      await generateExpertSummaries(pageAuthors);
 
-    console.log(`✅ Returning ${expertsWithSummaries.length} experts (page ${page}/${Math.ceil(totalFound / pageSize)})`);
+    console.log(
+      `✅ Returning ${expertsWithSummaries.length} experts (page ${page}/${Math.ceil(totalFound / pageSize)})`,
+    );
     return {
       experts: expertsWithSummaries,
       totalFound,
@@ -1221,13 +1373,11 @@ export function formatExpertsForResponse(experts) {
   return experts.map((expert) => ({
     name: expert.name,
     affiliation: expert.institutions[0] || null,
-    location: expert.countryCode
-      ? `${expert.countryCode}`
-      : null,
+    location: expert.countryCode ? `${expert.countryCode}` : null,
     biography: expert.biography || null,
     orcid: expert.orcid || null,
     orcidUrl: expert.orcid ? `https://orcid.org/${expert.orcid}` : null,
-    
+
     // Metrics - use REAL counts from OpenAlex author profile (not search-result counts)
     metrics: {
       totalPublications: expert.realWorksCount || expert.works.length,
@@ -1241,7 +1391,7 @@ export function formatExpertsForResponse(experts) {
       // Also include the search-specific counts for transparency
       topicSpecificWorks: expert.works.length,
     },
-    
+
     // Verification info
     verification: {
       openAlexId: expert.id,
@@ -1249,13 +1399,13 @@ export function formatExpertsForResponse(experts) {
       overlappingDOIs: expert.verification?.overlappingDOIs || 0,
       verified: expert.verification?.verified || false,
     },
-    
+
     // Scores (transparency)
     scores: expert.scores,
-    
+
     // Confidence tier
     confidence: calculateConfidenceTier(expert),
-    
+
     // Recent works (top 3)
     recentWorks: expert.works
       .sort((a, b) => b.year - a.year)
