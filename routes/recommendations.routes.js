@@ -225,13 +225,16 @@ router.get("/recommendations/:userId", async (req, res) => {
             };
           }
         ),
-        // Fetch global experts using deterministic approach (dashboard: limit OpenAlex to top 100 for speed)
+        // Fetch global experts using deterministic approach (dashboard: limit OpenAlex to top 100 for speed + skip AI summaries)
         findDeterministicExperts(
           primaryTopic, // Use primary topic (first interest)
           locationStringForExperts || null, // Pass location separately (not in query string)
           1, // page 1
           6, // Fetch 6 experts for recommendations
-          { limitOpenAlexProfiles: true } // Dashboard only: fetch top 100 authors for faster load
+          { 
+            limitOpenAlexProfiles: true, // Dashboard only: fetch top 100 authors for faster load
+            skipAISummaries: true // Dashboard only: skip AI summary generation for much faster load
+          }
         ).catch((error) => {
           console.error("Error fetching global experts:", error);
           // Return empty array on error, don't fail the entire request

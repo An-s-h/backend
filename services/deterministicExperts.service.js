@@ -890,16 +890,18 @@ function rankAuthorsByMetrics(authors, location = null) {
 
 /**
  * STEP 8: Generate summaries using Gemini (ONLY for UX polish)
+ * @param {Array} authors - List of authors to generate summaries for
+ * @param {boolean} skipAI - If true, skip AI generation and use simple fallback (for dashboard speed)
  */
-async function generateExpertSummaries(authors) {
+async function generateExpertSummaries(authors, skipAI = false) {
   const geminiInstance = getGeminiInstance();
 
   // Use REAL counts (from OpenAlex author profile) instead of search-result counts
   const getRealPubs = (a) => a.realWorksCount || a.works.length;
   const getRealCitations = (a) => a.realCitationCount || a.totalCitations;
 
-  if (!geminiInstance) {
-    // Return authors without summaries if Gemini unavailable
+  // For dashboard: skip AI and use simple fallback for speed
+  if (skipAI || !geminiInstance) {
     return authors.map((a) => ({
       ...a,
       biography: `Researcher at ${
@@ -1266,7 +1268,7 @@ function authorMatchesLocation(authorData, location) {
  * @param {string} location - Geographic location (optional)
  * @param {number} page - Page number (1-indexed, default 1)
  * @param {number} pageSize - Results per page (default 5)
- * @param {Object} options - Optional: { limitOpenAlexProfiles: true } for dashboard (faster, fetches top 100 only)
+ * @param {Object} options - Optional: { limitOpenAlexProfiles: true, skipAISummaries: true } for dashboard (faster)
  * @returns {Promise<Object>} { experts: Array, totalFound: number, page, pageSize, hasMore }
  */
 export async function findDeterministicExperts(
@@ -1276,7 +1278,7 @@ export async function findDeterministicExperts(
   pageSize = 5,
   options = {},
 ) {
-  const { limitOpenAlexProfiles = false } = options;
+  const { limitOpenAlexProfiles = false, skipAISummaries = false } = options;
 
   try {
     console.log(
@@ -1365,11 +1367,18 @@ export async function findDeterministicExperts(
     }
 
     // Step 6: Generate summaries (Gemini for UX only) - ONLY for this page
-    console.log(
-      `Step 6: Generating summaries for ${pageAuthors.length} experts (page ${page})...`,
-    );
+    // For dashboard: skip AI summaries for faster load (use simple fallback)
+    if (skipAISummaries) {
+      console.log(
+        `Step 6: Skipping AI summaries for ${pageAuthors.length} experts (dashboard mode)...`,
+      );
+    } else {
+      console.log(
+        `Step 6: Generating summaries for ${pageAuthors.length} experts (page ${page})...`,
+      );
+    }
     const expertsWithSummaries =
-      await generateExpertSummaries(pageAuthors);
+      await generateExpertSummaries(pageAuthors, skipAISummaries);
 
     console.log(
       `✅ Returning ${expertsWithSummaries.length} experts (page ${page}/${Math.ceil(totalFound / pageSize)})`,
