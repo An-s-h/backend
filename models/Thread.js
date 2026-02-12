@@ -8,7 +8,7 @@ const threadSchema = new mongoose.Schema(
     authorUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     authorRole: { type: String, enum: ["patient", "researcher"], required: true },
     title: { type: String, required: true },
-    body: { type: String, required: true },
+    body: { type: String, default: "" }, // Optional: question-only posts supported
     tags: [{ type: String }], // MeSH terminology tags
     // Condition tags so broad topics can be narrowed to a specific disease
     conditions: [{ type: String }],

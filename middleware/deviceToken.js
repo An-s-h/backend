@@ -1,6 +1,5 @@
 import crypto from "crypto";
 import { DeviceToken } from "../models/DeviceToken.js";
-import { IPLimit } from "../models/IPLimit.js";
 
 const DEVICE_TOKEN_COOKIE_NAME = "device_token";
 // Allow configuration via environment variable for testing
@@ -26,48 +25,6 @@ function getRequestFingerprint(req) {
   const ip = req.ip || req.connection?.remoteAddress || "unknown";
   const userAgent = req.get("user-agent") || "unknown";
   return `${ip}:${userAgent}`;
-}
-
-/**
- * Extract client IP address from request
- * Handles proxies and load balancers by checking X-Forwarded-For header
- */
-export function getClientIP(req) {
-  // Check for forwarded IP (from proxy/load balancer)
-  const forwardedFor = req.headers["x-forwarded-for"];
-  if (forwardedFor) {
-    // X-Forwarded-For can contain multiple IPs, take the first one
-    const ips = forwardedFor.split(",").map((ip) => ip.trim());
-    return ips[0];
-  }
-
-  // Check for real IP header (some proxies use this)
-  if (req.headers["x-real-ip"]) {
-    return req.headers["x-real-ip"];
-  }
-
-  // Fallback to connection remote address
-  return (
-    req.connection?.remoteAddress || req.socket?.remoteAddress || req.ip || null
-  );
-}
-
-/**
- * Hash IP address for privacy
- * Uses SHA-256 with a salt for additional security
- */
-export function hashIP(ip) {
-  if (!ip) {
-    return null;
-  }
-
-  // Use a salt from environment variable or default (should be set in production)
-  const salt = process.env.IP_HASH_SALT || "default-salt-change-in-production";
-
-  // Create hash using SHA-256
-  const hash = crypto.createHash("sha256");
-  hash.update(ip + salt);
-  return hash.digest("hex");
 }
 
 /**
@@ -227,78 +184,12 @@ export async function getOrCreateDeviceToken(req, res, next) {
 }
 
 /**
- * Check IP-based search limit
- * Returns { canSearch: boolean, remaining: number }
- */
-export async function checkIPSearchLimit(req) {
-  const clientIP = getClientIP(req);
-  if (!clientIP) {
-    // If we can't get IP, allow the request (fail open)
-    return { canSearch: true, remaining: MAX_FREE_SEARCHES };
-  }
-
-  try {
-    const hashedIP = hashIP(clientIP);
-    if (!hashedIP) {
-      return { canSearch: true, remaining: MAX_FREE_SEARCHES };
-    }
-
-    const ipLimitRecord = await IPLimit.findOne({ hashedIP });
-
-    if (!ipLimitRecord) {
-      // No record means no searches yet - allow
-      return { canSearch: true, remaining: MAX_FREE_SEARCHES };
-    }
-
-    const remaining = Math.max(
-      0,
-      MAX_FREE_SEARCHES - ipLimitRecord.searchCount
-    );
-    const canSearch = remaining > 0;
-
-    return { canSearch, remaining };
-  } catch (error) {
-    console.error("Error checking IP search limit:", error);
-    // Fail open - allow request if there's an error
-    return { canSearch: true, remaining: MAX_FREE_SEARCHES };
-  }
-}
-
-/**
- * Increment IP-based search count
- */
-export async function incrementIPSearchCount(req) {
-  const clientIP = getClientIP(req);
-  if (!clientIP) {
-    return;
-  }
-
-  try {
-    const hashedIP = hashIP(clientIP);
-    if (!hashedIP) {
-      return;
-    }
-
-    await IPLimit.findOneAndUpdate(
-      { hashedIP },
-      {
-        $inc: { searchCount: 1 },
-        $set: { lastSearchAt: new Date() },
-      },
-      { upsert: true, new: true }
-    );
-  } catch (error) {
-    console.error("Error incrementing IP search count:", error);
-  }
-}
-
-/**
  * Check if anonymous user can perform a search
- * PRIORITY: deviceToken first, then fallback to IP
+ * Uses deviceToken only
  * Returns { canSearch: boolean, remaining: number }
  */
 export async function checkSearchLimit(deviceToken, req = null) {
-  // PRIORITY 1: If deviceToken exists → trust it (primary identifier)
+  void req;
   if (deviceToken) {
     try {
       const deviceTokenRecord = await DeviceToken.findOne({
@@ -317,26 +208,18 @@ export async function checkSearchLimit(deviceToken, req = null) {
       }
     } catch (error) {
       console.error("Error checking device token search limit:", error);
-      // Fall through to IP fallback on error
     }
   }
 
-  // PRIORITY 2: Fallback to IP only if no deviceToken
-  if (req) {
-    return await checkIPSearchLimit(req);
-  }
-
-  // If no deviceToken and no request, allow (fail open)
+  // If no deviceToken, allow (fail open)
   return { canSearch: true, remaining: MAX_FREE_SEARCHES };
 }
 
 /**
- * Increment search count for a device token or IP address
- * PRIORITY: deviceToken first, then fallback to IP
- * Only increments ONE record (never both)
+ * Increment search count for a device token
  */
 export async function incrementSearchCount(deviceToken, req = null) {
-  // PRIORITY 1: If deviceToken exists → increment it (primary identifier)
+  void req;
   if (deviceToken) {
     try {
       await DeviceToken.findOneAndUpdate(
@@ -347,15 +230,9 @@ export async function incrementSearchCount(deviceToken, req = null) {
         },
         { upsert: false } // Don't create if doesn't exist (should already exist)
       );
-      return; // Exit early - don't increment IP
+      return;
     } catch (error) {
       console.error("Error incrementing device token search count:", error);
-      // Fall through to IP fallback on error
     }
-  }
-
-  // PRIORITY 2: Fallback to IP only if no deviceToken
-  if (req) {
-    await incrementIPSearchCount(req);
   }
 }

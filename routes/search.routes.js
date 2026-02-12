@@ -41,7 +41,6 @@ import {
 
 // Browser-based search limit system (strict 6 searches per device/browser)
 // Uses deviceId from localStorage (survives IP changes, proxies, browser restarts)
-// Falls back to IP-based tracking for backward compatibility
 import {
   checkSearchLimit,
   incrementSearchCount,
@@ -1888,7 +1887,7 @@ router.post("/search/reset-for-testing", async (req, res) => {
   }
 
   try {
-    // Import IPLimit model (IP-based tracking)
+    // Import IPLimit model (deviceId-based tracking)
     const { IPLimit } = await import("../models/IPLimit.js");
 
     const result = await IPLimit.updateMany(
@@ -1898,7 +1897,7 @@ router.post("/search/reset-for-testing", async (req, res) => {
 
     res.json({
       success: true,
-      message: "Reset all IP-based search limits for testing",
+      message: "Reset all device-based search limits for testing",
       recordsReset: result.modifiedCount,
       note: "This endpoint only works in development mode",
     });

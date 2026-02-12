@@ -6,6 +6,7 @@ import { Reply } from "../models/Reply.js";
 import { User } from "../models/User.js";
 import { Profile } from "../models/Profile.js";
 import { Notification } from "../models/Notification.js";
+import { verifySession } from "../middleware/auth.js";
 
 const router = Router();
 
@@ -204,21 +205,29 @@ router.get("/researcher-forums/threads", async (req, res) => {
     .sort({ createdAt: -1 })
     .lean();
 
-  // Get reply counts
+  // Get reply counts and researcher-reply flags
   const threadIds = threads.map((t) => t._id);
-  const replyCounts = await Reply.aggregate([
-    { $match: { threadId: { $in: threadIds } } },
-    { $group: { _id: "$threadId", count: { $sum: 1 } } },
+  const [replyCounts, researcherReplyThreadIds] = await Promise.all([
+    Reply.aggregate([
+      { $match: { threadId: { $in: threadIds } } },
+      { $group: { _id: "$threadId", count: { $sum: 1 } } },
+    ]),
+    Reply.aggregate([
+      { $match: { threadId: { $in: threadIds }, authorRole: "researcher" } },
+      { $group: { _id: "$threadId" } },
+    ]),
   ]);
 
   const countMap = {};
   replyCounts.forEach((item) => {
     countMap[item._id.toString()] = item.count;
   });
+  const researcherReplySet = new Set(researcherReplyThreadIds.map((r) => r._id.toString()));
 
   const threadsWithCounts = threads.map((thread) => ({
     ...thread,
     replyCount: countMap[thread._id.toString()] || 0,
+    hasResearcherReply: researcherReplySet.has(thread._id.toString()) || thread.authorRole === "researcher",
     voteScore: (thread.upvotes?.length || 0) - (thread.downvotes?.length || 0),
   }));
 
@@ -320,9 +329,9 @@ router.post("/forums/threads", async (req, res) => {
     onlyResearchersCanReply,
     isResearcherForum,
   } = req.body || {};
-  if (!categoryId || !authorUserId || !authorRole || !title || !body) {
+  if (!categoryId || !authorUserId || !authorRole || !title || !title.trim()) {
     return res.status(400).json({
-      error: "categoryId, authorUserId, authorRole, title, body required",
+      error: "categoryId, authorUserId, authorRole, and title are required",
     });
   }
   const normalizedConditions = normalizeConditions(conditions);
@@ -330,8 +339,8 @@ router.post("/forums/threads", async (req, res) => {
     categoryId,
     authorUserId,
     authorRole,
-    title,
-    body,
+    title: title.trim(),
+    body: (body && body.trim()) || "",
     conditions: normalizedConditions,
     onlyResearchersCanReply: !!onlyResearchersCanReply,
     isResearcherForum: !!isResearcherForum,
@@ -628,6 +637,37 @@ async function deleteReplyAndDescendants(replyId) {
   await Reply.findByIdAndDelete(replyId);
   return count;
 }
+
+// Delete thread (owner only)
+router.delete("/forums/threads/:threadId", verifySession, async (req, res) => {
+  try {
+    const { threadId } = req.params;
+    const currentUserId = req.user?._id?.toString?.() || req.user?.id?.toString?.();
+    if (!currentUserId) {
+      return res.status(401).json({ error: "Authentication required" });
+    }
+
+    const thread = await Thread.findById(threadId);
+    if (!thread) return res.status(404).json({ error: "Thread not found" });
+
+    const authorId = thread.authorUserId?.toString?.() || thread.authorUserId?.toString?.();
+    if (authorId !== currentUserId) {
+      return res.status(403).json({ error: "You can only delete your own thread" });
+    }
+
+    await Reply.deleteMany({ threadId });
+    await Thread.findByIdAndDelete(threadId);
+
+    invalidateCache(`forums:thread:${threadId}`);
+    invalidateCache("forums:threads:");
+    invalidateCache("forums:categories");
+
+    res.json({ ok: true, message: "Thread deleted" });
+  } catch (error) {
+    console.error("Error deleting thread:", error);
+    res.status(500).json({ error: "Failed to delete thread" });
+  }
+});
 
 router.delete("/forums/replies/:replyId", async (req, res) => {
   const { replyId } = req.params;

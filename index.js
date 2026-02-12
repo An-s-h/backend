@@ -14,6 +14,7 @@ import postsRoutes from "./routes/posts.routes.js";
 import communitiesRoutes from "./routes/communities.routes.js";
 import trialsRoutes from "./routes/trials.routes.js";
 import aiRoutes from "./routes/ai.routes.js";
+import contactRoutes from "./routes/contact.routes.js";
 import insightsRoutes from "./routes/insights.routes.js";
 import followRoutes from "./routes/follow.routes.js";
 import messagesRoutes from "./routes/messages.routes.js";
@@ -27,6 +28,7 @@ import waitlistRoutes from "./routes/waitlist.routes.js";
 import uploadRoutes from "./routes/upload.routes.js";
 import trendingRoutes from "./routes/trending.routes.js";
 import orcidRoutes from "./routes/orcid.routes.js";
+import workSubmissionsRoutes from "./routes/work-submissions.routes.js";
 import feedbackRoutes from "./routes/feedback.routes.js";
 import { optionalSession } from "./middleware/auth.js";
 import { searchLimitMiddleware } from "./middleware/searchLimit.js";
@@ -97,6 +99,8 @@ app.use("/api", trendingRoutes);
 app.use("/api", orcidRoutes);
 app.use("/api", uploadRoutes);
 app.use("/api", feedbackRoutes);
+app.use("/api", contactRoutes);
+app.use("/api", workSubmissionsRoutes);
 app.use("/api/rate-limit", rateLimitRoutes); // Rate limiter monitoring
 
 const PORT = process.env.PORT || 5000;

@@ -981,14 +981,28 @@ Output only the 2-sentence biography, no additional text. Use the exact publicat
  * @param {Array} authors - Array of author candidates (top N)
  * @returns {Promise<Array>} Authors enriched with real stats
  */
-async function fetchOpenAlexAuthorProfiles(authors) {
+// Only fetch real profiles for top N authors - rest get fallback stats from search results.
+// Reduces OpenAlex API calls from 12+ batches to 2 (e.g. 557 → 100 = 2 batches).
+const OPENALEX_PROFILE_FETCH_LIMIT = 100;
+
+async function fetchOpenAlexAuthorProfiles(authors, limitProfiles = false) {
   if (!authors || authors.length === 0) return authors;
+
+  // When limitProfiles=true (dashboard), only fetch top N to speed up load. Otherwise fetch all (Experts page).
+  const toFetch = limitProfiles && authors.length > OPENALEX_PROFILE_FETCH_LIMIT
+    ? authors.slice(0, OPENALEX_PROFILE_FETCH_LIMIT)
+    : authors;
+  if (limitProfiles && authors.length > OPENALEX_PROFILE_FETCH_LIMIT) {
+    console.log(
+      `[Dashboard] Limiting OpenAlex profile fetch to top ${OPENALEX_PROFILE_FETCH_LIMIT} of ${authors.length} authors`,
+    );
+  }
 
   // OpenAlex author IDs look like "https://openalex.org/A1234567890"
   // We need just the ID part for the filter
   const authorIds = Array.from(
     new Set(
-      authors
+      toFetch
         .map((a) => a.id)
         .filter(Boolean)
         .map((id) => {
@@ -1252,6 +1266,7 @@ function authorMatchesLocation(authorData, location) {
  * @param {string} location - Geographic location (optional)
  * @param {number} page - Page number (1-indexed, default 1)
  * @param {number} pageSize - Results per page (default 5)
+ * @param {Object} options - Optional: { limitOpenAlexProfiles: true } for dashboard (faster, fetches top 100 only)
  * @returns {Promise<Object>} { experts: Array, totalFound: number, page, pageSize, hasMore }
  */
 export async function findDeterministicExperts(
@@ -1259,17 +1274,22 @@ export async function findDeterministicExperts(
   location = null,
   page = 1,
   pageSize = 5,
+  options = {},
 ) {
+  const { limitOpenAlexProfiles = false } = options;
+
   try {
     console.log(
-      `🔍 Starting deterministic expert discovery for: ${topic} (page ${page}, pageSize ${pageSize})`,
+      `🔍 Starting deterministic expert discovery for: ${topic} (page ${page}, pageSize ${pageSize})${limitOpenAlexProfiles ? " [dashboard mode]" : ""}`,
     );
 
     // --- Cached pipeline: Steps 1-5 run once per query, results are reused for pagination ---
+    // Separate cache for dashboard (limited) vs Experts page (full) so both get correct results
     const pipelineCacheKey = getCacheKey(
       "pipeline-ranked",
       topic,
       location || "global",
+      limitOpenAlexProfiles ? "limit" : "full",
     );
     let rankedAuthors = getCache(pipelineCacheKey);
 
@@ -1310,9 +1330,10 @@ export async function findDeterministicExperts(
 
       // Step 4.5: Fetch REAL publication/citation counts from OpenAlex author profiles
       // (author.works.length is only the count from THIS search, not their total career output)
+      // limitOpenAlexProfiles=true for dashboard: fetch top 100 only (faster). Experts page: fetch all.
       console.log("Step 4.5: Fetching real author stats from OpenAlex...");
       const authorCandidatesWithRealStats =
-        await fetchOpenAlexAuthorProfiles(authorCandidates);
+        await fetchOpenAlexAuthorProfiles(authorCandidates, limitOpenAlexProfiles);
 
       // Step 5: Ranking by metrics + location priority
       console.log(

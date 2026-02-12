@@ -15,6 +15,8 @@ import { Community } from "../models/Community.js";
 import { CommunityProposal } from "../models/CommunityProposal.js";
 import { CommunityMembership } from "../models/CommunityMembership.js";
 import { Subcategory } from "../models/Subcategory.js";
+import { Trial } from "../models/Trial.js";
+import { WorkSubmission } from "../models/WorkSubmission.js";
 import { uploadSingle } from "../middleware/upload.js";
 import { uploadImage } from "../services/upload.service.js";
 
@@ -749,15 +751,19 @@ router.post("/admin/communities", verifyAdmin, async (req, res) => {
     if (!name || !name.trim()) {
       return res.status(400).json({ error: "name is required" });
     }
-    const slug = name
+    const type = communityType === "researcher" ? "researcher" : "patient";
+    let slug = name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/(^-|-$)/g, "");
+    // Differentiate Patient vs Researcher: same name can exist in both
+    if (type === "researcher") {
+      slug = slug ? `${slug}-researcher` : "researcher";
+    }
     const existing = await Community.findOne({ slug });
     if (existing) {
       return res.status(400).json({ error: "A community with this name already exists" });
     }
-    const type = communityType === "researcher" ? "researcher" : "patient";
     const community = await Community.create({
       name: name.trim(),
       slug,
@@ -832,10 +838,15 @@ router.post("/admin/community-proposals/:id/approve", verifyAdmin, async (req, r
     }
 
     const name = proposal.title.trim();
-    const slug = name
+    const isResearcherProposal = proposal.proposedByRole === "researcher";
+    let slug = name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/(^-|-$)/g, "");
+    // Differentiate Patient vs Researcher: same name can exist in both
+    if (isResearcherProposal) {
+      slug = slug ? `${slug}-researcher` : "researcher";
+    }
 
     const existing = await Community.findOne({ slug });
     if (existing) {
@@ -844,7 +855,6 @@ router.post("/admin/community-proposals/:id/approve", verifyAdmin, async (req, r
       });
     }
 
-    const isResearcherProposal = proposal.proposedByRole === "researcher";
     const community = await Community.create({
       name,
       slug,
@@ -901,6 +911,113 @@ router.post("/admin/community-proposals/:id/reject", verifyAdmin, async (req, re
   } catch (error) {
     console.error("Error rejecting community proposal:", error);
     res.status(500).json({ error: "Failed to reject proposal" });
+  }
+});
+
+// ============================================
+// WORK SUBMISSIONS (admin moderation)
+// ============================================
+
+router.get("/admin/work-submissions", verifyAdmin, async (req, res) => {
+  try {
+    const { status } = req.query;
+    const query = status ? { status } : {};
+    const submissions = await WorkSubmission.find(query)
+      .populate("submittedBy", "username email")
+      .sort({ status: 1, createdAt: -1 })
+      .lean();
+    res.json({ submissions });
+  } catch (error) {
+    console.error("Error fetching work submissions:", error);
+    res.status(500).json({ error: "Failed to fetch work submissions" });
+  }
+});
+
+router.post("/admin/work-submissions/:id/approve", verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const submission = await WorkSubmission.findById(id);
+    if (!submission) {
+      return res.status(404).json({ error: "Submission not found" });
+    }
+    if (submission.status !== "pending") {
+      return res.status(400).json({ error: "Submission already reviewed" });
+    }
+
+    if (submission.type === "publication") {
+      const profile = await Profile.findOne({ userId: submission.submittedBy });
+      if (!profile || profile.role !== "researcher") {
+        return res.status(404).json({ error: "Researcher profile not found" });
+      }
+
+      const publicationEntry = {
+        title: submission.title || "Untitled",
+        year: Number.isFinite(submission.year) ? submission.year : undefined,
+        journal: submission.journal || undefined,
+        journalTitle: submission.journal || undefined,
+        doi: submission.doi || undefined,
+        pmid: submission.pmid || undefined,
+        link: submission.link || undefined,
+        url: submission.link || undefined,
+        authors: Array.isArray(submission.authors) ? submission.authors : [],
+        source: submission.source || "manual",
+      };
+
+      if (!profile.researcher) profile.researcher = {};
+      if (!Array.isArray(profile.researcher.selectedPublications)) {
+        profile.researcher.selectedPublications = [];
+      }
+      profile.researcher.selectedPublications.push(publicationEntry);
+      await profile.save();
+    } else {
+      await Trial.create({
+        ownerResearcherId: submission.submittedBy,
+        title: submission.title || "Untitled Trial",
+        status: submission.trialStatus || "",
+        phase: submission.phase || "",
+        location: submission.location || "",
+        eligibility: submission.eligibility || "",
+        description: submission.description || "",
+        contacts: Array.isArray(submission.contacts) ? submission.contacts : [],
+      });
+    }
+
+    submission.status = "approved";
+    submission.reviewedAt = new Date();
+    submission.reviewedBy = req.adminUserId;
+    await submission.save();
+
+    res.json({ ok: true, message: "Work submission approved" });
+  } catch (error) {
+    console.error("Error approving work submission:", error);
+    res.status(500).json({ error: "Failed to approve work submission" });
+  }
+});
+
+router.post("/admin/work-submissions/:id/reject", verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { adminNote } = req.body || {};
+
+    const submission = await WorkSubmission.findById(id);
+    if (!submission) {
+      return res.status(404).json({ error: "Submission not found" });
+    }
+    if (submission.status !== "pending") {
+      return res.status(400).json({ error: "Submission already reviewed" });
+    }
+
+    submission.status = "rejected";
+    submission.adminNote = adminNote ? String(adminNote).trim() : undefined;
+    submission.reviewedAt = new Date();
+    submission.reviewedBy = req.adminUserId;
+    await submission.save();
+
+    res.json({ ok: true, message: "Work submission rejected" });
+  } catch (error) {
+    console.error("Error rejecting work submission:", error);
+    res.status(500).json({ error: "Failed to reject work submission" });
   }
 });
 

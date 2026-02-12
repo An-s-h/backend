@@ -1,48 +1,22 @@
 import { IPLimit } from "../models/IPLimit.js";
-import { getClientIP } from "../utils/ipThrottle.js";
-import crypto from "crypto";
 
 // Configuration - Strict limit of 6 searches per browser/device (hardcoded to ensure strictness)
 const MAX_FREE_SEARCHES = 6;
 
 /**
- * Hash IP address for privacy (consistent with ipThrottle.js)
- * Used as fallback when deviceId is not available
- */
-function hashIP(ip) {
-  if (!ip) return null;
-  const salt = process.env.IP_HASH_SALT || "curalink-ip-throttle-salt";
-  const hash = crypto.createHash("sha256");
-  hash.update(ip + salt);
-  return hash.digest("hex").substring(0, 32);
-}
-
-/**
  * Get device identifier from request
- * Prioritizes browser-based deviceId (from x-device-id header)
- * Falls back to hashed IP address for backward compatibility
+ * Uses browser-based deviceId (from x-device-id header)
  */
 function getDeviceIdentifier(req) {
-  // Primary: Browser-based device identifier (survives IP changes, proxies, browser restarts)
   const deviceId = req.headers["x-device-id"];
   if (deviceId && deviceId.trim()) {
-    return { type: "deviceId", value: deviceId.trim() };
+    return deviceId.trim();
   }
-
-  // Fallback: IP-based identifier (for legacy support or when deviceId is unavailable)
-  const clientIP = getClientIP(req);
-  if (clientIP) {
-    const hashedIP = hashIP(clientIP);
-    if (hashedIP) {
-      return { type: "hashedIP", value: hashedIP };
-    }
-  }
-
   return null;
 }
 
 /**
- * Check search limit for anonymous user (browser-based deviceId, fallback to IP)
+ * Check search limit for anonymous user (browser-based deviceId only)
  * Returns strict limit check - blocks after 6 searches
  */
 export async function checkSearchLimit(req, res = null) {
@@ -58,13 +32,13 @@ export async function checkSearchLimit(req, res = null) {
     };
   }
 
-  // Get device identifier (deviceId preferred, IP as fallback)
-  const identifier = getDeviceIdentifier(req);
+  // Get device identifier (deviceId only)
+  const deviceId = getDeviceIdentifier(req);
 
-  if (!identifier) {
-    // If we can't get any identifier, block to be strict
+  if (!deviceId) {
+    // If we can't get device identifier, block to be strict
     console.warn(
-      "[SearchLimit] Failed to get device identifier - blocking request"
+      "[SearchLimit] Failed to get deviceId - blocking request"
     );
     return {
       canSearch: false,
@@ -76,57 +50,15 @@ export async function checkSearchLimit(req, res = null) {
   }
 
   try {
-    // Find existing record by deviceId or hashedIP
-    let limitRecord = null;
-    if (identifier.type === "deviceId") {
-      // Primary: Look up by deviceId
-      limitRecord = await IPLimit.findOne({ deviceId: identifier.value });
-
-      // Migration: If not found by deviceId, try hashedIP (for users upgrading from IP-based tracking)
-      if (!limitRecord) {
-        const clientIP = getClientIP(req);
-        if (clientIP) {
-          const hashedIP = hashIP(clientIP);
-          if (hashedIP) {
-            limitRecord = await IPLimit.findOne({ hashedIP });
-            // If found by IP, migrate to deviceId (preserve search count)
-            if (limitRecord) {
-              // Check if deviceId already exists (edge case - should be rare)
-              const existingByDeviceId = await IPLimit.findOne({
-                deviceId: identifier.value,
-              });
-              if (existingByDeviceId) {
-                // DeviceId record exists - use it and merge counts (take maximum)
-                existingByDeviceId.searchCount = Math.max(
-                  existingByDeviceId.searchCount || 0,
-                  limitRecord.searchCount || 0
-                );
-                await existingByDeviceId.save();
-                // Delete old IP-based record (save ID before reassigning)
-                const oldIpRecordId = limitRecord._id;
-                limitRecord = existingByDeviceId;
-                await IPLimit.deleteOne({ _id: oldIpRecordId });
-              } else {
-                // Migrate IP record to deviceId (preserve search count)
-                limitRecord.deviceId = identifier.value;
-                await limitRecord.save();
-              }
-            }
-          }
-        }
-      }
-    } else {
-      // Fallback: Look up by hashedIP only
-      limitRecord = await IPLimit.findOne({ hashedIP: identifier.value });
-    }
+    // Find existing record by deviceId
+    let limitRecord = await IPLimit.findOne({ deviceId });
 
     let searchCount = 0;
     if (limitRecord) {
       searchCount = limitRecord.searchCount || 0;
     } else {
       // Create new record with count 0
-      // Ensure we never create a record with both deviceId and hashedIP as null
-      if (!identifier.value || !identifier.value.trim()) {
+      if (!deviceId || !deviceId.trim()) {
         console.warn("[SearchLimit] Cannot create record with null identifier value");
         return {
           canSearch: false,
@@ -138,17 +70,10 @@ export async function checkSearchLimit(req, res = null) {
       }
 
       const recordData = {
+        deviceId,
         searchCount: 0,
         lastSearchAt: null,
       };
-
-      if (identifier.type === "deviceId") {
-        recordData.deviceId = identifier.value;
-        // Don't set hashedIP to null - leave it undefined
-      } else {
-        recordData.hashedIP = identifier.value;
-        // Don't set deviceId to null - leave it undefined
-      }
 
       try {
         limitRecord = await IPLimit.create(recordData);
@@ -156,11 +81,7 @@ export async function checkSearchLimit(req, res = null) {
         // Handle duplicate key error during creation
         if (createError.code === 11000) {
           // Record already exists (race condition), try to find it
-          const query =
-            identifier.type === "deviceId"
-              ? { deviceId: identifier.value }
-              : { hashedIP: identifier.value };
-          limitRecord = await IPLimit.findOne(query);
+          limitRecord = await IPLimit.findOne({ deviceId });
           if (!limitRecord) {
             throw createError; // Re-throw if we still can't find it
           }
@@ -175,10 +96,7 @@ export async function checkSearchLimit(req, res = null) {
     // Strict limit: block if searchCount >= MAX_FREE_SEARCHES (strict enforcement)
     if (searchCount >= MAX_FREE_SEARCHES) {
       if (process.env.NODE_ENV !== "production") {
-        const idDisplay =
-          identifier.type === "deviceId"
-            ? `deviceId=${identifier.value.substring(0, 12)}...`
-            : `hashedIP=${identifier.value.substring(0, 8)}...`;
+        const idDisplay = `deviceId=${deviceId.substring(0, 12)}...`;
         console.log(
           `[SearchLimit] BLOCKED: ${idDisplay}, count=${searchCount}, limit=${MAX_FREE_SEARCHES}`
         );
@@ -196,10 +114,7 @@ export async function checkSearchLimit(req, res = null) {
 
     // Allow search
     if (process.env.NODE_ENV !== "production") {
-      const idDisplay =
-        identifier.type === "deviceId"
-          ? `deviceId=${identifier.value.substring(0, 12)}...`
-          : `hashedIP=${identifier.value.substring(0, 8)}...`;
+      const idDisplay = `deviceId=${deviceId.substring(0, 12)}...`;
       console.log(
         `[SearchLimit] ALLOWED: ${idDisplay}, count=${searchCount}, remaining=${remaining}`
       );
@@ -227,7 +142,7 @@ export async function checkSearchLimit(req, res = null) {
 }
 
 /**
- * Increment search count for device (deviceId preferred, IP as fallback)
+ * Increment search count for device (deviceId only)
  */
 export async function incrementSearchCount(req) {
   // Skip incrementing in testing mode
@@ -236,31 +151,21 @@ export async function incrementSearchCount(req) {
     return;
   }
 
-  const identifier = getDeviceIdentifier(req);
+  const deviceId = getDeviceIdentifier(req);
 
-  if (!identifier) {
+  if (!deviceId) {
     console.warn("[SearchLimit] No device identifier to increment count for");
     return;
   }
 
   try {
     // Ensure we have a valid identifier value (never null/undefined)
-    if (!identifier.value || !identifier.value.trim()) {
+    if (!deviceId || !deviceId.trim()) {
       console.warn("[SearchLimit] Invalid identifier value, skipping increment");
       return;
     }
 
-    // Build query based on identifier type - ensure we never query with null values
-    const query =
-      identifier.type === "deviceId"
-        ? { deviceId: identifier.value }
-        : { hashedIP: identifier.value };
-
-    // Ensure query doesn't have null values
-    if (query.deviceId === null || query.hashedIP === null) {
-      console.warn("[SearchLimit] Query contains null value, skipping increment");
-      return;
-    }
+    const query = { deviceId };
 
     // Use atomic increment to prevent race conditions
     const result = await IPLimit.findOneAndUpdate(
@@ -268,10 +173,6 @@ export async function incrementSearchCount(req) {
       {
         $inc: { searchCount: 1 },
         $set: { lastSearchAt: new Date() },
-        // Set deviceId if incrementing via IP and deviceId is available
-        ...(identifier.type === "hashedIP" && req.headers["x-device-id"]
-          ? { $setOnInsert: { deviceId: req.headers["x-device-id"].trim() } }
-          : {}),
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
@@ -280,31 +181,22 @@ export async function incrementSearchCount(req) {
     if (result && result.searchCount > MAX_FREE_SEARCHES) {
       // Rollback if somehow we exceeded the limit
       await IPLimit.findOneAndUpdate(query, { $inc: { searchCount: -1 } });
-      const idDisplay =
-        identifier.type === "deviceId"
-          ? `deviceId: ${identifier.value.substring(0, 12)}...`
-          : `IP: ${identifier.value.substring(0, 8)}...`;
+      const idDisplay = `deviceId: ${deviceId.substring(0, 12)}...`;
       console.warn(`[SearchLimit] Prevented exceeding limit for ${idDisplay}`);
     }
 
     if (process.env.NODE_ENV !== "production") {
-      const idDisplay =
-        identifier.type === "deviceId"
-          ? `deviceId: ${identifier.value.substring(0, 12)}...`
-          : `IP: ${identifier.value.substring(0, 8)}...`;
+      const idDisplay = `deviceId: ${deviceId.substring(0, 12)}...`;
       console.log(`[SearchLimit] Incremented search count for ${idDisplay}`);
     }
   } catch (error) {
     // Handle duplicate key errors gracefully (shouldn't happen with proper checks, but just in case)
     if (error.code === 11000) {
       // Duplicate key error - try to find existing record and update it instead
-      const identifier = getDeviceIdentifier(req);
-      if (identifier && identifier.value) {
-        const query =
-          identifier.type === "deviceId"
-            ? { deviceId: identifier.value }
-            : { hashedIP: identifier.value };
-        
+      const resolvedDeviceId = getDeviceIdentifier(req);
+      if (resolvedDeviceId) {
+        const query = { deviceId: resolvedDeviceId };
+
         try {
           await IPLimit.findOneAndUpdate(
             query,
@@ -329,43 +221,31 @@ export async function incrementSearchCount(req) {
  * Get debug info for search limits
  */
 export async function getSearchLimitDebug(req) {
-  const identifier = getDeviceIdentifier(req);
+  const deviceId = getDeviceIdentifier(req);
 
-  if (!identifier) {
+  if (!deviceId) {
     return {
-      error: "No device identifier found (neither deviceId nor IP)",
+      error: "No device identifier found (deviceId required)",
       identifier: null,
     };
   }
 
-  // Build query based on identifier type
-  const query =
-    identifier.type === "deviceId"
-      ? { deviceId: identifier.value }
-      : { hashedIP: identifier.value };
+  const query = { deviceId };
 
   const limitRecord = await IPLimit.findOne(query).lean();
 
   const count = limitRecord?.searchCount || 0;
   const remaining = Math.max(0, MAX_FREE_SEARCHES - count);
 
-  const clientIP = getClientIP(req);
   const result = {
-    identifierType: identifier.type,
-    identifier:
-      identifier.type === "deviceId"
-        ? identifier.value.substring(0, 12) + "..."
-        : identifier.value.substring(0, 8) + "...",
+    identifierType: "deviceId",
+    identifier: deviceId.substring(0, 12) + "...",
     searchCount: count,
     remaining,
     lastSearchAt: limitRecord?.lastSearchAt || null,
     maxFreeSearches: MAX_FREE_SEARCHES,
     canSearch: count < MAX_FREE_SEARCHES,
   };
-
-  if (clientIP) {
-    result.clientIP = clientIP.substring(0, 8) + "...";
-  }
 
   return result;
 }

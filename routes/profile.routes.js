@@ -6,7 +6,10 @@ import { Thread } from "../models/Thread.js";
 import { Reply } from "../models/Reply.js";
 import { Community } from "../models/Community.js";
 import { CommunityMembership } from "../models/CommunityMembership.js";
-import { fetchFullORCIDProfile, fetchORCIDWorks } from "../services/orcid.service.js";
+import {
+  fetchFullORCIDProfile,
+  fetchORCIDWorks,
+} from "../services/orcid.service.js";
 import { fetchAllWorksByOrcid } from "../services/openalex.service.js";
 import { verifySession } from "../middleware/auth.js";
 
@@ -16,12 +19,15 @@ const router = Router();
 const RESEARCHGATE_HOSTS = ["researchgate.net", "www.researchgate.net"];
 // Academia.edu: allow academia.edu and *.academia.edu (e.g. sohag-univ.academia.edu, www.academia.edu)
 const ACADEMIA_DOMAIN_SUFFIX = ".academia.edu";
-const ACADEMIA_REGEX = /^https?:\/\/(www\.)?([a-z0-9-]+\.)?academia\.edu\/[A-Za-z0-9._-]+$/i;
+const ACADEMIA_REGEX =
+  /^https?:\/\/(www\.)?([a-z0-9-]+\.)?academia\.edu\/[A-Za-z0-9._-]+$/i;
 
 function validateAcademicUrl(url) {
-  if (!url || typeof url !== "string") return { valid: false, platform: null, normalizedUrl: null };
+  if (!url || typeof url !== "string")
+    return { valid: false, platform: null, normalizedUrl: null };
   let normalized = url.trim();
-  if (!normalized.startsWith("http://") && !normalized.startsWith("https://")) normalized = "https://" + normalized;
+  if (!normalized.startsWith("http://") && !normalized.startsWith("https://"))
+    normalized = "https://" + normalized;
   let hostname;
   try {
     hostname = new URL(normalized).hostname.toLowerCase();
@@ -33,8 +39,12 @@ function validateAcademicUrl(url) {
     return { valid: true, platform: "researchgate", normalizedUrl: normalized };
   }
   // Academia.edu: allow academia.edu and *.academia.edu
-  if (hostname === "academia.edu" || hostname.endsWith(ACADEMIA_DOMAIN_SUFFIX)) {
-    if (!ACADEMIA_REGEX.test(normalized)) return { valid: false, platform: null, normalizedUrl: null };
+  if (
+    hostname === "academia.edu" ||
+    hostname.endsWith(ACADEMIA_DOMAIN_SUFFIX)
+  ) {
+    if (!ACADEMIA_REGEX.test(normalized))
+      return { valid: false, platform: null, normalizedUrl: null };
     return { valid: true, platform: "academia", normalizedUrl: normalized };
   }
   return { valid: false, platform: null, normalizedUrl: null };
@@ -46,13 +56,18 @@ router.get("/profile/:userId/forum-profile", async (req, res) => {
     const { userId } = req.params;
     const uid = new mongoose.Types.ObjectId(userId);
 
-    const user = await User.findById(uid).select("username handle picture role").lean();
+    const user = await User.findById(uid)
+      .select("username handle picture role")
+      .lean();
     if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
 
     // Forums they have posted in (threads authored by this user; include community/subcategory context)
-    const threads = await Thread.find({ authorUserId: uid, isResearcherForum: false })
+    const threads = await Thread.find({
+      authorUserId: uid,
+      isResearcherForum: false,
+    })
       .populate("communityId", "name slug")
       .populate("subcategoryId", "name slug")
       .sort({ createdAt: -1 })
@@ -62,7 +77,9 @@ router.get("/profile/:userId/forum-profile", async (req, res) => {
     const forumsPosted = threads.map((t) => ({
       _id: t._id,
       title: t.title,
-      community: t.communityId ? { name: t.communityId.name, slug: t.communityId.slug } : null,
+      community: t.communityId
+        ? { name: t.communityId.name, slug: t.communityId.slug }
+        : null,
       subcategory: t.subcategoryId ? { name: t.subcategoryId.name } : null,
       createdAt: t.createdAt,
     }));
@@ -94,7 +111,8 @@ router.get("/profile/:userId/forum-profile", async (req, res) => {
       communitiesJoined,
     });
   } catch (err) {
-    if (err.name === "CastError") return res.status(400).json({ error: "Invalid user ID" });
+    if (err.name === "CastError")
+      return res.status(400).json({ error: "Invalid user ID" });
     console.error("Error fetching forum profile:", err);
     res.status(500).json({ error: "Failed to load profile" });
   }
@@ -104,15 +122,22 @@ router.get("/profile/:userId/forum-profile", async (req, res) => {
 router.get("/profile/publications", verifySession, async (req, res) => {
   try {
     const user = req.user;
-    if (!user) return res.status(401).json({ error: "Authentication required" });
+    if (!user)
+      return res.status(401).json({ error: "Authentication required" });
 
     const profile = await Profile.findOne({ userId: user._id }).lean();
     if (!profile || profile.role !== "researcher")
-      return res.status(403).json({ error: "Only researchers can fetch profile publications" });
+      return res
+        .status(403)
+        .json({ error: "Only researchers can fetch profile publications" });
 
     const orcid = profile.researcher?.orcid?.trim();
     if (!orcid)
-      return res.status(400).json({ error: "ORCID is required. Add your ORCID in your profile first." });
+      return res
+        .status(400)
+        .json({
+          error: "ORCID is required. Add your ORCID in your profile first.",
+        });
 
     const normalizedOrcid = orcid.replace(/\s+/g, "");
 
@@ -123,7 +148,8 @@ router.get("/profile/publications", verifySession, async (req, res) => {
     ]);
 
     const orcidList = orcidWorks.status === "fulfilled" ? orcidWorks.value : [];
-    const openalexList = openalexWorks.status === "fulfilled" ? openalexWorks.value : [];
+    const openalexList =
+      openalexWorks.status === "fulfilled" ? openalexWorks.value : [];
 
     // Deduplicate and merge: prefer doi > pmid > openalexId/orcidWorkId as match key
     const map = new Map();
@@ -138,12 +164,16 @@ router.get("/profile/publications", verifySession, async (req, res) => {
       const key = getKey(pub);
       const existing = map.get(key);
       if (existing) {
-        const sources = new Set((existing.source || "").split(", ").filter(Boolean));
+        const sources = new Set(
+          (existing.source || "").split(", ").filter(Boolean),
+        );
         sources.add(source);
         existing.source = [...sources].sort().join(", ");
         // Prefer OpenAlex fields when merging (has citedByCount)
-        if (source === "openalex" && pub.openalexId) existing.openalexId = pub.openalexId;
-        if (source === "orcid" && pub.orcidWorkId) existing.orcidWorkId = pub.orcidWorkId;
+        if (source === "openalex" && pub.openalexId)
+          existing.openalexId = pub.openalexId;
+        if (source === "orcid" && pub.orcidWorkId)
+          existing.orcidWorkId = pub.orcidWorkId;
       } else {
         map.set(key, { ...pub, source });
       }
@@ -168,83 +198,110 @@ router.get("/profile/:userId", async (req, res) => {
 });
 
 // PUT /api/profile/:userId/selected-publications — Save selected publications to display on profile
-router.put("/profile/:userId/selected-publications", verifySession, async (req, res) => {
-  try {
-    const user = req.user;
-    if (!user) return res.status(401).json({ error: "Authentication required" });
+router.put(
+  "/profile/:userId/selected-publications",
+  verifySession,
+  async (req, res) => {
+    try {
+      const user = req.user;
+      if (!user)
+        return res.status(401).json({ error: "Authentication required" });
 
-    const { userId } = req.params;
-    const userIdStr = user._id?.toString?.() || String(user.id);
-    if (userId !== userIdStr)
-      return res.status(403).json({ error: "You can only update your own profile publications" });
+      const { userId } = req.params;
+      const userIdStr = user._id?.toString?.() || String(user.id);
+      if (userId !== userIdStr)
+        return res
+          .status(403)
+          .json({ error: "You can only update your own profile publications" });
 
-    const profile = await Profile.findOne({ userId: user._id });
-    if (!profile || profile.role !== "researcher")
-      return res.status(403).json({ error: "Only researchers can update profile publications" });
+      const profile = await Profile.findOne({ userId: user._id });
+      if (!profile || profile.role !== "researcher")
+        return res
+          .status(403)
+          .json({ error: "Only researchers can update profile publications" });
 
-    let selectedPublications = req.body?.selectedPublications;
-    if (typeof selectedPublications === "string") {
-      try {
-        selectedPublications = JSON.parse(selectedPublications);
-      } catch {
-        return res.status(400).json({ error: "Invalid selectedPublications format" });
+      let selectedPublications = req.body?.selectedPublications;
+      if (typeof selectedPublications === "string") {
+        try {
+          selectedPublications = JSON.parse(selectedPublications);
+        } catch {
+          return res
+            .status(400)
+            .json({ error: "Invalid selectedPublications format" });
+        }
       }
+      if (!Array.isArray(selectedPublications)) {
+        return res
+          .status(400)
+          .json({ error: "selectedPublications must be an array" });
+      }
+
+      // Normalize and validate each publication (plain objects, correct types for Mongoose)
+      const sanitized = selectedPublications.slice(0, 100).map((p) => {
+        const item = {
+          title: String(p.title || "Untitled"),
+          year: p.year != null ? Number(p.year) || null : null,
+          journal: String(p.journal || p.journalTitle || ""),
+          journalTitle: String(p.journalTitle || p.journal || ""),
+          doi: p.doi ? String(p.doi) : null,
+          pmid: p.pmid ? String(p.pmid) : null,
+          link: p.link || p.url ? String(p.link || p.url) : null,
+          url: p.url || p.link ? String(p.url || p.link) : null,
+          authors: Array.isArray(p.authors)
+            ? p.authors.map((a) => String(a))
+            : [],
+          type: p.type ? String(p.type) : null,
+          openalexId: p.openalexId ? String(p.openalexId) : null,
+          orcidWorkId: p.orcidWorkId != null ? String(p.orcidWorkId) : null,
+          source: p.source ? String(p.source) : null,
+        };
+        return item;
+      });
+
+      const updated = await Profile.findOneAndUpdate(
+        { userId: user._id },
+        { $set: { "researcher.selectedPublications": sanitized } },
+        { new: true },
+      ).lean();
+
+      return res.json({
+        ok: true,
+        selectedPublications:
+          updated?.researcher?.selectedPublications || sanitized,
+      });
+    } catch (err) {
+      console.error("Save selected publications error:", err);
+      return res
+        .status(500)
+        .json({ error: "Failed to save selected publications" });
     }
-    if (!Array.isArray(selectedPublications)) {
-      return res.status(400).json({ error: "selectedPublications must be an array" });
-    }
-
-    // Normalize and validate each publication (plain objects, correct types for Mongoose)
-    const sanitized = selectedPublications.slice(0, 100).map((p) => {
-      const item = {
-        title: String(p.title || "Untitled"),
-        year: p.year != null ? Number(p.year) || null : null,
-        journal: String(p.journal || p.journalTitle || ""),
-        journalTitle: String(p.journalTitle || p.journal || ""),
-        doi: p.doi ? String(p.doi) : null,
-        pmid: p.pmid ? String(p.pmid) : null,
-        link: p.link || p.url ? String(p.link || p.url) : null,
-        url: p.url || p.link ? String(p.url || p.link) : null,
-        authors: Array.isArray(p.authors) ? p.authors.map((a) => String(a)) : [],
-        type: p.type ? String(p.type) : null,
-        openalexId: p.openalexId ? String(p.openalexId) : null,
-        orcidWorkId: p.orcidWorkId != null ? String(p.orcidWorkId) : null,
-        source: p.source ? String(p.source) : null,
-      };
-      return item;
-    });
-
-    const updated = await Profile.findOneAndUpdate(
-      { userId: user._id },
-      { $set: { "researcher.selectedPublications": sanitized } },
-      { new: true }
-    ).lean();
-
-    return res.json({
-      ok: true,
-      selectedPublications: updated?.researcher?.selectedPublications || sanitized,
-    });
-  } catch (err) {
-    console.error("Save selected publications error:", err);
-    return res.status(500).json({ error: "Failed to save selected publications" });
-  }
-});
+  },
+);
 
 // POST /api/profile/link-academic — must be before /profile/:userId so "link-academic" is not captured as userId
 router.post("/profile/link-academic", verifySession, async (req, res) => {
   try {
     const { url } = req.body || {};
     const user = req.user;
-    if (!user) return res.status(401).json({ error: "Authentication required" });
-    if (!url || !url.trim()) return res.status(400).json({ error: "URL is required" });
+    if (!user)
+      return res.status(401).json({ error: "Authentication required" });
+    if (!url || !url.trim())
+      return res.status(400).json({ error: "URL is required" });
 
     const validation = validateAcademicUrl(url.trim());
     if (!validation.valid)
-      return res.status(400).json({ error: "Invalid URL. Use a ResearchGate or Academia.edu profile link." });
+      return res
+        .status(400)
+        .json({
+          error:
+            "Invalid URL. Use a ResearchGate or Academia.edu profile link.",
+        });
 
     const profile = await Profile.findOne({ userId: user._id });
     if (!profile || profile.role !== "researcher")
-      return res.status(403).json({ error: "Only researchers can link academic profiles" });
+      return res
+        .status(403)
+        .json({ error: "Only researchers can link academic profiles" });
 
     const update = {};
     if (validation.platform === "researchgate") {
@@ -254,7 +311,11 @@ router.post("/profile/link-academic", verifySession, async (req, res) => {
       update["researcher.academiaEdu"] = validation.normalizedUrl;
       update["researcher.academiaEduVerification"] = "pending";
     }
-    await Profile.findOneAndUpdate({ userId: user._id }, { $set: update }, { new: true });
+    await Profile.findOneAndUpdate(
+      { userId: user._id },
+      { $set: update },
+      { new: true },
+    );
 
     return res.json({
       ok: true,
@@ -266,7 +327,9 @@ router.post("/profile/link-academic", verifySession, async (req, res) => {
     });
   } catch (err) {
     console.error("link-academic error:", err);
-    return res.status(500).json({ error: err.message || "Failed to save link" });
+    return res
+      .status(500)
+      .json({ error: err.message || "Failed to save link" });
   }
 });
 
@@ -275,7 +338,7 @@ router.post("/profile/:userId", async (req, res) => {
   const { userId } = req.params;
   const payload = req.body || {};
   if (!payload.role) return res.status(400).json({ error: "role is required" });
-  
+
   // Auto-verify researchers with ORCID
   if (payload.role === "researcher" && payload.researcher?.orcid) {
     // If ORCID exists and is being set/updated, auto-verify
@@ -283,11 +346,11 @@ router.post("/profile/:userId", async (req, res) => {
       payload.researcher.isVerified = true;
     }
   }
-  
+
   const doc = await Profile.findOneAndUpdate(
     { userId },
     { ...payload, userId },
-    { new: true, upsert: true }
+    { new: true, upsert: true },
   );
   return res.json({ ok: true, profile: doc });
 });
@@ -297,7 +360,7 @@ router.put("/profile/:userId", async (req, res) => {
   const { userId } = req.params;
   const payload = req.body || {};
   if (!payload.role) return res.status(400).json({ error: "role is required" });
-  
+
   // Auto-verify researchers with ORCID
   if (payload.role === "researcher" && payload.researcher?.orcid) {
     // If ORCID exists and is being set/updated, auto-verify
@@ -305,11 +368,11 @@ router.put("/profile/:userId", async (req, res) => {
       payload.researcher.isVerified = true;
     }
   }
-  
+
   const doc = await Profile.findOneAndUpdate(
     { userId },
     { ...payload, userId },
-    { new: true, upsert: true }
+    { new: true, upsert: true },
   );
   return res.json({ ok: true, profile: doc });
 });
@@ -467,7 +530,9 @@ router.get("/collabiora-expert/profile/:userId", async (req, res) => {
                 : orcidProfileData.totalWorks ||
                   orcidProfileData.publications?.length ||
                   0,
-            publicationsAreSelected: !!(researcher.selectedPublications?.length > 0),
+            publicationsAreSelected: !!(
+              researcher.selectedPublications?.length > 0
+            ),
           };
         } else {
           // ORCID fetch failed; use selectedPublications if any, else empty

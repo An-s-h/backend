@@ -791,9 +791,9 @@ router.post("/communities/:communityId/threads", async (req, res) => {
       isResearcherForum,
     } = req.body;
 
-    if (!authorUserId || !authorRole || !title || !body) {
+    if (!authorUserId || !authorRole || !title || !title.trim()) {
       return res.status(400).json({
-        error: "authorUserId, authorRole, title, body required",
+        error: "authorUserId, authorRole, and title are required",
       });
     }
 
@@ -823,8 +823,8 @@ router.post("/communities/:communityId/threads", async (req, res) => {
       subcategoryId: subcategoryId || null,
       authorUserId,
       authorRole,
-      title,
-      body,
+      title: title.trim(),
+      body: (body && body.trim()) || "", // Optional: allow question-only posts
       tags: tags || [],
       conditions: normalizedConditions,
       onlyResearchersCanReply: !!onlyResearchersCanReply,
@@ -909,11 +909,15 @@ router.post("/communities", async (req, res) => {
       return res.status(400).json({ error: "name is required" });
     }
 
-    // Generate slug from name
-    const slug = name
+    const type = communityType === "researcher" ? "researcher" : "patient";
+    let slug = name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/(^-|-$)/g, "");
+    // Differentiate Patient vs Researcher: same name can exist in both
+    if (type === "researcher") {
+      slug = slug ? `${slug}-researcher` : "researcher";
+    }
 
     // Check if slug already exists
     const existing = await Community.findOne({ slug });
@@ -930,7 +934,7 @@ router.post("/communities", async (req, res) => {
       tags: tags || [],
       createdBy,
       isOfficial: isOfficial || false,
-      communityType: communityType || "patient",
+      communityType: type,
       createdByResearcher: !!createdByResearcher,
     });
 

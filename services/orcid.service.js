@@ -10,9 +10,9 @@ export async function searchResearchers(query) {
   try {
     const crossrefRes = await axios.get(
       `https://api.crossref.org/works?query.author=${encodeURIComponent(
-        query
+        query,
       )}&rows=20`,
-      { timeout: 8000 }
+      { timeout: 8000 },
     );
 
     const items = crossrefRes.data?.message?.items || [];
@@ -36,7 +36,7 @@ export async function searchResearchers(query) {
 
     // Fetch ORCID profiles
     const profiles = await Promise.all(
-      orcidIds.map(async (id) => fetchFullORCIDProfile(id))
+      orcidIds.map(async (id) => fetchFullORCIDProfile(id)),
     );
 
     return profiles.filter(Boolean);
@@ -59,7 +59,7 @@ export async function fetchFullORCIDProfile(orcidId, skipAI = false) {
       {
         headers: { Accept: "application/json" },
         timeout: 10000, // Increased timeout
-      }
+      },
     );
 
     const record = res.data;
@@ -125,16 +125,16 @@ export async function fetchFullORCIDProfile(orcidId, skipAI = false) {
       department: emp["department-name"] || emp.department_name || null,
       startDate: emp["start-date"]
         ? `${emp["start-date"].year?.value || ""}-${String(
-            emp["start-date"].month?.value || ""
+            emp["start-date"].month?.value || "",
           ).padStart(2, "0")}-${String(
-            emp["start-date"].day?.value || ""
+            emp["start-date"].day?.value || "",
           ).padStart(2, "0")}`
         : null,
       endDate: emp["end-date"]
         ? `${emp["end-date"].year?.value || ""}-${String(
-            emp["end-date"].month?.value || ""
+            emp["end-date"].month?.value || "",
           ).padStart(2, "0")}-${String(
-            emp["end-date"].day?.value || ""
+            emp["end-date"].day?.value || "",
           ).padStart(2, "0")}`
         : null,
     }));
@@ -146,16 +146,16 @@ export async function fetchFullORCIDProfile(orcidId, skipAI = false) {
       department: ed["department-name"] || ed.department_name || null,
       startDate: ed["start-date"]
         ? `${ed["start-date"].year?.value || ""}-${String(
-            ed["start-date"].month?.value || ""
+            ed["start-date"].month?.value || "",
           ).padStart(2, "0")}-${String(
-            ed["start-date"].day?.value || ""
+            ed["start-date"].day?.value || "",
           ).padStart(2, "0")}`
         : null,
       endDate: ed["end-date"]
         ? `${ed["end-date"].year?.value || ""}-${String(
-            ed["end-date"].month?.value || ""
+            ed["end-date"].month?.value || "",
           ).padStart(2, "0")}-${String(
-            ed["end-date"].day?.value || ""
+            ed["end-date"].day?.value || "",
           ).padStart(2, "0")}`
         : null,
     }));
@@ -214,12 +214,12 @@ export async function fetchFullORCIDProfile(orcidId, skipAI = false) {
       currency: fund.amount?.currencyCode || null,
       startDate: fund["start-date"]
         ? `${fund["start-date"].year?.value || ""}-${String(
-            fund["start-date"].month?.value || ""
+            fund["start-date"].month?.value || "",
           ).padStart(2, "0")}`
         : null,
       endDate: fund["end-date"]
         ? `${fund["end-date"].year?.value || ""}-${String(
-            fund["end-date"].month?.value || ""
+            fund["end-date"].month?.value || "",
           ).padStart(2, "0")}`
         : null,
     }));
@@ -457,12 +457,12 @@ export async function searchORCID({ q = "" } = {}) {
     // Fallback to ORCID expanded search
     const searchRes = await axios.get(
       `https://pub.orcid.org/v3.0/expanded-search/?q=${encodeURIComponent(
-        q
+        q,
       )}&rows=10`,
       {
         headers: { Accept: "application/json" },
         timeout: 10000,
-      }
+      },
     );
 
     const items = searchRes.data["expanded-result"] || [];
