@@ -1095,6 +1095,15 @@ router.get("/search/experts/platform", async (req, res) => {
         const researcher = profile.researcher || {};
         const locationObj = researcher.location || {};
 
+        // Build location string: City, State/Province, Country
+        const locationParts = [
+          locationObj.city,
+          locationObj.state,
+          locationObj.country,
+        ].filter(Boolean);
+        const locationStr =
+          locationParts.length > 0 ? locationParts.join(", ") : null;
+
         return {
           _id: user._id || user.id,
           id: user._id || user.id,
@@ -1105,10 +1114,7 @@ router.get("/search/experts/platform", async (req, res) => {
             ? `https://orcid.org/${researcher.orcid}`
             : null,
           biography: researcher.bio || null,
-          location:
-            locationObj.city && locationObj.country
-              ? `${locationObj.city}, ${locationObj.country}`
-              : locationObj.city || locationObj.country || null,
+          location: locationStr,
           affiliation: researcher.institutionAffiliation || null,
           currentPosition: researcher.institutionAffiliation || null,
           researchInterests:
@@ -1165,12 +1171,18 @@ router.get("/search/experts/platform", async (req, res) => {
       }
     }
 
-    // Filter by location if provided
+    // Filter by location if provided (supports City, State/Province, Country)
+    // Match if any part of the search location appears in expert's location
     if (location) {
-      const locationLower = location.toLowerCase();
+      const searchParts = location
+        .split(",")
+        .map((p) => p.trim().toLowerCase())
+        .filter(Boolean);
       experts = experts.filter((expert) => {
         if (!expert.location) return false;
-        return expert.location.toLowerCase().includes(locationLower);
+        const expertLocLower = expert.location.toLowerCase();
+        // Must match all specified parts (e.g. "Toronto, Ontario, Canada" matches expert with all three)
+        return searchParts.every((part) => expertLocLower.includes(part));
       });
     }
 

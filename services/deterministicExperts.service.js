@@ -780,8 +780,9 @@ function calculateAuthorRecencyScore(works, currentYear) {
  * Simplified ranking: Sort by papers and citations (no strict checks)
  */
 function rankAuthorsByMetrics(authors, location = null) {
-  // Extract city name for location-based boosting
+  // Extract city, state, country for location-based boosting
   const searchCity = extractCityName(location);
+  const searchState = extractStateName(location);
   const searchCountryCode = location ? extractCountryCode(location) : null;
   const currentYear = new Date().getFullYear();
 
@@ -811,8 +812,7 @@ function rankAuthorsByMetrics(authors, location = null) {
       let locationScore = 0;
 
       if (searchCity) {
-        // City is specifically searched → ONLY city matches get location boost
-        // Non-Toronto experts (even in Canada) get locationScore = 0 (strong penalty)
+        // City is specifically searched → city matches get full boost
         if (
           author.institutionNamesLower &&
           author.institutionNamesLower.length > 0
@@ -820,20 +820,41 @@ function rankAuthorsByMetrics(authors, location = null) {
           const cityMatch = author.institutionNamesLower.some((inst) =>
             inst.includes(searchCity),
           );
-          locationScore = cityMatch ? 1.0 : 0; // 1.0 for city match, 0 for non-match
+          // State match (when city + state specified) gives partial boost
+          const stateMatch =
+            searchState &&
+            author.institutionNamesLower.some((inst) =>
+              inst.includes(searchState),
+            );
+          locationScore = cityMatch ? 1.0 : stateMatch ? 0.5 : 0;
         } else {
-          locationScore = 0; // No institution data → no location boost
+          locationScore = 0;
         }
+      } else if (searchState && searchCountryCode) {
+        // Only state + country (no city) → state match in institution
+        const stateMatch =
+          author.institutionNamesLower &&
+          author.institutionNamesLower.some((inst) =>
+            inst.includes(searchState),
+          );
+        const countryMatch =
+          (author.countryCodes || []).includes(searchCountryCode) ||
+          author.countryCode === searchCountryCode;
+        locationScore =
+          stateMatch && countryMatch ? 0.6 : countryMatch ? 0.3 : 0;
       } else if (searchCountryCode) {
-        // Only country specified (no city) → country-level match is acceptable
-        if (author.countryCode === searchCountryCode) {
-          locationScore = 0.3; // Weak match: right country but no city specified
+        // Only country specified → country-level match
+        if (
+          (author.countryCodes || []).includes(searchCountryCode) ||
+          author.countryCode === searchCountryCode
+        ) {
+          locationScore = 0.3;
         }
       }
 
       // Weighted final score — STRENGTHENED field relevance to prevent off-topic ranking
       let finalScore;
-      if (searchCity || searchCountryCode) {
+      if (searchCity || searchState || searchCountryCode) {
         // When location is specified: field relevance gets MORE weight (30%) to prevent off-topic boost
         finalScore =
           worksScore * 0.15 +
@@ -1175,6 +1196,15 @@ function extractCountryCode(location) {
   };
 
   const locationLower = location.toLowerCase();
+  const parts = parseLocationParts(location);
+
+  // Prefer last part when "City, State, Country" or "City, Country" format
+  if (parts.length >= 2) {
+    const lastPart = parts[parts.length - 1].toLowerCase();
+    if (countryMap[lastPart]) return countryMap[lastPart];
+  }
+
+  // Fallback: check if any part matches a country name
   for (const [country, code] of Object.entries(countryMap)) {
     if (locationLower.includes(country)) {
       return code;
@@ -1185,32 +1215,55 @@ function extractCountryCode(location) {
 }
 
 /**
- * Extract a city/region name from a location string like "Toronto, Canada"
- * Returns the part before the comma (the city) or the full string if no comma
+ * Parse location string into parts: "City, State/Province, Country"
+ * @param {string} location - e.g. "Toronto, Ontario, Canada" or "Toronto, Canada" or "Canada"
+ */
+function parseLocationParts(location) {
+  if (!location) return [];
+  return location.split(",").map((p) => p.trim()).filter(Boolean);
+}
+
+/**
+ * Extract city name from location string (City, State/Province, Country format)
+ * First part: "Toronto, Ontario, Canada" -> "toronto"
  */
 function extractCityName(location) {
-  if (!location) return null;
-  const parts = location.split(",").map((p) => p.trim());
-  // The city is typically the first part: "Toronto, Canada" -> "Toronto"
-  return parts[0]?.toLowerCase() || null;
+  const parts = parseLocationParts(location);
+  return parts.length >= 1 ? parts[0].toLowerCase() : null;
+}
+
+/**
+ * Extract state/province from location string
+ * Second part when 3+ parts: "Toronto, Ontario, Canada" -> "ontario"
+ */
+function extractStateName(location) {
+  const parts = parseLocationParts(location);
+  return parts.length >= 3 ? parts[1].toLowerCase() : null;
 }
 
 /**
  * Check if an author matches the specified location based on their institutions
+ * Supports City, State/Province, Country format
  * @param {Object} authorData - Author data with institutions and countryCodes
- * @param {string} location - Location string like "New Delhi, India" or "India"
+ * @param {string} location - Location string like "Toronto, Ontario, Canada" or "New Delhi, India"
  * @returns {boolean} True if author matches location
  */
 function authorMatchesLocation(authorData, location) {
   if (!location) return true; // No location filter = include all
 
   const searchCity = extractCityName(location);
+  const searchState = extractStateName(location);
   const searchCountryCode = extractCountryCode(location);
 
   // Check if author has any institution in the specified country
   const hasCountryMatch =
     searchCountryCode &&
     (authorData.countryCodes || []).includes(searchCountryCode);
+
+  // Helper: check if institution names contain a term (city, state, etc.)
+  const institutionContains = (term) =>
+    authorData.institutionNamesLower &&
+    authorData.institutionNamesLower.some((inst) => inst.includes(term));
 
   // If city is specified, try to match city name in institution
   if (searchCity) {
@@ -1225,9 +1278,7 @@ function authorMatchesLocation(authorData, location) {
       authorData.institutionNamesLower.length > 0
     ) {
       const cityMatch = authorData.institutionNamesLower.some((inst) => {
-        // Check for exact city match
         if (inst.includes(searchCity)) return true;
-        // Check for normalized city match (e.g., "delhi" in "university of delhi")
         if (normalizedCity !== searchCity && inst.includes(normalizedCity))
           return true;
         return false;
@@ -1236,6 +1287,11 @@ function authorMatchesLocation(authorData, location) {
       if (cityMatch && hasCountryMatch) {
         return true; // City match + country match = strong match
       }
+    }
+
+    // If state/province specified, try state match (e.g., "University of Toronto" + "Ontario")
+    if (searchState && institutionContains(searchState) && hasCountryMatch) {
+      return true;
     }
 
     // If city specified but no city match found, still check country

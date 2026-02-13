@@ -161,10 +161,12 @@ router.get("/recommendations/:userId", async (req, res) => {
         locationForTrials = userLocation.country;
       }
 
-      // For experts query, format as "City, Country" or just "Country"
-      const locationParts = [userLocation.city, userLocation.country].filter(
-        Boolean,
-      );
+      // For experts query, format as "City, State/Province, Country"
+      const locationParts = [
+        userLocation.city,
+        userLocation.state,
+        userLocation.country,
+      ].filter(Boolean);
       if (locationParts.length > 0) {
         locationStringForExperts = locationParts.join(", ");
       } else if (userLocation.country) {
