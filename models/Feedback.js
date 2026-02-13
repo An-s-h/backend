@@ -25,6 +25,7 @@ const feedbackSchema = new mongoose.Schema(
     surveyConfusing: [{ type: String }], // Q6
     surveyReturnLikelihood: { type: Number }, // Q7: 0-10
     surveyImprovement: { type: String }, // Q8: free text
+    surveyWhatMatters: [{ type: String }], // Q9: what matters most (role-based options)
   },
   { timestamps: true },
 );

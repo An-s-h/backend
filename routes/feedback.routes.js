@@ -22,6 +22,7 @@ router.post("/feedback", async (req, res) => {
       confusing,
       returnLikelihood,
       improvement,
+      whatMatters,
     } = req.body;
 
     if (!userId || !rating) {
@@ -59,6 +60,7 @@ router.post("/feedback", async (req, res) => {
             ? Number(returnLikelihood)
             : null,
       surveyImprovement: improvement || "",
+      surveyWhatMatters: Array.isArray(whatMatters) ? whatMatters : [],
     });
 
     res.json({ ok: true, feedback });

@@ -10,11 +10,11 @@
 
 // Rate limits per model (based on your Gemini API quotas)
 const MODEL_LIMITS = {
-  'gemini-2-flash-exp': { rpm: 8, tpm: 200000 }, // Set below actual limit (10) for safety margin
-  'gemini-2.5-flash-lite': { rpm: 3500, tpm: 3500000 }, // Set below actual limit (4K) for safety
-  'gemini-2.5-flash': { rpm: 900, tpm: 900000 }, // Set below actual limit (1K) for safety
-  'gemini-2-flash': { rpm: 1800, tpm: 3500000 }, // Set below actual limit (2K) for safety
-  'gemini-3-flash': { rpm: 900, tpm: 900000 }, // Set below actual limit (1K) for safety
+  'gemini-2-flash-exp': { rpm: 9, tpm: 240000 }, // Set slightly below actual limit (10 RPM, 250K TPM) for safety margin
+  'gemini-2.5-flash-lite': { rpm: 3800, tpm: 3800000 }, // Set slightly below actual limit (4K RPM, 4M TPM) for safety
+  'gemini-2.5-flash': { rpm: 950, tpm: 950000 }, // Set slightly below actual limit (1K RPM, 1M TPM) for safety
+  'gemini-2-flash': { rpm: 1900, tpm: 3800000 }, // Set slightly below actual limit (2K RPM, 4M TPM) for safety
+  'gemini-3-flash': { rpm: 950, tpm: 950000 }, // Set slightly below actual limit (1K RPM, 1M TPM) for safety
 };
 
 // Default to most conservative limit if model not found

@@ -59,19 +59,22 @@ function setRecommendationsCache(userId, value) {
 }
 
 // Periodic cleanup of expired cache entries (every 10 minutes)
-setInterval(() => {
-  const now = Date.now();
-  const keysToDelete = [];
-  for (const [k, v] of recommendationsCache.entries()) {
-    if (now > v.expires) {
-      keysToDelete.push(k);
+setInterval(
+  () => {
+    const now = Date.now();
+    const keysToDelete = [];
+    for (const [k, v] of recommendationsCache.entries()) {
+      if (now > v.expires) {
+        keysToDelete.push(k);
+      }
     }
-  }
-  keysToDelete.forEach((k) => recommendationsCache.delete(k));
-  if (keysToDelete.length > 0) {
-    console.log(`Cleaned up ${keysToDelete.length} expired cache entries`);
-  }
-}, 1000 * 60 * 10); // Every 10 minutes
+    keysToDelete.forEach((k) => recommendationsCache.delete(k));
+    if (keysToDelete.length > 0) {
+      console.log(`Cleaned up ${keysToDelete.length} expired cache entries`);
+    }
+  },
+  1000 * 60 * 10,
+); // Every 10 minutes
 
 // Get all researchers (for dashboards)
 router.get("/researchers", async (req, res) => {
@@ -160,7 +163,7 @@ router.get("/recommendations/:userId", async (req, res) => {
 
       // For experts query, format as "City, Country" or just "Country"
       const locationParts = [userLocation.city, userLocation.country].filter(
-        Boolean
+        Boolean,
       );
       if (locationParts.length > 0) {
         locationStringForExperts = locationParts.join(", ");
@@ -223,7 +226,7 @@ router.get("/recommendations/:userId", async (req, res) => {
               pageSize: 50,
               hasMore: false,
             };
-          }
+          },
         ),
         // Fetch global experts using deterministic approach (dashboard: limit OpenAlex to top 100 for speed + skip AI summaries)
         findDeterministicExperts(
@@ -231,10 +234,10 @@ router.get("/recommendations/:userId", async (req, res) => {
           locationStringForExperts || null, // Pass location separately (not in query string)
           1, // page 1
           6, // Fetch 6 experts for recommendations
-          { 
+          {
             limitOpenAlexProfiles: true, // Dashboard only: fetch top 100 authors for faster load
-            skipAISummaries: true // Dashboard only: skip AI summary generation for much faster load
-          }
+            skipAISummaries: true, // Dashboard only: skip AI summary generation for much faster load
+          },
         ).catch((error) => {
           console.error("Error fetching global experts:", error);
           // Return empty array on error, don't fail the entire request
@@ -246,14 +249,14 @@ router.get("/recommendations/:userId", async (req, res) => {
             hasMore: false,
           };
         }),
-      ]
+      ],
     );
 
     // Extract items from the result objects (both services return objects with items property)
     const allTrials = trialsResult?.items || [];
     // Filter out publications without abstracts
     const publications = (publicationsResult?.items || []).filter(
-      (pub) => pub.abstract && pub.abstract.trim().length > 0
+      (pub) => pub.abstract && pub.abstract.trim().length > 0,
     );
     // Extract experts array from deterministic result (returns { experts, totalFound, ... })
     const globalExpertsList = globalExperts?.experts || [];
@@ -313,7 +316,7 @@ router.get("/recommendations/:userId", async (req, res) => {
 
     // Sort trials by match percentage (descending) - same as search route
     const sortedTrials = trialsWithMatch.sort(
-      (a, b) => (b.matchPercentage || -1) - (a.matchPercentage || -1)
+      (a, b) => (b.matchPercentage || -1) - (a.matchPercentage || -1),
     );
 
     // Limit to top 9 trials (for recommendations)

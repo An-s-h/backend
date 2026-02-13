@@ -100,20 +100,24 @@ export async function sendVerificationEmail(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        from: fromEmail.includes("<") ? fromEmail : `"Collabiora" <${fromEmail}>`,
-        to: [email],
+        from: fromEmail.includes("<") ? fromEmail : `Collabiora <${fromEmail}>`,
+        to: email,
         subject: "Verify Your Collabiora Email Address",
         html,
+        // Add plain text version for better deliverability
+        text: `Hello ${username}!\n\nThank you for signing up for Collabiora. Please verify your email address to complete your registration and unlock all features.\n\nYour Verification Code: ${otp}\n(This code expires in 15 minutes)\n\nOr verify by clicking this link:\n${verificationLink}\n\nThe verification link will expire in 24 hours. If you didn't create an account with Collabiora, please ignore this email.\n\n© ${new Date().getFullYear()} Collabiora. All rights reserved.`,
       }),
     });
 
     if (!response.ok) {
       const errBody = await response.text();
       let errMessage = errBody;
+      let errorDetails = {};
       try {
-        const parsed = JSON.parse(errBody);
-        errMessage = parsed.message || parsed.error || errBody;
+        errorDetails = JSON.parse(errBody);
+        errMessage = errorDetails.message || errorDetails.error || JSON.stringify(errorDetails);
       } catch (_) {}
+      console.error(`Unosend API error (${response.status}):`, errorDetails);
       throw new Error(`Unosend API error (${response.status}): ${errMessage}`);
     }
 
@@ -207,20 +211,24 @@ export async function sendPasswordResetEmail(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        from: fromEmail.includes("<") ? fromEmail : `"Collabiora" <${fromEmail}>`,
-        to: [email],
+        from: fromEmail.includes("<") ? fromEmail : `Collabiora <${fromEmail}>`,
+        to: email,
         subject: "Reset Your Collabiora Password",
         html,
+        // Add plain text version for better deliverability
+        text: `Hello ${username}!\n\nWe received a request to reset your password for your Collabiora account. Click the link below to reset your password:\n\n${resetLink}\n\nIMPORTANT: This link will expire in 15 minutes and can only be used once. If you didn't request a password reset, please ignore this email and your password will remain unchanged.\n\n© ${new Date().getFullYear()} Collabiora. All rights reserved.`,
       }),
     });
 
     if (!response.ok) {
       const errBody = await response.text();
       let errMessage = errBody;
+      let errorDetails = {};
       try {
-        const parsed = JSON.parse(errBody);
-        errMessage = parsed.message || parsed.error || errBody;
+        errorDetails = JSON.parse(errBody);
+        errMessage = errorDetails.message || errorDetails.error || JSON.stringify(errorDetails);
       } catch (_) {}
+      console.error(`Unosend API error (${response.status}):`, errorDetails);
       throw new Error(`Unosend API error (${response.status}): ${errMessage}`);
     }
 
@@ -295,20 +303,24 @@ export async function sendPasswordResetConfirmationEmail(email, username) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        from: fromEmail.includes("<") ? fromEmail : `"Collabiora" <${fromEmail}>`,
-        to: [email],
+        from: fromEmail.includes("<") ? fromEmail : `Collabiora <${fromEmail}>`,
+        to: email,
         subject: "Your Password Was Changed Successfully",
         html,
+        // Add plain text version for better deliverability
+        text: `Hello ${username}!\n\nYour password was successfully changed on ${new Date().toLocaleString()}.\n\nIf you didn't make this change, please contact our support team immediately to secure your account.\n\n© ${new Date().getFullYear()} Collabiora. All rights reserved.`,
       }),
     });
 
     if (!response.ok) {
       const errBody = await response.text();
       let errMessage = errBody;
+      let errorDetails = {};
       try {
-        const parsed = JSON.parse(errBody);
-        errMessage = parsed.message || parsed.error || errBody;
+        errorDetails = JSON.parse(errBody);
+        errMessage = errorDetails.message || errorDetails.error || JSON.stringify(errorDetails);
       } catch (_) {}
+      console.error(`Unosend API error (${response.status}):`, errorDetails);
       throw new Error(`Unosend API error (${response.status}): ${errMessage}`);
     }
 
