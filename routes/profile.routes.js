@@ -63,6 +63,15 @@ router.get("/profile/:userId/forum-profile", async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
+    let displayName = user.handle || user.username || "User";
+    if (user.role === "researcher") {
+      const profile = await Profile.findOne({ userId: uid }).lean();
+      if (profile?.researcher) {
+        const { getResearcherDisplayName } = await import("../utils/researcherDisplayName.js");
+        displayName = getResearcherDisplayName(user.username || user.name, profile.researcher);
+      }
+    }
+
     // Forums they have posted in (threads authored by this user; include community/subcategory context)
     const threads = await Thread.find({
       authorUserId: uid,
@@ -105,7 +114,7 @@ router.get("/profile/:userId/forum-profile", async (req, res) => {
         handle: user.handle,
         picture: user.picture,
         role: user.role,
-        displayName: user.handle || user.username || "User",
+        displayName,
       },
       forumsPosted,
       communitiesJoined,

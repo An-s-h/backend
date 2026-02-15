@@ -8,6 +8,7 @@ import { Community } from "../models/Community.js";
 import { Subcategory } from "../models/Subcategory.js";
 import { CommunityMembership } from "../models/CommunityMembership.js";
 import { verifySession } from "../middleware/auth.js";
+import { enrichAuthorsWithDisplayName, getResearcherDisplayName } from "../utils/researcherDisplayName.js";
 
 const router = Router();
 
@@ -99,7 +100,7 @@ router.get("/posts", async (req, res) => {
 
     // Get posts with pagination
     const posts = await Post.find(query)
-      .populate("authorUserId", "username email picture")
+      .populate("authorUserId", "username email picture role")
       .populate("communityId", "name slug color icon")
       .populate("subcategoryId", "name slug")
       .populate("linkedThreadId", "title body categoryId")
@@ -107,6 +108,21 @@ router.get("/posts", async (req, res) => {
       .skip(skip)
       .limit(limit)
       .lean();
+
+    // Enrich researcher authors with displayName (Dr. Name, MD PHD)
+    const authorIds = [...new Set(posts.map((p) => p.authorUserId?._id?.toString()).filter(Boolean))];
+    const researcherIds = authorIds.filter((id) => {
+      const author = posts.find((p) => p.authorUserId?._id?.toString() === id)?.authorUserId;
+      return author?.role === "researcher";
+    });
+    if (researcherIds.length > 0) {
+      const profiles = await Profile.find({ userId: { $in: researcherIds } }).lean();
+      const profileMap = {};
+      profiles.forEach((p) => {
+        profileMap[p.userId.toString()] = p;
+      });
+      enrichAuthorsWithDisplayName(posts, profileMap);
+    }
 
     // Get total count
     const totalCount = await Post.countDocuments(query);
@@ -158,11 +174,21 @@ router.get("/posts/:id", async (req, res) => {
     const { userId } = req.query;
 
     const post = await Post.findById(id)
-      .populate("authorUserId", "username email picture")
+      .populate("authorUserId", "username email picture role")
       .populate("communityId", "name slug color icon")
       .populate("subcategoryId", "name slug")
       .populate("linkedThreadId", "title body categoryId")
       .lean();
+
+    if (post?.authorUserId?.role === "researcher") {
+      const profile = await Profile.findOne({ userId: post.authorUserId._id }).lean();
+      if (profile?.researcher) {
+        post.authorUserId.displayName = getResearcherDisplayName(
+          post.authorUserId.username || post.authorUserId.name,
+          profile.researcher
+        );
+      }
+    }
 
     if (!post) {
       return res.status(404).json({ error: "Post not found" });
@@ -447,9 +473,24 @@ router.get("/posts/:id/comments", async (req, res) => {
 
     // Get all comments for this post
     const comments = await Comment.find({ postId: id })
-      .populate("authorUserId", "username email picture")
+      .populate("authorUserId", "username email picture role")
       .sort({ createdAt: 1 })
       .lean();
+
+    // Enrich researcher comment authors with displayName
+    const commentAuthorIds = [...new Set(comments.map((c) => c.authorUserId?._id?.toString()).filter(Boolean))];
+    const researcherCommentIds = commentAuthorIds.filter((id) => {
+      const author = comments.find((c) => c.authorUserId?._id?.toString() === id)?.authorUserId;
+      return author?.role === "researcher";
+    });
+    if (researcherCommentIds.length > 0) {
+      const profiles = await Profile.find({ userId: { $in: researcherCommentIds } }).lean();
+      const profileMap = {};
+      profiles.forEach((p) => {
+        profileMap[p.userId.toString()] = p;
+      });
+      enrichAuthorsWithDisplayName(comments, profileMap);
+    }
 
     // Build comment tree (handle nested comments)
     const buildCommentTree = (parentId = null) => {
@@ -528,8 +569,18 @@ router.post("/posts/:id/comments", verifySession, async (req, res) => {
 
     // Populate comment with author info
     const populatedComment = await Comment.findById(comment._id)
-      .populate("authorUserId", "username email picture")
+      .populate("authorUserId", "username email picture role")
       .lean();
+
+    if (populatedComment?.authorUserId?.role === "researcher") {
+      const profile = await Profile.findOne({ userId: populatedComment.authorUserId._id }).lean();
+      if (profile?.researcher) {
+        populatedComment.authorUserId.displayName = getResearcherDisplayName(
+          populatedComment.authorUserId.username || populatedComment.authorUserId.name,
+          profile.researcher
+        );
+      }
+    }
 
     // Invalidate cache
     invalidateCache("posts:");

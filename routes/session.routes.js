@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { User } from "../models/User.js";
 import { Profile } from "../models/Profile.js";
+import { getResearcherDisplayName } from "../utils/researcherDisplayName.js";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { sendVerificationEmail, sendPasswordResetEmail, sendPasswordResetConfirmationEmail } from "../services/email.service.js";
@@ -22,6 +23,19 @@ function isUserAdmin(user) {
     : [];
   const userEmail = (user?.email || "").toLowerCase();
   return !!user?.isAdmin || (adminEmails.length > 0 && userEmail && adminEmails.includes(userEmail));
+}
+
+// Add displayName for researchers (Dr. Name, MD PHD) so frontend can show it in nav/dashboard
+async function addResearcherDisplayName(userResponse) {
+  if (!userResponse || userResponse.role !== "researcher") return userResponse;
+  const profile = await Profile.findOne({ userId: userResponse._id }).lean();
+  if (profile?.researcher) {
+    userResponse.displayName = getResearcherDisplayName(
+      userResponse.username || userResponse.name,
+      profile.researcher
+    );
+  }
+  return userResponse;
 }
 
 // POST /api/auth/register - Register new user
@@ -69,8 +83,9 @@ router.post("/auth/register", async (req, res) => {
     // Remove password from response
     const userResponse = user.toObject();
     delete userResponse.password;
+    const withDisplayName = await addResearcherDisplayName(userResponse);
 
-    return res.json({ user: userResponse, token });
+    return res.json({ user: withDisplayName, token });
   } catch (error) {
     console.error("Registration error:", error);
     if (error.code === 11000) {
@@ -118,8 +133,9 @@ router.post("/auth/login", async (req, res) => {
     // Remove password from response
     const userResponse = user.toObject();
     delete userResponse.password;
+    const withDisplayName = await addResearcherDisplayName(userResponse);
 
-    return res.json({ user: userResponse, token, isAdmin });
+    return res.json({ user: withDisplayName, token, isAdmin });
   } catch (error) {
     console.error("Login error:", error);
     return res.status(500).json({ error: "Failed to login" });
@@ -314,8 +330,9 @@ router.post("/auth/update-profile", async (req, res) => {
     // Remove password from response
     const userResponse = user.toObject();
     delete userResponse.password;
+    const withDisplayName = await addResearcherDisplayName(userResponse);
 
-    return res.json({ user: userResponse });
+    return res.json({ user: withDisplayName });
   } catch (error) {
     console.error("Profile update error:", error);
     return res.status(500).json({ error: "Failed to update profile" });
@@ -376,8 +393,9 @@ router.put("/auth/update-user/:userId", async (req, res) => {
     // Remove password from response
     const userResponse = user.toObject();
     delete userResponse.password;
+    const withDisplayName = await addResearcherDisplayName(userResponse);
 
-    return res.json({ user: userResponse });
+    return res.json({ user: withDisplayName });
   } catch (error) {
     console.error("User update error:", error);
     // Handle duplicate key error for handle
@@ -625,9 +643,10 @@ router.post("/auth/oauth-sync", async (req, res) => {
     // Remove sensitive fields from response
     const userResponse = user.toObject();
     delete userResponse.password;
+    const withDisplayName = await addResearcherDisplayName(userResponse);
 
     return res.json({
-      user: userResponse,
+      user: withDisplayName,
       token,
       isNewUser,
       isAdmin,
@@ -732,9 +751,10 @@ router.post("/auth/complete-oauth-profile", async (req, res) => {
     // Remove sensitive fields from response
     const userResponse = user.toObject();
     delete userResponse.password;
+    const withDisplayName = await addResearcherDisplayName(userResponse);
 
     return res.json({
-      user: userResponse,
+      user: withDisplayName,
       token, // Return token so frontend can store it
     });
   } catch (error) {

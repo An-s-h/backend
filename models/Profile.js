@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 const locationSchema = new mongoose.Schema(
   {
     city: String,
+    state: String, // State, province, or region
     country: String,
   },
   { _id: false }

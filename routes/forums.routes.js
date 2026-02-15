@@ -7,6 +7,7 @@ import { User } from "../models/User.js";
 import { Profile } from "../models/Profile.js";
 import { Notification } from "../models/Notification.js";
 import { verifySession } from "../middleware/auth.js";
+import { enrichAuthorsWithDisplayName, getResearcherDisplayName } from "../utils/researcherDisplayName.js";
 
 const router = Router();
 
@@ -121,9 +122,24 @@ router.get("/forums/threads", async (req, res) => {
   };
   const threads = await Thread.find(q)
     .populate("categoryId", "name slug")
-    .populate("authorUserId", "username email picture handle nameHidden")
+    .populate("authorUserId", "username email picture handle nameHidden role")
     .sort({ createdAt: -1 })
     .lean();
+
+  // Enrich researcher authors with displayName (Dr. Name, MD PHD)
+  const authorIds = [...new Set(threads.map((t) => t.authorUserId?._id?.toString()).filter(Boolean))];
+  const researcherIds = authorIds.filter((id) => {
+    const author = threads.find((t) => t.authorUserId?._id?.toString() === id)?.authorUserId;
+    return author?.role === "researcher";
+  });
+  if (researcherIds.length > 0) {
+    const profiles = await Profile.find({ userId: { $in: researcherIds } }).lean();
+    const profileMap = {};
+    profiles.forEach((p) => {
+      profileMap[p.userId.toString()] = p;
+    });
+    enrichAuthorsWithDisplayName(threads, profileMap);
+  }
 
   // Get reply counts and researcher-reply flags for each thread
   const threadIds = threads.map((t) => t._id);
@@ -201,9 +217,24 @@ router.get("/researcher-forums/threads", async (req, res) => {
   const threads = await Thread.find(q)
     .populate("communityId", "name slug icon color")
     .populate("subcategoryId", "name slug")
-    .populate("authorUserId", "username email picture handle nameHidden")
+    .populate("authorUserId", "username email picture handle nameHidden role")
     .sort({ createdAt: -1 })
     .lean();
+
+  // Enrich researcher authors with displayName (Dr. Name, MD PHD)
+  const authorIds = [...new Set(threads.map((t) => t.authorUserId?._id?.toString()).filter(Boolean))];
+  const researcherIds = authorIds.filter((id) => {
+    const author = threads.find((t) => t.authorUserId?._id?.toString() === id)?.authorUserId;
+    return author?.role === "researcher";
+  });
+  if (researcherIds.length > 0) {
+    const profiles = await Profile.find({ userId: { $in: researcherIds } }).lean();
+    const profileMap = {};
+    profiles.forEach((p) => {
+      profileMap[p.userId.toString()] = p;
+    });
+    enrichAuthorsWithDisplayName(threads, profileMap);
+  }
 
   // Get reply counts and researcher-reply flags
   const threadIds = threads.map((t) => t._id);
@@ -250,7 +281,7 @@ router.get("/forums/threads/:threadId", async (req, res) => {
 
   const thread = await Thread.findById(threadId)
     .populate("categoryId", "name slug")
-    .populate("authorUserId", "username email picture handle nameHidden")
+    .populate("authorUserId", "username email picture handle nameHidden role")
     .lean();
 
   if (!thread) return res.status(404).json({ error: "Thread not found" });
@@ -260,20 +291,29 @@ router.get("/forums/threads/:threadId", async (req, res) => {
 
   // Get all replies with populated data
   const replies = await Reply.find({ threadId })
-    .populate("authorUserId", "username email picture handle nameHidden")
+    .populate("authorUserId", "username email picture handle nameHidden role")
     .sort({ createdAt: 1 })
     .lean();
 
-  // Get researcher specialties for replies
-  const researcherIds = replies
+  // Get researcher profiles for thread author and reply authors (for displayName + specialties)
+  const replyResearcherIds = replies
     .filter((r) => r.authorRole === "researcher")
     .map((r) => r.authorUserId?._id || r.authorUserId);
-  
-  const profiles = await Profile.find({ userId: { $in: researcherIds } }).lean();
+  const threadAuthorId = thread.authorRole === "researcher" && thread.authorUserId?._id
+    ? thread.authorUserId._id
+    : null;
+  const allResearcherIds = [...new Set([
+    ...replyResearcherIds.map((id) => id?.toString()).filter(Boolean),
+    threadAuthorId?.toString(),
+  ].filter(Boolean))];
+  const profiles = await Profile.find({ userId: { $in: allResearcherIds } }).lean();
   const profileMap = {};
   profiles.forEach((p) => {
     profileMap[p.userId.toString()] = p;
   });
+
+  enrichAuthorsWithDisplayName([thread], profileMap);
+  enrichAuthorsWithDisplayName(replies, profileMap);
 
   // Build tree structure
   const buildReplyTree = (parentId = null) => {
@@ -348,8 +388,18 @@ router.post("/forums/threads", async (req, res) => {
 
   const populatedThread = await Thread.findById(thread._id)
     .populate("categoryId", "name slug")
-    .populate("authorUserId", "username email picture handle nameHidden")
+    .populate("authorUserId", "username email picture handle nameHidden role")
     .lean();
+
+  if (populatedThread?.authorUserId?.role === "researcher") {
+    const profile = await Profile.findOne({ userId: populatedThread.authorUserId._id }).lean();
+    if (profile?.researcher) {
+      populatedThread.authorUserId.displayName = getResearcherDisplayName(
+        populatedThread.authorUserId.username || populatedThread.authorUserId.name,
+        profile.researcher
+      );
+    }
+  }
 
   // If patient creates a thread, notify researchers in matching specialties
   if (authorRole === "patient") {
@@ -443,15 +493,21 @@ router.post("/forums/replies", async (req, res) => {
   });
 
   const populatedReply = await Reply.findById(reply._id)
-    .populate("authorUserId", "username email picture handle nameHidden")
+    .populate("authorUserId", "username email picture handle nameHidden role")
     .lean();
 
-  // Get researcher profile for specialties if author is researcher
+  // Get researcher profile for specialties and displayName if author is researcher
   let specialties = [];
   if (authorRole === "researcher") {
-    const profile = await Profile.findOne({ userId: authorUserId });
-    specialties =
-      profile?.researcher?.specialties || profile?.researcher?.interests || [];
+    const profile = await Profile.findOne({ userId: authorUserId }).lean();
+    if (profile?.researcher) {
+      specialties =
+        profile.researcher?.specialties || profile.researcher?.interests || [];
+      populatedReply.authorUserId.displayName = getResearcherDisplayName(
+        populatedReply.authorUserId.username || populatedReply.authorUserId.name,
+        profile.researcher
+      );
+    }
   }
 
   // Create notification for thread author (if reply author is different)
@@ -613,7 +669,7 @@ router.patch("/forums/replies/:replyId", async (req, res) => {
   invalidateCache("forums:threads:");
 
   const populated = await Reply.findById(reply._id)
-    .populate("authorUserId", "username email picture handle nameHidden")
+    .populate("authorUserId", "username email picture handle nameHidden role")
     .lean();
 
   res.json({

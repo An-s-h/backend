@@ -584,6 +584,28 @@ router.delete("/admin/forums/categories/:id", verifyAdmin, async (req, res) => {
   }
 });
 
+// Bulk delete forum categories (and their threads + replies)
+router.post("/admin/forums/categories/bulk-delete", verifyAdmin, async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: "ids array is required and must not be empty" });
+    }
+    const validIds = ids.filter((id) => mongoose.Types.ObjectId.isValid(id));
+    if (validIds.length === 0) {
+      return res.status(400).json({ error: "No valid category ids provided" });
+    }
+    const threadIds = await Thread.find({ categoryId: { $in: validIds } }).distinct("_id");
+    await Reply.deleteMany({ threadId: { $in: threadIds } });
+    await Thread.deleteMany({ categoryId: { $in: validIds } });
+    const result = await ForumCategory.deleteMany({ _id: { $in: validIds } });
+    res.json({ ok: true, message: `${result.deletedCount} forum categor${result.deletedCount === 1 ? "y" : "ies"} deleted successfully` });
+  } catch (error) {
+    console.error("Error bulk deleting forum categories:", error);
+    res.status(500).json({ error: "Failed to delete forum categories" });
+  }
+});
+
 // List forum threads (all or by category)
 router.get("/admin/forums/threads", verifyAdmin, async (req, res) => {
   try {
@@ -635,6 +657,26 @@ router.delete("/admin/forums/threads/:id", verifyAdmin, async (req, res) => {
   } catch (error) {
     console.error("Error deleting thread:", error);
     res.status(500).json({ error: "Failed to delete thread" });
+  }
+});
+
+// Bulk delete forum threads (and their replies)
+router.post("/admin/forums/threads/bulk-delete", verifyAdmin, async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: "ids array is required and must not be empty" });
+    }
+    const validIds = ids.filter((id) => mongoose.Types.ObjectId.isValid(id));
+    if (validIds.length === 0) {
+      return res.status(400).json({ error: "No valid thread ids provided" });
+    }
+    await Reply.deleteMany({ threadId: { $in: validIds } });
+    const result = await Thread.deleteMany({ _id: { $in: validIds } });
+    res.json({ ok: true, message: `${result.deletedCount} thread${result.deletedCount === 1 ? "" : "s"} deleted successfully` });
+  } catch (error) {
+    console.error("Error bulk deleting forum threads:", error);
+    res.status(500).json({ error: "Failed to delete forum threads" });
   }
 });
 

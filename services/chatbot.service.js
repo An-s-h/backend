@@ -152,6 +152,48 @@ function detectPublicationSummaryFocus(query) {
 }
 
 /**
+ * Detect if user is asking to "pull up" or "get" the link to a specific publication by name/title
+ */
+function detectPublicationLinkIntent(query) {
+  const q = query.toLowerCase().trim();
+  const patterns = [
+    /\b(pull up|get|give me|show me|find me|fetch)\s+(the\s+)?(link|url)\s+to\b/,
+    /\b(link|url)\s+to\s+(the\s+)?(publication|paper|article|study)\b/,
+    /\bcan\s+(you|u)\s+(pull up|get|find|show)\s+(the\s+)?(link\s+to)?\b/,
+    /\b(pull up|get)\s+link\s+to\b/,
+  ];
+  return patterns.some((p) => p.test(q));
+}
+
+/**
+ * Extract publication title from "pull up link to X" / "link to X" style queries
+ */
+function extractPublicationTitleFromLinkRequest(query) {
+  const q = query.trim();
+  const patterns = [
+    /\b(?:pull up|get|give me|show me|find me|fetch)\s+(?:the\s+)?(?:link\s+to|link)\s+(?:the\s+)?(?:publication\s+)?["']?(.+?)["']?\s*[.?!]?$/i,
+    /\b(?:can\s+(?:you|u)\s+)(?:pull up|get|find|show)\s+(?:the\s+)?(?:link\s+to\s+)?["']?(.+?)["']?\s*[.?!]?$/i,
+    /\b(?:link|url)\s+to\s+(?:the\s+)?(?:publication\s+)?["']?(.+?)["']?\s*[.?!]?$/i,
+    /\b(?:pull up|get)\s+link\s+to\s+["']?(.+?)["']?\s*[.?!]?$/i,
+  ];
+  for (const pattern of patterns) {
+    const match = q.match(pattern);
+    if (match && match[1]) {
+      let title = match[1].trim();
+      title = title.replace(/\s*[.;:!?]+$/, "").trim();
+      if (title.length >= 5) return title;
+    }
+  }
+  // Fallback: strip common prefixes and use the rest as title
+  const stripped = q
+    .replace(/^(?:can you|can u|could you)\s+(?:please\s+)?(?:pull up|get|find|show)\s+(?:the\s+)?link\s+to\s+/i, "")
+    .replace(/^(?:pull up|get|give me|show me)\s+(?:the\s+)?link\s+to\s+/i, "")
+    .replace(/\s*[.;:!?]+$/, "")
+    .trim();
+  return stripped.length >= 5 ? stripped : null;
+}
+
+/**
  * Detect if query is asking for publications, trials, or experts
  */
 function detectSearchIntent(query) {
@@ -568,6 +610,41 @@ export async function generateChatResponse(messages, res, req = null) {
   
   // Check for "general knowledge" / "web overview" questions - use Gemini with Google Search grounding
   const useGroundedOverview = detectGeneralKnowledgeIntent(userQuery) && !itemContext && (apiKey || apiKey2);
+
+  // Check if user is asking to "pull up link" to a specific publication by title (trial for this feature)
+  if (!itemContext && detectPublicationLinkIntent(userQuery)) {
+    const pubTitle = extractPublicationTitleFromLinkRequest(userQuery);
+    if (pubTitle) {
+      try {
+        const linkResults = await fetchPublications(pubTitle, 3, false);
+        if (linkResults && linkResults.length > 0) {
+          const pub = linkResults[0];
+          res.setHeader("Content-Type", "text/event-stream");
+          res.setHeader("Cache-Control", "no-cache");
+          res.setHeader("Connection", "keep-alive");
+          res.write(`data: ${JSON.stringify({ text: "Here's the publication you asked for:" })}\n\n`);
+          const publicationDetails = {
+            showFullCard: true,
+            title: pub.title || "Unknown",
+            pmid: pub.pmid,
+            url: pub.url || `https://pubmed.ncbi.nlm.nih.gov/${pub.pmid}`,
+            authors: pub.authors || "Unknown",
+            journal: pub.journal || "Unknown",
+            year: pub.year || "Unknown",
+            abstract: pub.abstract || null,
+            keywords: null,
+            publicationTypes: null,
+          };
+          res.write(`data: ${JSON.stringify({ publicationDetails })}\n\n`);
+          res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+          res.end();
+          return;
+        }
+      } catch (linkErr) {
+        console.warn("[Chatbot] Pull-up-link search failed:", linkErr.message);
+      }
+    }
+  }
 
   // Check if user is asking for publications, trials, or experts
   const searchIntent = detectSearchIntent(userQuery);
