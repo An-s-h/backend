@@ -47,7 +47,8 @@ app.use(
   "https://collabioralandingpage.vercel.app",
   "https://incredible-otter-249a24.netlify.app",
   "https://www.collabiora.com",
-  "https://collabiora.com"
+  "https://collabiora.com",
+  "https://beta.collabiora.com",
 ],
     credentials: true, // Allow cookies to be sent
   })
