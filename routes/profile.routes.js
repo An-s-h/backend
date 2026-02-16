@@ -6,6 +6,8 @@ import { Thread } from "../models/Thread.js";
 import { Reply } from "../models/Reply.js";
 import { Community } from "../models/Community.js";
 import { CommunityMembership } from "../models/CommunityMembership.js";
+import { Follow } from "../models/Follow.js";
+import { Post } from "../models/Post.js";
 import {
   fetchFullORCIDProfile,
   fetchORCIDWorks,
@@ -124,6 +126,45 @@ router.get("/profile/:userId/forum-profile", async (req, res) => {
       return res.status(400).json({ error: "Invalid user ID" });
     console.error("Error fetching forum profile:", err);
     res.status(500).json({ error: "Failed to load profile" });
+  }
+});
+
+// GET /api/profile/:userId/landing-stats — Forums Participated, People Followed, Community Posts (real counts)
+router.get("/profile/:userId/landing-stats", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const uid = new mongoose.Types.ObjectId(userId);
+
+    const user = await User.findById(uid).select("_id").lean();
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Forums Participated: distinct thread IDs where user authored (Thread) OR replied (Reply)
+    const [authoredThreadIds, repliedThreadIds] = await Promise.all([
+      Thread.find({ authorUserId: uid }).select("_id").lean(),
+      Reply.find({ authorUserId: uid }).distinct("threadId"),
+    ]);
+    const authoredIds = new Set(authoredThreadIds.map((t) => t._id.toString()));
+    repliedThreadIds.forEach((id) => authoredIds.add(id.toString()));
+    const forumsParticipated = authoredIds.size;
+
+    // People Followed
+    const peopleFollowed = await Follow.countDocuments({ followerId: uid });
+
+    // Community Posts
+    const communityPosts = await Post.countDocuments({ authorUserId: uid });
+
+    res.json({
+      forumsParticipated,
+      peopleFollowed,
+      communityPosts,
+    });
+  } catch (err) {
+    if (err.name === "CastError")
+      return res.status(400).json({ error: "Invalid user ID" });
+    console.error("Error fetching landing stats:", err);
+    res.status(500).json({ error: "Failed to load stats" });
   }
 });
 

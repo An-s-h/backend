@@ -113,14 +113,17 @@ router.get("/insights/:userId/followers", async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
     
+    // Filter out orphaned follow records (e.g. follower user was deleted)
+    const validFollowers = followers.filter((f) => f.followerId != null);
+
     res.json({
-      followers: followers.map(f => ({
+      followers: validFollowers.map((f) => ({
         _id: f.followerId._id || f.followerId.id,
         username: f.followerId.username,
         email: f.followerId.email,
         followedAt: f.createdAt,
       })),
-      count: followers.length,
+      count: validFollowers.length,
     });
   } catch (error) {
     console.error("Error fetching followers:", error);
@@ -137,8 +140,11 @@ router.get("/insights/:userId/following", async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
     
+    // Filter out orphaned follow records (e.g. followed user was deleted)
+    const validFollowing = following.filter((f) => f.followingId != null);
+
     res.json({
-      following: following.map(f => ({
+      following: validFollowing.map((f) => ({
         _id: f.followingId._id || f.followingId.id,
         username: f.followingId.username,
         email: f.followingId.email,
@@ -146,7 +152,7 @@ router.get("/insights/:userId/following", async (req, res) => {
         role: f.followingId.role,
         followedAt: f.createdAt,
       })),
-      count: following.length,
+      count: validFollowing.length,
     });
   } catch (error) {
     console.error("Error fetching following:", error);
