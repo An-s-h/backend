@@ -4,7 +4,6 @@ import { User } from "../models/User.js";
 
 const router = Router();
 
-<<<<<<< HEAD
 // Submit page feedback (supports both signed-in and anonymous users)
 router.post("/page-feedback", async (req, res) => {
   try {
@@ -34,33 +33,6 @@ router.post("/page-feedback", async (req, res) => {
       username,
       email,
       userRole,
-=======
-// Submit page feedback
-router.post("/page-feedback", async (req, res) => {
-  try {
-    const {
-      userId,
-      feedback,
-      pagePath,
-      pageUrl,
-    } = req.body;
-
-    if (!userId || !feedback || !pagePath) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
-
-    // Get user info
-    const user = await User.findById(userId).lean();
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    const pageFeedback = await PageFeedback.create({
-      userId,
-      username: user.username || "Unknown",
-      email: user.email,
-      userRole: user.role || "patient",
->>>>>>> 3f8e8205a7aa54c4ad53b79b7152ff87798de62d
       feedback: feedback.trim(),
       pagePath,
       pageUrl: pageUrl || req.headers.referer || "Unknown",
@@ -124,10 +96,7 @@ router.get("/page-feedback/stats", async (req, res) => {
     const byRole = {
       patient: await PageFeedback.countDocuments({ userRole: "patient" }),
       researcher: await PageFeedback.countDocuments({ userRole: "researcher" }),
-<<<<<<< HEAD
       guest: await PageFeedback.countDocuments({ userRole: "guest" }),
-=======
->>>>>>> 3f8e8205a7aa54c4ad53b79b7152ff87798de62d
     };
 
     res.json({
