@@ -454,6 +454,42 @@ router.delete("/admin/patients/:id", verifyAdmin, async (req, res) => {
   }
 });
 
+// Delete researcher/expert account completely (admin only)
+router.delete("/admin/experts/:id", verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid researcher ID" });
+    }
+
+    const profile = await Profile.findOne({ userId: id, role: "researcher" });
+    if (!profile) {
+      return res.status(404).json({ error: "Researcher not found" });
+    }
+
+    const userId = new mongoose.Types.ObjectId(id);
+
+    const threadIds = await Thread.find({ authorUserId: userId }).distinct("_id");
+    await Reply.deleteMany({ $or: [{ authorUserId: userId }, { threadId: { $in: threadIds } }] });
+    await Thread.deleteMany({ authorUserId: userId });
+
+    const postIds = await Post.find({ authorUserId: userId }).distinct("_id");
+    await Comment.deleteMany({ $or: [{ authorUserId: userId }, { postId: { $in: postIds } }] });
+    await Post.deleteMany({ authorUserId: userId });
+
+    await CommunityMembership.deleteMany({ userId });
+    await WorkSubmission.deleteMany({ submittedBy: userId });
+    await Trial.deleteMany({ ownerResearcherId: userId });
+    await Profile.deleteOne({ userId });
+    await User.findByIdAndDelete(id);
+
+    res.json({ ok: true, message: "Researcher account deleted completely" });
+  } catch (error) {
+    console.error("Error deleting researcher:", error);
+    res.status(500).json({ error: "Failed to delete researcher" });
+  }
+});
+
 // ============================================
 // SEARCH LIMIT MANAGEMENT ENDPOINTS (FOR TESTING)
 // ============================================
