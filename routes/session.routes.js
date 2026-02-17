@@ -308,18 +308,24 @@ router.post("/auth/reset-password", async (req, res) => {
   }
 });
 
-// POST /api/auth/update-profile - Update user profile with medical interests/conditions
+// POST /api/auth/update-profile - Update user profile with medical interests/conditions and role
 router.post("/auth/update-profile", async (req, res) => {
-  const { userId, medicalInterests } = req.body || {};
+  const { userId, medicalInterests, role } = req.body || {};
 
   if (!userId) {
     return res.status(400).json({ error: "userId is required" });
   }
 
   try {
+    const updateFields = { medicalInterests: medicalInterests || [] };
+    // Update role if provided and valid
+    if (role && ["patient", "researcher"].includes(role)) {
+      updateFields.role = role;
+    }
+
     const user = await User.findByIdAndUpdate(
       userId,
-      { medicalInterests: medicalInterests || [] },
+      updateFields,
       { new: true }
     );
 
