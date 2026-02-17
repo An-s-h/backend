@@ -19,6 +19,11 @@ const threadSchema = new mongoose.Schema(
     onlyResearchersCanReply: { type: Boolean, default: false },
     // When true, this thread was created in Researcher Forums (not visible in Health Forums)
     isResearcherForum: { type: Boolean, default: false },
+    // Links dummy/sample threads to real persisted threads without creating fake user profiles
+    dummyKey: { type: String, index: true, sparse: true },
+    // When thread was promoted from a dummy, show this as author display (not collabiora_forum)
+    originalAuthorUsername: { type: String },
+    originalAuthorHandle: { type: String },
   },
   { timestamps: true }
 );

@@ -5,7 +5,8 @@ import { fileURLToPath } from "url";
 import rateLimiter from "../utils/geminiRateLimiter.js";
 import { searchPubMed } from "./pubmed.service.js";
 import { searchClinicalTrials } from "./clinicalTrials.service.js";
-import { findResearchersWithGemini } from "./geminiExperts.service.js";
+import { findDeterministicExperts, formatExpertsForResponse } from "./deterministicExperts.service.js";
+import { searchGoogleScholarPublications } from "./googleScholar.service.js";
 import { fetchTrialById, fetchPublicationById } from "./urlParser.service.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -194,10 +195,25 @@ function extractPublicationTitleFromLinkRequest(query) {
 }
 
 /**
- * Detect if query is asking for publications, trials, or experts
+ * Detect if query is asking for publications, trials, experts, or researcher-specific publications
  */
 function detectSearchIntent(query) {
   const lowerQuery = query.toLowerCase();
+  
+  // Check for researcher-specific publications FIRST (e.g., "publications by Dr. Smith", "papers by John Doe")
+  const researcherPubPatterns = [
+    /(?:publications?|papers?|articles?|works?|research)\s+(?:by|from|of|authored by)\s+/i,
+    /(?:by|from|of|authored by)\s+(?:dr\.?|prof\.?|professor)\s+/i,
+    /(?:find|show|get|list)\s+(?:publications?|papers?|articles?|works?)\s+(?:by|from|of)\s+/i,
+    /(?:what has|what did)\s+.+\s+(?:published|written|authored)/i,
+    /(?:published|written|authored)\s+by\s+/i,
+  ];
+  
+  const hasResearcherPubIntent = researcherPubPatterns.some(pattern => 
+    pattern.test(lowerQuery)
+  );
+  
+  if (hasResearcherPubIntent) return "researcher_publications";
   
   const publicationKeywords = [
     "publication", "publications", "paper", "papers", "article", "articles",
@@ -216,9 +232,12 @@ function detectSearchIntent(query) {
   
   const expertKeywords = [
     "expert", "experts", "researcher", "researchers", "doctor", "doctors",
-    "specialist", "specialists", "find experts", "show experts", "get experts",
+    "specialist", "specialists", "scientist", "scientists", "professor", "professors",
+    "find experts", "show experts", "get experts",
     "experts in", "experts on", "experts about", "researchers in",
-    "find researcher", "find researchers"
+    "find researcher", "find researchers", "find doctor", "find specialist",
+    "who works on", "who researches", "who studies",
+    "top researchers", "top experts", "leading experts", "leading researchers"
   ];
   
   const hasPublicationIntent = publicationKeywords.some(keyword => 
@@ -244,6 +263,11 @@ function detectSearchIntent(query) {
  * Extract search query from user message
  */
 function extractSearchQuery(query, intent) {
+  // For researcher_publications, extract the researcher name
+  if (intent === "researcher_publications") {
+    return extractResearcherName(query);
+  }
+  
   // Try to extract the main topic after common patterns
   const patterns = [
     /(?:find|show|get|bring|give|list)\s+(?:publications?|papers?|articles?|trials?|clinical\s+trials?|experts?|researchers?)\s+(?:on|about|for|in|related\s+to|regarding)\s+(.+)/i,
@@ -270,7 +294,8 @@ function extractSearchQuery(query, intent) {
     "find", "show", "get", "bring", "me", "give", "list",
     "publications", "publication", "papers", "paper", "articles", "article",
     "trials", "trial", "clinical trials", "clinical trial", "clinical studies", "clinical study",
-    "experts", "expert", "researchers", "researcher",
+    "experts", "expert", "researchers", "researcher", "specialists", "specialist",
+    "scientists", "scientist", "professors", "professor", "doctors", "doctor",
   ];
   
   // Remove common phrases
@@ -283,6 +308,43 @@ function extractSearchQuery(query, intent) {
   
   // Clean up extra spaces
   cleaned = cleaned.replace(/\s+/g, " ").trim();
+  
+  return cleaned || query.trim();
+}
+
+/**
+ * Extract researcher name from a query like "publications by Dr. John Smith"
+ */
+function extractResearcherName(query) {
+  const patterns = [
+    /(?:publications?|papers?|articles?|works?|research)\s+(?:by|from|of|authored by)\s+(.+)/i,
+    /(?:find|show|get|list)\s+(?:publications?|papers?|articles?|works?)\s+(?:by|from|of)\s+(.+)/i,
+    /(?:by|from|of|authored by)\s+((?:dr\.?|prof\.?|professor)\s+.+)/i,
+    /(?:what has|what did)\s+(.+?)\s+(?:published|written|authored)/i,
+    /(?:published|written|authored)\s+by\s+(.+)/i,
+  ];
+  
+  for (const pattern of patterns) {
+    const match = query.match(pattern);
+    if (match && match[1]) {
+      let name = match[1].trim();
+      // Remove trailing punctuation
+      name = name.replace(/[.,;:!?]+$/, "").trim();
+      // Remove trailing common words
+      name = name.replace(/\s+(please|thanks|thank you|recently|lately)$/i, "").trim();
+      if (name.length >= 2) {
+        return name;
+      }
+    }
+  }
+  
+  // Fallback: remove publication-related words and return the rest
+  let cleaned = query
+    .replace(/(?:find|show|get|list|give me)\s+/gi, "")
+    .replace(/(?:publications?|papers?|articles?|works?|research)\s+/gi, "")
+    .replace(/\b(by|from|of|authored by)\s+/gi, "")
+    .replace(/[.,;:!?]+$/, "")
+    .trim();
   
   return cleaned || query.trim();
 }
@@ -387,21 +449,71 @@ async function fetchTrials(query, limit = 4, sortByDate = false) {
 }
 
 /**
- * Fetch experts from backend
+ * Fetch experts using OpenAlex deterministic discovery (same as Experts page)
  */
 async function fetchExperts(query, limit = 4) {
   try {
-    const experts = await findResearchersWithGemini(query);
+    console.log(`[Chatbot] Fetching experts via OpenAlex for: "${query}"`);
+    const result = await findDeterministicExperts(query, null, 1, limit, {
+      limitOpenAlexProfiles: true,
+      skipAISummaries: false,
+    });
     
-    return experts.slice(0, limit).map(expert => ({
+    if (!result || !result.experts || result.experts.length === 0) {
+      console.log("[Chatbot] No experts found via OpenAlex");
+      return [];
+    }
+    
+    // Format using the same formatter as the Experts page, then map to chatbot card fields
+    const formatted = formatExpertsForResponse(result.experts);
+    
+    return formatted.slice(0, limit).map(expert => ({
       name: expert.name || "Unknown Researcher",
-      affiliation: expert.affiliation || expert.university || "Unknown institution",
+      affiliation: expert.affiliation || "Unknown institution",
       location: expert.location || "Unknown location",
-      bio: expert.biography || expert.bio || "No biography available",
-      researchInterests: expert.researchInterests?.slice(0, 3).join(", ") || "Not specified",
+      bio: expert.biography || "No biography available",
+      researchInterests: expert.recentWorks?.map(w => w.title).slice(0, 2).join("; ") || "Not specified",
+      // Extra fields for richer cards
+      orcid: expert.orcid || null,
+      orcidUrl: expert.orcidUrl || null,
+      metrics: expert.metrics || null,
+      confidence: expert.confidence || null,
+      recentWorks: expert.recentWorks || [],
     }));
   } catch (error) {
-    console.error("Error fetching experts:", error);
+    console.error("Error fetching experts via OpenAlex:", error);
+    return [];
+  }
+}
+
+/**
+ * Fetch publications by a specific researcher using OpenAlex
+ */
+async function fetchResearcherPublications(researcherName, limit = 4) {
+  try {
+    console.log(`[Chatbot] Fetching publications by researcher: "${researcherName}"`);
+    const publications = await searchGoogleScholarPublications({
+      author: researcherName,
+      num: limit,
+    });
+    
+    if (!publications || publications.length === 0) {
+      console.log(`[Chatbot] No publications found for researcher: "${researcherName}"`);
+      return [];
+    }
+    
+    return publications.slice(0, limit).map(pub => ({
+      title: pub.title || "Untitled",
+      authors: Array.isArray(pub.authors) ? pub.authors.slice(0, 3).join(", ") : (pub.authors || researcherName),
+      journal: pub.journal || pub.venue || "Unknown journal",
+      year: pub.year || pub.publicationDate?.substring(0, 4) || "Unknown year",
+      pmid: pub.pmid || pub.doi || null,
+      abstract: pub.abstract ? (pub.abstract.length > 200 ? pub.abstract.substring(0, 200) + "..." : pub.abstract) : "No abstract available",
+      url: pub.url || pub.doi ? `https://doi.org/${pub.doi}` : (pub.pmid ? `https://pubmed.ncbi.nlm.nih.gov/${pub.pmid}` : "#"),
+      citations: pub.citationCount || pub.citations || 0,
+    }));
+  } catch (error) {
+    console.error("Error fetching researcher publications:", error);
     return [];
   }
 }
@@ -707,6 +819,8 @@ export async function generateChatResponse(messages, res, req = null) {
         searchResults = await fetchTrials(searchQuery, 4, sortByDate);
       } else if (searchIntent === "experts") {
         searchResults = await fetchExperts(searchQuery, 4);
+      } else if (searchIntent === "researcher_publications") {
+        searchResults = await fetchResearcherPublications(searchQuery, 4);
       }
       
       console.log(`[Chatbot] Fetched ${searchResults?.length || 0} ${searchIntent} results`);
@@ -764,8 +878,11 @@ export async function generateChatResponse(messages, res, req = null) {
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
 
-    // If we have search results (publications or trials), generate AI paragraph summary first, then send cards
-    if (searchResults && Array.isArray(searchResults) && searchResults.length > 0 && !itemContext && (searchIntent === "publications" || searchIntent === "trials")) {
+    // Determine the display type for cards (researcher_publications should render as publication cards)
+    const cardType = searchIntent === "researcher_publications" ? "publications" : searchIntent;
+    
+    // If we have search results, generate AI paragraph summary first, then send cards
+    if (searchResults && Array.isArray(searchResults) && searchResults.length > 0 && !itemContext) {
       console.log(`[Chatbot] Generating AI summary for ${searchResults.length} ${searchIntent} results, then sending cards`);
       
       res.setHeader("Content-Type", "text/event-stream");
@@ -774,14 +891,25 @@ export async function generateChatResponse(messages, res, req = null) {
       
       // Build context for AI to summarize the fetched results
       const resultsContext = searchResults.map((item, i) => {
-        if (searchIntent === "publications") {
+        if (searchIntent === "publications" || searchIntent === "researcher_publications") {
           return `[${i + 1}] "${item.title}" - ${item.authors} (${item.journal}, ${item.year}). ${item.abstract || ""}`;
-        } else {
+        } else if (searchIntent === "trials") {
           return `[${i + 1}] "${item.title}" - ${item.status}, ${item.phase}. Conditions: ${item.conditions}. ${item.summary || ""}`;
+        } else if (searchIntent === "experts") {
+          const metrics = item.metrics ? ` (${item.metrics.totalPublications || 0} publications, ${item.metrics.totalCitations || 0} citations)` : "";
+          return `[${i + 1}] ${item.name} - ${item.affiliation || "Unknown institution"}${metrics}. ${item.bio || ""}`;
         }
+        return `[${i + 1}] ${JSON.stringify(item)}`;
       }).join("\n\n");
       
-      const summaryPrompt = `The user asked for ${searchIntent} related to "${searchQuery}". I found these ${searchResults.length} results. Provide a clear paragraph (3-5 sentences) that summarizes the key findings/overview of these ${searchIntent}. Focus on common themes, notable findings, or what users should know. Use accessible language. Do not list them individually - synthesize into a coherent overview.\n\nResults:\n${resultsContext}`;
+      let summaryPrompt;
+      if (searchIntent === "experts") {
+        summaryPrompt = `The user asked for experts/researchers related to "${searchQuery}". I found these ${searchResults.length} experts using OpenAlex academic database. Provide a clear paragraph (3-5 sentences) that introduces these researchers, highlighting their expertise areas, institutional affiliations, and why they are relevant to the query. Use accessible language. Do not list them individually - synthesize into a coherent overview.\n\nExperts found:\n${resultsContext}`;
+      } else if (searchIntent === "researcher_publications") {
+        summaryPrompt = `The user asked for publications by researcher "${searchQuery}". I found these ${searchResults.length} publications. Provide a clear paragraph (3-5 sentences) that summarizes their research output, key themes across their work, and notable publications. Use accessible language. Do not list them individually - synthesize into a coherent overview.\n\nPublications:\n${resultsContext}`;
+      } else {
+        summaryPrompt = `The user asked for ${searchIntent} related to "${searchQuery}". I found these ${searchResults.length} results. Provide a clear paragraph (3-5 sentences) that summarizes the key findings/overview of these ${searchIntent}. Focus on common themes, notable findings, or what users should know. Use accessible language. Do not list them individually - synthesize into a coherent overview.\n\nResults:\n${resultsContext}`;
+      }
       
       try {
         const summaryModel = geminiInstance.getGenerativeModel({
@@ -796,30 +924,19 @@ export async function generateChatResponse(messages, res, req = null) {
         }
       } catch (summaryErr) {
         console.warn("[Chatbot] AI summary failed, sending intro only:", summaryErr.message);
-        const introMessage = `I found ${searchResults.length} ${searchIntent} related to "${searchQuery}". Here they are:`;
+        const label = searchIntent === "researcher_publications" ? `publications by "${searchQuery}"` : `${searchIntent} related to "${searchQuery}"`;
+        const introMessage = `I found ${searchResults.length} ${label}. Here they are:`;
         res.write(`data: ${JSON.stringify({ text: introMessage })}\n\n`);
       }
       
-      // Send structured search results (cards)
+      // Send structured search results (cards) - use cardType so researcher_publications renders as publication cards
       res.write(`data: ${JSON.stringify({ 
         searchResults: {
-          type: searchIntent,
+          type: cardType,
           query: searchQuery,
           items: searchResults
         }
       })}\n\n`);
-      
-      res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-      res.end();
-      return;
-    } else if (searchResults && Array.isArray(searchResults) && searchResults.length > 0 && !itemContext) {
-      // Experts or other intents - send cards with brief intro (no AI summary)
-      res.setHeader("Content-Type", "text/event-stream");
-      res.setHeader("Cache-Control", "no-cache");
-      res.setHeader("Connection", "keep-alive");
-      const introMessage = `I found ${searchResults.length} ${searchIntent} related to "${searchQuery}". Here they are:`;
-      res.write(`data: ${JSON.stringify({ text: introMessage })}\n\n`);
-      res.write(`data: ${JSON.stringify({ searchResults: { type: searchIntent, query: searchQuery, items: searchResults } })}\n\n`);
       res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
       res.end();
       return;

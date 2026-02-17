@@ -34,6 +34,9 @@ const userSchema = new mongoose.Schema(
 
     // Admin access (or set ADMIN_EMAILS in env to treat those emails as admin at login)
     isAdmin: { type: Boolean, default: false },
+    
+    // Service account flag for system-owned accounts (forum helpers, bots, etc.)
+    isServiceAccount: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
