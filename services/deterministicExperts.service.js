@@ -1012,9 +1012,10 @@ async function fetchOpenAlexAuthorProfiles(authors, limitProfiles = false) {
   if (!authors || authors.length === 0) return authors;
 
   // When limitProfiles=true (dashboard), only fetch top N to speed up load. Otherwise fetch all (Experts page).
-  const toFetch = limitProfiles && authors.length > OPENALEX_PROFILE_FETCH_LIMIT
-    ? authors.slice(0, OPENALEX_PROFILE_FETCH_LIMIT)
-    : authors;
+  const toFetch =
+    limitProfiles && authors.length > OPENALEX_PROFILE_FETCH_LIMIT
+      ? authors.slice(0, OPENALEX_PROFILE_FETCH_LIMIT)
+      : authors;
   if (limitProfiles && authors.length > OPENALEX_PROFILE_FETCH_LIMIT) {
     console.log(
       `[Dashboard] Limiting OpenAlex profile fetch to top ${OPENALEX_PROFILE_FETCH_LIMIT} of ${authors.length} authors`,
@@ -1045,10 +1046,7 @@ async function fetchOpenAlexAuthorProfiles(authors, limitProfiles = false) {
 
   for (let i = 0; i < authorIds.length; i += BATCH_SIZE) {
     const batchIds = authorIds.slice(i, i + BATCH_SIZE);
-    const cacheKey = getCacheKey(
-      "openalex-authors",
-      batchIds.sort().join(","),
-    );
+    const cacheKey = getCacheKey("openalex-authors", batchIds.sort().join(","));
     const cached = getCache(cacheKey);
 
     let authorProfiles = cached;
@@ -1082,7 +1080,10 @@ async function fetchOpenAlexAuthorProfiles(authors, limitProfiles = false) {
         setCache(cacheKey, authorProfiles);
         console.log(`Got real profiles for ${authorProfiles.length} authors`);
       } catch (error) {
-        console.error("Error fetching OpenAlex author profiles:", error.message);
+        console.error(
+          "Error fetching OpenAlex author profiles:",
+          error.message,
+        );
         authorProfiles = [];
       }
     }
@@ -1220,7 +1221,10 @@ function extractCountryCode(location) {
  */
 function parseLocationParts(location) {
   if (!location) return [];
-  return location.split(",").map((p) => p.trim()).filter(Boolean);
+  return location
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
 }
 
 /**
@@ -1390,8 +1394,10 @@ export async function findDeterministicExperts(
       // (author.works.length is only the count from THIS search, not their total career output)
       // limitOpenAlexProfiles=true for dashboard: fetch top 100 only (faster). Experts page: fetch all.
       console.log("Step 4.5: Fetching real author stats from OpenAlex...");
-      const authorCandidatesWithRealStats =
-        await fetchOpenAlexAuthorProfiles(authorCandidates, limitOpenAlexProfiles);
+      const authorCandidatesWithRealStats = await fetchOpenAlexAuthorProfiles(
+        authorCandidates,
+        limitOpenAlexProfiles,
+      );
 
       // Step 5: Ranking by metrics + location priority
       console.log(
@@ -1433,8 +1439,10 @@ export async function findDeterministicExperts(
         `Step 6: Generating summaries for ${pageAuthors.length} experts (page ${page})...`,
       );
     }
-    const expertsWithSummaries =
-      await generateExpertSummaries(pageAuthors, skipAISummaries);
+    const expertsWithSummaries = await generateExpertSummaries(
+      pageAuthors,
+      skipAISummaries,
+    );
 
     console.log(
       `✅ Returning ${expertsWithSummaries.length} experts (page ${page}/${Math.ceil(totalFound / pageSize)})`,

@@ -243,6 +243,23 @@ export async function searchPubMed({
       // Get keywords
       const keywords = getAllText("Keyword").filter(Boolean);
 
+      // Get MeSH major topics (DescriptorName with MajorTopicYN="Y")
+      const meshMajorTopics = [];
+      const meshHeadingList = article.getElementsByTagName("MeshHeadingList");
+      if (meshHeadingList.length > 0) {
+        const headings = meshHeadingList[0].getElementsByTagName("MeshHeading");
+        for (let h = 0; h < headings.length; h++) {
+          const descriptors = headings[h].getElementsByTagName("DescriptorName");
+          for (let d = 0; d < descriptors.length; d++) {
+            const major = descriptors[d].getAttribute("MajorTopicYN");
+            if (major === "Y") {
+              const text = descriptors[d].textContent || "";
+              if (text) meshMajorTopics.push(text);
+            }
+          }
+        }
+      }
+
       // Get publication type
       const publicationTypes = Array.from(
         article.getElementsByTagName("PublicationType")
@@ -272,6 +289,7 @@ export async function searchPubMed({
         doi,
         abstract,
         keywords: keywords.length > 0 ? keywords : undefined,
+        meshMajorTopics: meshMajorTopics.length > 0 ? meshMajorTopics : undefined,
         publicationTypes:
           publicationTypes.length > 0 ? publicationTypes : undefined,
         country: country || undefined,

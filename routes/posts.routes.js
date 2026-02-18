@@ -312,10 +312,24 @@ router.post("/posts", verifySession, async (req, res) => {
     });
 
     const populatedPost = await Post.findById(post._id)
-      .populate("authorUserId", "username email picture")
+      .populate("authorUserId", "username email picture role")
       .populate("communityId", "name slug color icon")
       .populate("subcategoryId", "name slug")
       .lean();
+
+    // Enrich researcher author with displayName (Dr. Name, credentials)
+    if (populatedPost?.authorUserId?.role === "researcher") {
+      const { Profile } = await import("../models/Profile.js");
+      const profile = await Profile.findOne({
+        userId: populatedPost.authorUserId._id,
+      }).lean();
+      if (profile?.researcher) {
+        populatedPost.authorUserId.displayName = getResearcherDisplayName(
+          populatedPost.authorUserId.username || populatedPost.authorUserId.name,
+          profile.researcher
+        );
+      }
+    }
 
     // Invalidate cache
     invalidateCache("posts:");

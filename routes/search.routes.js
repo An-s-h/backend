@@ -33,11 +33,14 @@ import {
 import { Profile } from "../models/Profile.js";
 import { User } from "../models/User.js";
 import { parseQuery } from "../utils/queryParser.js";
+import { naturalLanguageToSearchKeywords } from "../utils/naturalLanguageToKeywords.js";
 import {
   extractBiomarkers,
   expandQueryWithSynonyms,
   mapToMeSHTerminology,
 } from "../services/medicalTerminology.service.js";
+import { buildConceptAwareQuery } from "../services/publicationQueryBuilder.service.js";
+import { fetchCitationMetrics } from "../services/citationMetrics.service.js";
 
 // Browser-based search limit system (strict 6 searches per device/browser)
 // Uses deviceId from localStorage (survives IP changes, proxies, browser restarts)
@@ -251,6 +254,75 @@ function calculatePublicationRelevanceSignals(pub, queryMeta) {
   };
 }
 
+const RELEVANCE_META_WORDS = new Set([
+  "latest", "recent", "new", "updated", "emerging", "publications", "publication", "papers", "articles", "research", "studies",
+]);
+
+/** Field-weighted query relevance: Title 0.45, MeSH Major 0.25, Keywords 0.15, Abstract 0.15 */
+function calculateFieldWeightedRelevance(pub, queryMeta) {
+  if (!queryMeta?.queryTerms?.length) return 0;
+
+  const title = (pub.title || "").toLowerCase();
+  const abstract = (pub.abstract || "").toLowerCase();
+  const keywords = Array.isArray(pub.keywords)
+    ? pub.keywords.join(" ").toLowerCase()
+    : "";
+  const meshMajor = Array.isArray(pub.meshMajorTopics)
+    ? pub.meshMajorTopics.join(" ").toLowerCase()
+    : "";
+
+  const weights = { title: 0.45, meshMajor: 0.25, keywords: 0.15, abstract: 0.15 };
+  const totalWeight = weights.title + weights.meshMajor + weights.keywords + weights.abstract;
+  let weightedSum = 0;
+  let maxTermScore = 0;
+
+  for (const term of queryMeta.queryTerms) {
+    const re = new RegExp(
+      `\\b${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+      "i",
+    );
+    const inTitle = re.test(title) ? 1 : 0;
+    const inMesh = re.test(meshMajor) ? 1 : 0;
+    const inKw = re.test(keywords) ? 1 : 0;
+    const inAbs = re.test(abstract) ? 1 : 0;
+    const termScore =
+      (inTitle * weights.title + inMesh * weights.meshMajor + inKw * weights.keywords + inAbs * weights.abstract) / totalWeight;
+    weightedSum += termScore * totalWeight;
+    if (termScore > maxTermScore) maxTermScore = termScore;
+  }
+
+  const termCount = queryMeta.queryTerms.length;
+  if (termCount === 0) return 0;
+  const avg = weightedSum / (termCount * totalWeight);
+  // One strong match (e.g. "diabetes" in title) should suffice for queries like "latest publications in Diabetes"
+  return Math.max(avg, maxTermScore);
+}
+
+/** Core concept gate: at least one core term in title OR mesh major OR keywords */
+function passesCoreConceptGate(pub, coreConceptTerms) {
+  if (!coreConceptTerms?.length) return true;
+
+  const title = (pub.title || "").toLowerCase();
+  const meshMajor = Array.isArray(pub.meshMajorTopics)
+    ? pub.meshMajorTopics.join(" ").toLowerCase()
+    : "";
+  const keywords = Array.isArray(pub.keywords)
+    ? pub.keywords.join(" ").toLowerCase()
+    : "";
+  const strong = `${title} ${meshMajor} ${keywords}`;
+
+  for (const term of coreConceptTerms) {
+    const t = term.trim().toLowerCase();
+    if (!t) continue;
+    const re = new RegExp(
+      `\\b${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+      "i",
+    );
+    if (re.test(strong)) return true;
+  }
+  return false;
+}
+
 router.get("/search/trials", async (req, res) => {
   try {
     // Check search limit for anonymous users (browser-based deviceId)
@@ -285,6 +357,10 @@ router.get("/search/trials", async (req, res) => {
       recentMonths,
       sortByDate,
     } = req.query;
+
+    // Natural language → keywords (e.g. "what is the benefit of vitamins in cancer" → "vitamins cancer")
+    const searchQ =
+      naturalLanguageToSearchKeywords(q || "") || (q || "").trim();
 
     // Layer 3: Extract biomarkers from conditions/keywords if provided
     // Only extract if conditions are actually provided (medical interests enabled)
@@ -340,7 +416,7 @@ router.get("/search/trials", async (req, res) => {
     const batchSize = Math.min(500, Math.max(100, requestedPageSize * 50));
 
     const result = await searchClinicalTrials({
-      q,
+      q: searchQ,
       status,
       location,
       phase,
@@ -552,6 +628,9 @@ router.get("/search/publications", async (req, res) => {
       };
     } else if (q && q.length > 30) {
       // Long query likely to be an exact title - search in title field
+      // Normalize natural language to keywords first, then extract title words
+      const titleQuery =
+        naturalLanguageToSearchKeywords(q) || q;
       // PubMed's exact phrase matching with "phrase"[Title] FAILS on special characters
       // like apostrophes, colons, periods, etc. (returns 0 results).
       // Instead, split into significant words and AND them together with [ti] field tags.
@@ -561,31 +640,36 @@ router.get("/search/publications", async (req, res) => {
         "of", "with", "by", "is", "are", "was", "were", "be", "been", "its",
         "it", "as", "from", "that", "this", "than", "into", "not", "no",
       ]);
-      const titleWords = q
+      const titleWords = titleQuery
         .replace(/[^\w\s-]/g, " ")  // Strip punctuation (apostrophes, colons, periods, etc.)
         .split(/\s+/)
         .map((w) => w.trim())
         .filter((w) => w.length >= 2 && !titleStopWords.has(w.toLowerCase()));
 
-      if (titleWords.length > 0) {
-        // Use each significant word with [ti] joined by AND for precise title matching
-        pubmedQuery = titleWords.map((w) => `${w}[ti]`).join(" AND ");
-      } else {
-        // Fallback: just use the raw query
-        pubmedQuery = q;
-      }
+        if (titleWords.length > 0) {
+          // Use each significant word with [ti] joined by AND for precise title matching
+          pubmedQuery = titleWords.map((w) => `${w}[ti]`).join(" AND ");
+        } else {
+          // Fallback: just use the normalized query
+          pubmedQuery = titleQuery;
+        }
       console.log("Exact title search detected:", pubmedQuery);
       atmQueryMeta = {
         pubmedQuery,
-        queryTerms: tokenizeForRelevance(q),
-        rawQueryLower: (q || "").toLowerCase().trim(),
+        queryTerms: tokenizeForRelevance(titleQuery),
+        rawQueryLower: (titleQuery || "").toLowerCase().trim(),
         hasFieldTags: true,
         isExactTitleSearch: true,
       };
     } else {
-      // Build query with ATM-style expansion (MeSH + synonyms) unless user forces field tags
-      atmQueryMeta = buildATMQuery(q || "");
+      // Layer 1: Natural language → keywords, then concept + intent aware query
+      const searchQ = naturalLanguageToSearchKeywords(q || "") || (q || "");
+      atmQueryMeta = buildConceptAwareQuery(searchQ);
       pubmedQuery = atmQueryMeta.pubmedQuery;
+      // Preserve legacy flags for downstream (PMC/PMID/exact title unchanged)
+      atmQueryMeta.isPmcSearch = false;
+      atmQueryMeta.isPmidSearch = false;
+      atmQueryMeta.isExactTitleSearch = false;
     }
 
     // Add location (country) to query if provided and not already in advanced query
@@ -609,7 +693,7 @@ router.get("/search/publications", async (req, res) => {
     // This ensures results are sorted across all pages, not just within each page
     const requestedPage = parseInt(page, 10);
     const requestedPageSize = parseInt(pageSize, 10);
-    const batchSize = Math.min(500, Math.max(100, requestedPageSize * 50));
+    const batchSize = 300;
 
     const pubmedResult = await searchPubMed({
       q: pubmedQuery,
@@ -632,11 +716,31 @@ router.get("/search/publications", async (req, res) => {
 
     // Filter out publications without abstracts (but not for exact searches -
     // when user searches by title/ID they want that specific publication regardless)
-    const allResults = (atmQueryMeta.isExactTitleSearch || atmQueryMeta.isPmcSearch || atmQueryMeta.isPmidSearch)
+    let allResults = (atmQueryMeta.isExactTitleSearch || atmQueryMeta.isPmcSearch || atmQueryMeta.isPmidSearch)
       ? (pubmedResult.items || [])
       : (pubmedResult.items || []).filter(
           (pub) => pub.abstract && pub.abstract.trim().length > 0,
         );
+
+    // Layer 2: Citation metrics enrichment (iCite)
+    const pmids = allResults.map((p) => String(p.pmid || p.id || "")).filter(Boolean);
+    let citationMap = new Map();
+    if (pmids.length > 0) {
+      try {
+        citationMap = await fetchCitationMetrics(pmids);
+      } catch (err) {
+        console.warn("Citation metrics fetch failed:", err.message);
+      }
+    }
+    allResults = allResults.map((pub) => {
+      const pid = String(pub.pmid || pub.id || "");
+      const metrics = citationMap.get(pid) || {};
+      return {
+        ...pub,
+        citationCount: metrics.citationCount ?? 0,
+        rcr: metrics.rcr ?? null,
+      };
+    });
 
     // Build user profile for matching
     let userProfile = null;
@@ -721,12 +825,26 @@ router.get("/search/publications", async (req, res) => {
           };
         }
         
-        // Normal relevance calculation for regular searches
+        // Use core concept terms for relevance when available, so intent words ("latest", "publications")
+        // don't drag scores below threshold (papers about "diabetes" need not mention "latest")
+        let relevanceTerms = atmQueryMeta.coreConceptTerms;
+        if (relevanceTerms?.length > 0) {
+          relevanceTerms = relevanceTerms.filter(
+            (t) => t && !RELEVANCE_META_WORDS.has(t.toLowerCase().trim()),
+          );
+          if (relevanceTerms.length === 0) relevanceTerms = atmQueryMeta.coreConceptTerms;
+        }
+        const relevanceMeta =
+          relevanceTerms?.length > 0
+            ? { ...atmQueryMeta, queryTerms: relevanceTerms }
+            : atmQueryMeta;
         const signals = calculatePublicationRelevanceSignals(
           publication,
-          atmQueryMeta,
+          relevanceMeta,
         );
-        return { ...publication, ...signals };
+        const fieldWeighted = calculateFieldWeightedRelevance(publication, relevanceMeta);
+        const R = fieldWeighted > 0 ? fieldWeighted : signals.queryRelevanceScore;
+        return { ...publication, ...signals, queryRelevanceScore: R };
       });
     } else {
       // If no query, set relevance to 0 (will be sorted by other factors)
@@ -741,39 +859,68 @@ router.get("/search/publications", async (req, res) => {
       }));
     }
 
-    // Filter out results with very low query relevance (likely false positives)
-    // Use 0.25 threshold to keep more relevant results (PubMed shows more; we were too aggressive at 0.5)
-    // Skip filtering for PMC ID, PMID, and exact title searches (we want all results)
+    // Layer 3: Core concept gate
+    const coreConceptTerms = atmQueryMeta.coreConceptTerms;
+    if (q && coreConceptTerms?.length && !atmQueryMeta.isPmcSearch && !atmQueryMeta.isPmidSearch && !atmQueryMeta.isExactTitleSearch) {
+      scoredResults = scoredResults.filter((pub) => passesCoreConceptGate(pub, coreConceptTerms));
+    }
+    // Relevance threshold 0.35
     if (q && !atmQueryMeta.isPmcSearch && !atmQueryMeta.isPmidSearch && !atmQueryMeta.isExactTitleSearch) {
       scoredResults = scoredResults.filter((publication) => {
         const relevance = publication.queryRelevanceScore || 0;
-        // Keep if: exact phrase match (1.0), or relevance >= 0.25 (relaxed for more PubMed-like results)
-        return relevance >= 0.25 || relevance === 1.0;
+        // Keep if: exact phrase match (1.0), or relevance >= 0.35
+        return relevance >= 0.35 || relevance === 1.0;
       });
     }
 
-    // Layer 5: Rank by match percentage FIRST (like trials), then query relevance, then other factors
-    // User expects highest match % first - all 97% before 81%, etc. (fixes duplicate match % on different pages)
+    // Intent-aware ranking: citationScore, influenceScore, recencyScore, finalScore
+    const citations = scoredResults.map((p) => p.citationCount ?? 0).filter((n) => n >= 0);
+    const p95Index = Math.floor(citations.length * 0.95);
+    const p95Citation = citations.length ? ([...citations].sort((a, b) => a - b)[p95Index] ?? 1) : 1;
+    const logP95 = Math.log10(1 + p95Citation);
+    const nowYear = new Date().getFullYear();
+    const intent = atmQueryMeta.intent || { wantsRecent: false };
+
+    scoredResults = scoredResults.map((publication) => {
+      const citationCount = publication.citationCount ?? 0;
+      const citationScore = logP95 > 0 ? Math.log10(1 + citationCount) / logP95 : 0;
+      const rcr = publication.rcr;
+      const normRcr = rcr != null && rcr > 0 ? Math.min(1, rcr / 3) : null;
+      const influenceScore = normRcr != null ? citationScore * 0.7 + normRcr * 0.3 : citationScore;
+      const pubYear = parseInt(publication.year, 10);
+      const ageYears = Number.isInteger(pubYear) && pubYear > 1800 ? nowYear - pubYear : 10;
+      const recencyScore = 1 / (1 + ageYears);
+      const maxAge = Math.max(
+        ...scoredResults.map((p) => {
+          const y = parseInt(p.year, 10);
+          return Number.isInteger(y) && y > 1800 ? nowYear - y : 0;
+        }),
+        1,
+      );
+      const recencyNorm = maxAge > 0 ? recencyScore / (1 / (1 + maxAge)) : recencyScore;
+      const M = (publication.matchPercentage ?? 0) / 100;
+      const R = publication.queryRelevanceScore ?? 0;
+      const C = influenceScore;
+      const Y = recencyNorm;
+      const finalScore = intent.wantsRecent
+        ? 0.3 * M + 0.3 * R + 0.2 * C + 0.2 * Y
+        : 0.35 * M + 0.35 * R + 0.25 * C + 0.05 * Y;
+      return {
+        ...publication,
+        citationScore: Math.round(citationScore * 100) / 100,
+        influenceScore: Math.round(influenceScore * 100) / 100,
+        recencyScore: Math.round(recencyNorm * 100) / 100,
+        finalScore: Math.round(finalScore * 100) / 100,
+      };
+    });
+
+    const EPSILON = 0.001;
     const sortedResults = scoredResults.sort((a, b) => {
-      // First: Profile match percentage (PRIMARY - user expects this like trials)
-      const aMatch = a.matchPercentage ?? -1;
-      const bMatch = b.matchPercentage ?? -1;
-      if (bMatch !== aMatch) return bMatch - aMatch;
-
-      // Second: Query relevance (tiebreaker)
-      const aQuery = a.queryRelevanceScore || 0;
-      const bQuery = b.queryRelevanceScore || 0;
-      if (Math.abs(bQuery - aQuery) > 0.05) return bQuery - aQuery;
-
-      // Third: NCT linkage (boost for publications linking to clinical trials)
-      const aNct = a.hasNctLink ? 1 : 0;
-      const bNct = b.hasNctLink ? 1 : 0;
-      if (bNct !== aNct) return bNct - aNct;
-
-      // Fourth: Recency (recent publications get slight boost)
-      const aRecency = a.recencyWeight || 0;
-      const bRecency = b.recencyWeight || 0;
-      return (bRecency || 0) - (aRecency || 0);
+      const diff = (b.finalScore ?? 0) - (a.finalScore ?? 0);
+      if (Math.abs(diff) > EPSILON) return diff;
+      const rDiff = (b.queryRelevanceScore ?? 0) - (a.queryRelevanceScore ?? 0);
+      if (Math.abs(rDiff) > EPSILON) return rDiff;
+      return (b.influenceScore ?? 0) - (a.influenceScore ?? 0);
     });
 
     // Paginate FIRST, then simplify only the titles that will be shown to the user
@@ -895,13 +1042,17 @@ router.get("/search/experts", async (req, res) => {
       return res.json({ results: [] });
     }
 
+    // Natural language → keywords for expert search
+    const queryTrimmed = (
+      naturalLanguageToSearchKeywords(q.trim()) || q.trim()
+    ).trim();
+    const queryLower = queryTrimmed.toLowerCase();
+
     // Parse query to extract research area and disease interest
     // Format from frontend: "researchArea in diseaseOfInterest" or "researchArea" or "diseaseOfInterest"
     // Location is passed separately as a query parameter, not in the query string
     let researchArea = null;
     let diseaseInterest = null;
-    const queryTrimmed = q.trim();
-    const queryLower = queryTrimmed.toLowerCase();
 
     // Check if query contains " in " pattern (case insensitive)
     if (queryLower.includes(" in ")) {
@@ -929,11 +1080,11 @@ router.get("/search/experts", async (req, res) => {
     }
 
     // Build query with location if provided (e.g., "oncology in Toronto, Canada")
-    let expertsQuery = q.trim();
+    let expertsQuery = queryTrimmed;
     if (location) {
-      expertsQuery = `${q.trim()} in ${location}`;
+      expertsQuery = `${queryTrimmed} in ${location}`;
     } else {
-      expertsQuery = `${q.trim()} global`;
+      expertsQuery = `${queryTrimmed} global`;
     }
 
     // Use Gemini to find researchers based on the search query
@@ -1303,9 +1454,10 @@ router.get("/search/experts/v2", async (req, res) => {
 
     const { q = "", location, limit = "10" } = req.query;
     const parsedLimit = Math.max(5, Math.min(10, parseInt(limit, 10) || 10));
+    const searchQ = naturalLanguageToSearchKeywords(q.trim()) || q.trim();
 
     const results = await searchVerifiedExpertsV2({
-      q,
+      q: searchQ,
       location,
       limit: parsedLimit,
     });
@@ -1367,6 +1519,7 @@ router.get("/search/experts/deterministic", async (req, res) => {
       });
     }
 
+    const searchQ = naturalLanguageToSearchKeywords(q.trim()) || q.trim();
     const parsedPage = Math.max(1, parseInt(page, 10) || 1);
     const parsedPageSize = Math.max(
       1,
@@ -1374,14 +1527,14 @@ router.get("/search/experts/deterministic", async (req, res) => {
     );
 
     console.log(
-      `🔍 Deterministic expert search: topic="${q}", location="${
+      `🔍 Deterministic expert search: topic="${searchQ}", location="${
         location || "global"
       }", page=${parsedPage}, pageSize=${parsedPageSize}`,
     );
 
     // Execute deterministic expert discovery (with pagination)
     const { experts, totalFound, hasMore } = await findDeterministicExperts(
-      q.trim(),
+      searchQ,
       location || null,
       parsedPage,
       parsedPageSize,
