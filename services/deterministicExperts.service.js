@@ -283,19 +283,25 @@ function extractAndAggregateAuthors(works, constraints, location = null) {
           works: [],
           totalCitations: 0,
           recentWorks: 0,
+          recentTopicWorks: 0, // last 5 years (topic-specific)
           lastAuthorCount: 0,
           firstAuthorCount: 0,
+          correspondingAuthorCount: 0,
           institutions: new Set(),
           dois: new Set(),
           relevanceScore: 0,
           countryCode: null,
-          countryCodes: new Set(), // Track all country codes for this author
+          countryCodes: new Set(),
         });
       }
 
       const authorData = authorMap.get(authorId);
+      const isTrial = isClinicalTrialWork(work);
+      const isCorresponding =
+        authorship.is_corresponding === true ||
+        (work.corresponding_author_ids || []).includes(authorId);
 
-      // Aggregate data
+      // Aggregate data (topic-specific metrics)
       authorData.works.push({
         id: work.id,
         title: work.title,
@@ -304,6 +310,7 @@ function extractAndAggregateAuthors(works, constraints, location = null) {
         position,
         doi: work.doi,
         relevance: workRelevance,
+        isTrial,
       });
 
       authorData.totalCitations += citationCount;
@@ -312,13 +319,18 @@ function extractAndAggregateAuthors(works, constraints, location = null) {
       if (year >= currentYear - 2) {
         authorData.recentWorks++;
       }
+      if (year >= currentYear - 5) {
+        authorData.recentTopicWorks++;
+      }
 
       if (position === "last") {
         authorData.lastAuthorCount++;
       }
-
       if (position === "first") {
         authorData.firstAuthorCount++;
+      }
+      if (isCorresponding) {
+        authorData.correspondingAuthorCount++;
       }
 
       // Track DOIs for cross-referencing
@@ -348,17 +360,39 @@ function extractAndAggregateAuthors(works, constraints, location = null) {
     }
   }
 
-  // Convert to array and calculate average relevance
-  let authors = Array.from(authorMap.values()).map((author) => ({
-    ...author,
-    institutions: Array.from(author.institutions),
-    institutionNamesLower: author.institutionNamesLower
-      ? Array.from(author.institutionNamesLower)
-      : [],
-    dois: Array.from(author.dois),
-    countryCodes: Array.from(author.countryCodes), // Convert Set to Array
-    avgRelevance: author.relevanceScore / author.works.length,
-  }));
+  // Convert to array; add topic-specific and trial metrics
+  let authors = Array.from(authorMap.values()).map((author) => {
+    const topicWorksCount = author.works.length;
+    const topicCitationCount = author.totalCitations;
+    const trialWorks = author.works.filter((w) => w.isTrial);
+    const trialWorkCount = trialWorks.length;
+    const trialLastAuthorCount = trialWorks.filter(
+      (w) => w.position === "last",
+    ).length;
+    const trialRecentCount = trialWorks.filter(
+      (w) => (w.year || 0) >= currentYear - 5,
+    ).length;
+    const rawPiScore = trialLastAuthorCount * 0.7 + trialWorkCount * 0.3; // normalized later
+
+    return {
+      ...author,
+      institutions: Array.from(author.institutions),
+      institutionNamesLower: author.institutionNamesLower
+        ? Array.from(author.institutionNamesLower)
+        : [],
+      dois: Array.from(author.dois),
+      countryCodes: Array.from(author.countryCodes),
+      avgRelevance: topicWorksCount
+        ? author.relevanceScore / topicWorksCount
+        : 0,
+      topicWorksCount,
+      topicCitationCount,
+      trialWorkCount,
+      trialLastAuthorCount,
+      trialRecentCount,
+      rawPiScore,
+    };
+  });
 
   // FILTER: Apply location filter if specified (STRICT filtering)
   if (location) {
@@ -426,6 +460,71 @@ function calculateWorkRelevance(work, constraints) {
   score += 0.2;
 
   return Math.min(1, score);
+}
+
+/**
+ * Detect if a work is a clinical trial (for PI prioritization).
+ * Uses publication type hints, title keywords, and MeSH when available.
+ * @param {Object} work - OpenAlex work object
+ * @returns {boolean}
+ */
+function isClinicalTrialWork(work) {
+  const title = (work.title || "").toLowerCase();
+  const trialTitlePatterns = [
+    "randomized",
+    "placebo",
+    "phase i ",
+    "phase ii ",
+    "phase iii ",
+    "phase 1 ",
+    "phase 2 ",
+    "phase 3 ",
+    "clinical trial",
+    "rct",
+    "controlled trial",
+    "double-blind",
+    "single-blind",
+  ];
+  if (trialTitlePatterns.some((p) => title.includes(p))) return true;
+
+  // MeSH (PubMed works): Clinical Trial, Randomized Controlled Trial, etc.
+  const mesh = work.mesh || [];
+  const trialMeshTerms = [
+    "clinical trial",
+    "randomized controlled trial",
+    "controlled clinical trial",
+    "clinical trials as topic",
+  ];
+  for (const m of mesh) {
+    const name = (m.descriptor_name || "").toLowerCase();
+    if (trialMeshTerms.some((t) => name.includes(t))) return true;
+  }
+
+  return false;
+}
+
+/**
+ * Detect if the user query indicates clinical trial / PI intent.
+ * @param {string} topic - Raw topic string
+ * @returns {boolean}
+ */
+function detectClinicalTrialIntent(topic) {
+  if (!topic || typeof topic !== "string") return false;
+  const lower = topic.toLowerCase();
+  const patterns = [
+    "trial",
+    "phase ii",
+    "phase iii",
+    "phase 2",
+    "phase 3",
+    "investigator",
+    "principal investigator",
+    "pi ",
+    "clinical trial",
+    "rct",
+    "randomized",
+  ];
+  return patterns.some((p) => lower.includes(p));
 }
 
 /**
@@ -777,133 +876,137 @@ function calculateAuthorRecencyScore(works, currentYear) {
 }
 
 /**
- * Simplified ranking: Sort by papers and citations (no strict checks)
+ * Rank authors by upgraded deterministic formula: topic works, citations, recency,
+ * field relevance, senior authorship, topic dominance, PI score. Optional clinical-trial intent weighting.
+ * @param {Array} authors - Authors with topicWorksCount, realWorksCount, fieldRelevance, trial metrics, etc.
+ * @param {string|null} location - Optional location for tie-breaking
+ * @param {string|null} topic - Optional topic string to detect clinical trial intent
  */
-function rankAuthorsByMetrics(authors, location = null) {
-  // Extract city, state, country for location-based boosting
+function rankAuthorsByMetrics(authors, location = null, topic = null) {
   const searchCity = extractCityName(location);
   const searchState = extractStateName(location);
   const searchCountryCode = location ? extractCountryCode(location) : null;
   const currentYear = new Date().getFullYear();
+  const clinicalTrialIntent = detectClinicalTrialIntent(topic || "");
+
+  const maxRawPiScore =
+    authors.length > 0
+      ? Math.max(...authors.map((a) => a.rawPiScore || 0), 0)
+      : 0;
 
   const rankedAuthors = authors
     .map((author) => {
+      const topicWorksCount =
+        author.topicWorksCount ?? author.works?.length ?? 0;
+      const realWorksCount = author.realWorksCount ?? author.works?.length ?? 1;
       const citationCount =
         author.realCitationCount ?? author.totalCitations ?? 0;
-      // Balanced scoring across all key dimensions
-      const worksScore = Math.min(1, author.works.length / 50); // 50+ topic works = 1.0
-      const citationScore = Math.min(1, citationCount / 1000); // 1000+ citations = 1.0
-      // Use decay-based recency scoring instead of flat window
-      const recencyScore = calculateAuthorRecencyScore(
-        author.works || [],
-        currentYear,
-      );
-      const fieldScore = author.fieldRelevance || 0;
+      const lastAuthorCount = author.lastAuthorCount ?? 0;
+      const correspondingAuthorCount = author.correspondingAuthorCount ?? 0;
 
-      // FILTER: Exclude completely off-topic researchers (field relevance too low)
-      // This prevents "Toronto + highly cited + vaguely neurological = relevant" pattern
-      if (fieldScore < 0.2 && author.works.length >= 5) {
-        // Researcher has many works but <20% are topic-relevant → likely off-topic
-        // Skip them entirely (return null, will filter out)
-        return null;
+      const seniorAuthorshipRatio =
+        topicWorksCount > 0
+          ? (lastAuthorCount + correspondingAuthorCount) / topicWorksCount
+          : 0;
+      const topicDominance = Math.min(
+        1,
+        realWorksCount > 0 ? topicWorksCount / realWorksCount : 0,
+      );
+      const piScore =
+        maxRawPiScore > 0
+          ? Math.min(1, (author.rawPiScore || 0) / maxRawPiScore)
+          : 0;
+
+      const W = Math.min(1, topicWorksCount / 50);
+      const C = Math.min(1, citationCount / 1000);
+      const R = calculateAuthorRecencyScore(author.works || [], currentYear);
+      const F = author.fieldRelevance ?? 0;
+
+      // Hard filters: relaxed so we don't over-drop (was getting ~3 experts vs ~100 before).
+      // - Require at least 1 topic work (from our 200-work slice).
+      // - Drop only strongly off-topic: fieldRelevance < 0.2 and enough works to judge (>= 5).
+      // - No longer drop authors for having no senior authorship; ranking still favors S.
+      if (topicWorksCount < 1) return null;
+      if (F < 0.2 && (author.works?.length ?? 0) >= 5) return null;
+
+      const S = Math.min(1, seniorAuthorshipRatio);
+      const D = topicDominance;
+      const P = piScore;
+
+      let finalScore;
+      if (clinicalTrialIntent) {
+        finalScore =
+          0.15 * W + 0.1 * C + 0.1 * R + 0.15 * F + 0.2 * S + 0.1 * D + 0.2 * P;
+      } else {
+        finalScore =
+          0.2 * W +
+          0.15 * C +
+          0.15 * R +
+          0.2 * F +
+          0.15 * S +
+          0.1 * D +
+          0.05 * P;
       }
 
-      // Location score: how well the expert matches the searched location
-      let locationScore = 0;
+      if (F < 0.4) finalScore *= 0.7;
 
-      if (searchCity) {
-        // City is specifically searched → city matches get full boost
-        if (
-          author.institutionNamesLower &&
-          author.institutionNamesLower.length > 0
-        ) {
-          const cityMatch = author.institutionNamesLower.some((inst) =>
-            inst.includes(searchCity),
-          );
-          // State match (when city + state specified) gives partial boost
-          const stateMatch =
-            searchState &&
-            author.institutionNamesLower.some((inst) =>
-              inst.includes(searchState),
-            );
-          locationScore = cityMatch ? 1.0 : stateMatch ? 0.5 : 0;
-        } else {
-          locationScore = 0;
-        }
-      } else if (searchState && searchCountryCode) {
-        // Only state + country (no city) → state match in institution
+      let locationScore = 0;
+      if (searchCity && author.institutionNamesLower?.length) {
+        const cityMatch = author.institutionNamesLower.some((inst) =>
+          inst.includes(searchCity),
+        );
         const stateMatch =
-          author.institutionNamesLower &&
+          searchState &&
           author.institutionNamesLower.some((inst) =>
             inst.includes(searchState),
           );
+        locationScore = cityMatch ? 1.0 : stateMatch ? 0.5 : 0;
+      } else if (searchState && searchCountryCode) {
+        const stateMatch = author.institutionNamesLower?.some((inst) =>
+          inst.includes(searchState),
+        );
         const countryMatch =
           (author.countryCodes || []).includes(searchCountryCode) ||
           author.countryCode === searchCountryCode;
         locationScore =
           stateMatch && countryMatch ? 0.6 : countryMatch ? 0.3 : 0;
-      } else if (searchCountryCode) {
-        // Only country specified → country-level match
-        if (
-          (author.countryCodes || []).includes(searchCountryCode) ||
-          author.countryCode === searchCountryCode
-        ) {
-          locationScore = 0.3;
-        }
-      }
-
-      // Weighted final score — STRENGTHENED field relevance to prevent off-topic ranking
-      let finalScore;
-      if (searchCity || searchState || searchCountryCode) {
-        // When location is specified: field relevance gets MORE weight (30%) to prevent off-topic boost
-        finalScore =
-          worksScore * 0.15 +
-          citationScore * 0.2 + // Reduced from 25% - citations alone shouldn't dominate
-          recencyScore * 0.15 +
-          fieldScore * 0.3 + // INCREASED from 15% to 30% - field relevance is critical
-          locationScore * 0.2;
-      } else {
-        // No location: field relevance gets even more weight (35%)
-        finalScore =
-          worksScore * 0.2 +
-          citationScore * 0.2 + // Reduced from 30% - prevent citation-only ranking
-          recencyScore * 0.2 +
-          fieldScore * 0.35; // INCREASED from 20% to 35% - prioritize topic relevance
-      }
-
-      // Additional penalty: if field relevance is low but they still passed the filter, penalize
-      if (fieldScore < 0.4) {
-        finalScore *= 0.7; // 30% penalty for weak field relevance
+      } else if (
+        searchCountryCode &&
+        ((author.countryCodes || []).includes(searchCountryCode) ||
+          author.countryCode === searchCountryCode)
+      ) {
+        locationScore = 0.3;
       }
 
       return {
         ...author,
         scores: {
-          works: worksScore,
-          citations: citationScore,
-          recency: recencyScore,
-          fieldRelevance: fieldScore,
+          works: W,
+          citations: C,
+          recency: R,
+          fieldRelevance: F,
+          seniorAuthorship: S,
+          topicDominance: D,
+          piScore: P,
           location: locationScore,
           final: finalScore,
         },
       };
     })
-    .filter((author) => author !== null) // Remove off-topic researchers (field relevance < 0.2)
+    .filter((a) => a !== null)
     .sort((a, b) => {
-      const bCitations = b.realCitationCount ?? b.totalCitations ?? 0;
-      const aCitations = a.realCitationCount ?? a.totalCitations ?? 0;
-      const citationDiff = bCitations - aCitations;
-      if (citationDiff !== 0) return citationDiff;
-
-      // Tiebreaker: balanced final score, then field relevance
       const scoreDiff = b.scores.final - a.scores.final;
       if (Math.abs(scoreDiff) > 0.001) return scoreDiff;
-
-      const fieldDiff =
-        (b.scores.fieldRelevance || 0) - (a.scores.fieldRelevance || 0);
-      if (Math.abs(fieldDiff) > 0.01) return fieldDiff;
-
-      return 0;
+      const seniorDiff =
+        (b.scores.seniorAuthorship ?? 0) - (a.scores.seniorAuthorship ?? 0);
+      if (Math.abs(seniorDiff) > 0.001) return seniorDiff;
+      const piDiff = (b.scores.piScore ?? 0) - (a.scores.piScore ?? 0);
+      if (Math.abs(piDiff) > 0.001) return piDiff;
+      const topicWorksDiff =
+        (b.topicWorksCount ?? b.works?.length ?? 0) -
+        (a.topicWorksCount ?? a.works?.length ?? 0);
+      if (topicWorksDiff !== 0) return topicWorksDiff;
+      return (b.scores.location ?? 0) - (a.scores.location ?? 0);
     });
 
   return rankedAuthors;
@@ -1399,13 +1502,12 @@ export async function findDeterministicExperts(
         limitOpenAlexProfiles,
       );
 
-      // Step 5: Ranking by metrics + location priority
-      console.log(
-        "Step 5: Ranking authors by metrics (with location boost)...",
-      );
+      // Step 5: Ranking (upgraded formula: senior authorship, topic dominance, PI score; optional trial intent)
+      console.log("Step 5: Ranking authors by metrics...");
       rankedAuthors = rankAuthorsByMetrics(
         authorCandidatesWithRealStats,
         location,
+        topic,
       );
       console.log(`Ranked ${rankedAuthors.length} authors`);
 
@@ -1479,11 +1581,15 @@ export function formatExpertsForResponse(experts) {
       recentPublications: expert.recentWorks,
       lastAuthorCount: expert.lastAuthorCount,
       firstAuthorCount: expert.firstAuthorCount,
+      correspondingAuthorCount: expert.correspondingAuthorCount ?? null,
+      topicWorksCount: expert.topicWorksCount ?? expert.works?.length,
+      topicCitationCount: expert.topicCitationCount ?? null,
+      trialWorkCount: expert.trialWorkCount ?? null,
+      trialLastAuthorCount: expert.trialLastAuthorCount ?? null,
       hIndex: expert.semanticScholar?.hIndex || null,
       iIndex: expert.iIndex || null,
-      fieldRelevance: Math.round(expert.fieldRelevance * 100),
-      // Also include the search-specific counts for transparency
-      topicSpecificWorks: expert.works.length,
+      fieldRelevance: Math.round((expert.fieldRelevance ?? 0) * 100),
+      topicSpecificWorks: expert.works?.length ?? 0,
     },
 
     // Verification info

@@ -8,6 +8,8 @@ import { searchClinicalTrials } from "./clinicalTrials.service.js";
 import { findDeterministicExperts, formatExpertsForResponse } from "./deterministicExperts.service.js";
 import { searchGoogleScholarPublications } from "./googleScholar.service.js";
 import { fetchTrialById, fetchPublicationById } from "./urlParser.service.js";
+import { naturalLanguageToSearchKeywords } from "../utils/naturalLanguageToKeywords.js";
+import { buildConceptAwareQuery } from "./publicationQueryBuilder.service.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -350,23 +352,207 @@ function extractResearcherName(query) {
 }
 
 /**
- * Fetch publications from backend
- * @param {string} query - Search query
- * @param {number} limit - Max items to return
- * @param {boolean} sortByDate - When true, sort by date (newest first)
+ * Detect if the user message is a follow-up that refers to prior context (e.g. "these claims", "that", "refute that").
+ * Such queries need conversation history to resolve to a proper search query.
  */
-async function fetchPublications(query, limit = 4, sortByDate = false) {
+function isFollowUpQuery(userQuery) {
+  const q = userQuery.toLowerCase().trim();
+  const referencePatterns = [
+    /\b(these|those|that|this)\s+(claims?|recommendations?|statements?|findings?|studies?|articles?|papers?|trials?|suggestions?|advice)\b/,
+    /\b(refute|refuted|refuting|dispute|disputed|contradict|contradicting|challenge|challenging)\s+(these|those|that|them|it)\b/,
+    /\b(any\s+)?(articles?|papers?|publications?|studies?|trials?)\s+(which|that)\s+(refute|refuted|dispute|contradict|challenge)/,
+    /\b(articles?|papers?|studies?)\s+(refuting|disputing|contradicting|challenging)\s+(these|those|that)\b/,
+    /\b(the\s+)?(above|previous|earlier)\b/,
+    /\b(what\s+about|how\s+about)\s+(that|those|these)\b/,
+    /\b(more\s+)?(information|details|studies|articles)\s+(on\s+)?(that|this|the\s+same)\b/,
+    /\b(same\s+topic|same\s+subject|that\s+topic)\b/,
+    // "experts in India" / "any good experts which is in india" — topic comes from conversation, not profile
+    /\b(any\s+)?(good\s+)?(experts?|researchers?)\s+(which\s+is|that\s+are|in)\s+/,
+    /\b(experts?|researchers?)\s+in\s+(india|usa|uk|canada|australia|germany|france|japan|china)\b/,
+    // "trials for this" / "show me some recruiting trials for this" — condition comes from conversation
+    /\b(show\s+me\s+)?(some\s+)?(recruiting\s+)?(clinical\s+)?trials?\s+for\s+(this|that)\b/,
+    /\b(trials?|clinical\s+trials?)\s+(for|about)\s+(this|that)\b/,
+    /\b(recruiting|ongoing)\s+trials?\s+(for|about)\s+(this|that)\b/,
+  ];
+  return referencePatterns.some((p) => p.test(q));
+}
+
+/**
+ * Build a short conversation snippet from the last few messages (for query resolution).
+ * @param {Array} messages - Full messages array (excluding the current/last user message)
+ * @param {number} maxTurns - Max user+assistant turn pairs to include
+ * @param {number} maxCharsPerMessage - Max characters per message to include
+ */
+function getConversationSnippetForResolution(messages, maxTurns = 2, maxCharsPerMessage = 400) {
+  const trimmed = messages.slice(0, -1).filter((m) => m.role && m.content);
+  const turns = [];
+  let count = 0;
+  for (let i = trimmed.length - 1; i >= 0 && count < maxTurns; i--) {
+    const msg = trimmed[i];
+    const role = msg.role === "assistant" ? "Assistant" : "User";
+    const text = (msg.content || "").slice(0, maxCharsPerMessage);
+    if (text.length > 0) {
+      turns.unshift(`${role}: ${text}`);
+      if (msg.role === "user") count++;
+    }
+  }
+  return turns.join("\n\n");
+}
+
+/**
+ * Resolve a follow-up search query using conversation context so "these claims" etc. map to the actual topic.
+ * Uses a single short Gemini call when follow-up is detected and history exists; otherwise uses extractSearchQuery.
+ * @param {Array} messages - Full messages (last element is current user message)
+ * @param {string} userQuery - Content of the current user message
+ * @param {string} searchIntent - One of 'publications', 'trials', 'experts', 'researcher_publications'
+ * @returns {Promise<string>} Standalone search query string
+ */
+async function resolveSearchQueryWithContext(messages, userQuery, searchIntent) {
+  const hasHistory = messages.length > 1;
+  const previousMessages = messages.slice(0, -1);
+  const lastAssistant = previousMessages.filter((m) => m.role === "assistant").pop();
+  const hasPriorAssistantContent = lastAssistant && (lastAssistant.content || "").trim().length > 0;
+
+  if (!isFollowUpQuery(userQuery) || !hasHistory || !hasPriorAssistantContent) {
+    return extractSearchQuery(userQuery, searchIntent);
+  }
+
+  const snippet = getConversationSnippetForResolution(messages, 2, 350);
+  if (!snippet.trim()) {
+    return extractSearchQuery(userQuery, searchIntent);
+  }
+
+  const geminiInstance = getGeminiInstance(true);
+  if (!geminiInstance) {
+    return extractSearchQuery(userQuery, searchIntent);
+  }
+
+  const intentDescription = {
+    publications: "publications/articles/papers",
+    trials: "clinical trials",
+    experts: "experts/researchers",
+    researcher_publications: "publications by a specific researcher",
+  }[searchIntent] || "publications";
+
+  const expertInstruction =
+    searchIntent === "experts"
+      ? " For experts: use ONLY the topic from the conversation (e.g. ADHD, diabetes). If the user asks for experts in a place, output: TOPIC in LOCATION (e.g. ADHD in India). Do NOT use the user's saved research interests or profile—only what was discussed in this conversation."
+      : "";
+  const trialsInstruction =
+    searchIntent === "trials"
+      ? " For clinical trials: use ONLY the condition or topic from the conversation (e.g. ADHD, diabetes). Output just the condition name or short phrase (e.g. ADHD), not words like 'trials' or 'recruiting'. Do NOT use the user's saved research interests—only what was discussed."
+      : "";
+
+  const prompt = `You are helping to turn a follow-up chat message into a single, standalone search query for a health research database.
+
+Conversation so far:
+${snippet}
+
+Current user message: ${userQuery}
+
+The user wants to search for ${intentDescription}. Output ONLY one short search query (a few key terms or one phrase) that captures what to search for, using the conversation context to resolve references like "these claims" or "that".${expertInstruction}${trialsInstruction} Do not include greetings, explanations, or punctuation. Only the search query.`;
+
   try {
-    const result = await searchPubMed({
-      q: query,
-      page: 1,
-      pageSize: limit,
-      sort: sortByDate ? "date" : "relevance",
+    const model = geminiInstance.getGenerativeModel({
+      model: CHATBOT_MODELS[0],
+      generationConfig: { maxOutputTokens: 80, temperature: 0.1 },
     });
-    
-    const publications = (result.items || []).slice(0, limit);
-    
-    return publications.map(pub => ({
+    const result = await model.generateContent(prompt);
+    const text = (result?.response?.text?.() || "").trim();
+    const resolved = text.split(/\n/)[0].replace(/^["']|["']$/g, "").trim();
+    if (resolved.length >= 3) {
+      console.log(`[Chatbot] Resolved follow-up query: "${userQuery.slice(0, 50)}..." -> "${resolved}"`);
+      return resolved;
+    }
+  } catch (err) {
+    console.warn("[Chatbot] Query resolution failed, using original extract:", err?.message || err);
+  }
+
+  // Fallback: prepend last assistant summary to user query so extractSearchQuery has context
+  const fallbackText = (lastAssistant.content || "").slice(0, 200) + " " + userQuery;
+  return extractSearchQuery(fallbackText, searchIntent);
+}
+
+/**
+ * Same date logic as Publications backend (GET /search/publications): when recent/latest,
+ * use mindate = last 6 months. Matches recentMonths=6, sortByDate=true.
+ */
+function getMindateForRecentPublications() {
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - 6);
+  const year = cutoff.getFullYear();
+  const month = String(cutoff.getMonth() + 1).padStart(2, "0");
+  return `${year}/${month}`;
+}
+
+// Intent words to strip so we only search the topic (e.g. "adhd treatment"), not "publications" / "recent"
+const PUBLICATION_INTENT_STOP_WORDS = new Set([
+  "recent", "latest", "newest", "new", "current",
+  "publications", "publication", "papers", "paper", "articles", "article",
+  "studies", "study", "research", "show", "me", "find", "get", "list", "give",
+  "on", "for", "about", "related", "to", "regarding",
+  "hello", "hi", "hey", "can", "you", "u", "please", "could", "would",
+]);
+// Allow "treatment" etc. – they are the medical topic; only strip "publication"-type nouns
+const STRIP_BEFORE_TOPIC = /\b(show\s+me|can\s+you|could\s+you|please)?\s*(recent|latest|new)\s*(publications?|papers?|articles?|publicaitions?|studies?|research)\s*(on|for|about)?\s*/gi;
+
+/**
+ * Clean query for publication search: remove intent words (publications, papers, recent, etc.)
+ * so buildConceptAwareQuery only gets the actual topic. Prevents unrelated hits (e.g. "Magnesium
+ * in Prevention and Therapy" when the user asked for "recent publications for adhd treatment").
+ */
+function cleanQueryForPublicationSearch(query) {
+  if (!query || typeof query !== "string") return query;
+  let q = query.trim();
+  // Strip "recent/latest/new publications (on|for) ..." so only topic remains
+  q = q.replace(STRIP_BEFORE_TOPIC, " ");
+  q = q.replace(/\b(publications?|papers?|articles?|publicaitions?|studies?|research)\s+(on|for|about|related\s+to)\s+/gi, " ");
+  // Remove remaining intent words as standalone tokens (handles "recent publications for X")
+  const tokens = q.split(/\s+/).filter((t) => {
+    const lower = t.toLowerCase().replace(/[^\w]/g, "");
+    return lower.length > 0 && !PUBLICATION_INTENT_STOP_WORDS.has(lower);
+  });
+  q = tokens.join(" ").trim();
+  return q || query;
+}
+
+/**
+ * Fetch publications using the same backend logic as Publications.jsx (GET /search/publications):
+ * clean query (strip intent words) → naturalLanguageToSearchKeywords → buildConceptAwareQuery → searchPubMed.
+ * Returns at least 3 publications when available (requests 6 so user sees at least 3).
+ * @param {string} query - Search query (natural language or keywords)
+ * @param {number} limit - Max items to return (default 6 so at least 3 show)
+ * @param {boolean} sortByDate - When true, sort by date and restrict to last 6 months
+ */
+async function fetchPublications(query, limit = 6, sortByDate = false) {
+  try {
+    // Strip "publications", "papers", "recent", etc. so we only search the topic (e.g. "adhd treatment")
+    const topicQuery = cleanQueryForPublicationSearch(query || "");
+    const searchQ = naturalLanguageToSearchKeywords(topicQuery) || topicQuery;
+    const atmQueryMeta = buildConceptAwareQuery(searchQ);
+    const pubmedQuery = atmQueryMeta.pubmedQuery || topicQuery;
+
+    const effectiveMindate = sortByDate ? getMindateForRecentPublications() : "";
+    const pageSize = Math.max(6, limit); // request enough so we can return at least 3
+
+    const result = await searchPubMed({
+      q: pubmedQuery,
+      mindate: effectiveMindate,
+      maxdate: "",
+      page: 1,
+      pageSize,
+      sort: sortByDate ? "date" : "relevance",
+      skipParsing: atmQueryMeta.hasFieldTags,
+    });
+
+    let items = result.items || [];
+    // Same filter as Publications backend: require abstract for non-exact/ID searches
+    if (!atmQueryMeta.hasFieldTags) {
+      items = items.filter((pub) => pub.abstract && pub.abstract.trim().length > 0);
+    }
+    const publications = items.slice(0, Math.max(3, limit));
+
+    return publications.map((pub) => ({
       title: pub.title || "Untitled",
       authors: pub.authors?.slice(0, 3).join(", ") || "Unknown authors",
       journal: pub.journal || "Unknown journal",
@@ -381,16 +567,33 @@ async function fetchPublications(query, limit = 4, sortByDate = false) {
   }
 }
 
+/** Strip intent words from trial query so we search by condition only (e.g. "ADHD"), not "recruiting trials" */
+const TRIAL_INTENT_STOP_WORDS = new Set([
+  "recruiting", "recruit", "trials", "trial", "clinical", "show", "me", "some", "find", "get", "list",
+  "ongoing", "for", "about", "this", "that",
+]);
+
+function cleanQueryForTrialSearch(query) {
+  if (!query || typeof query !== "string") return query;
+  const tokens = query
+    .trim()
+    .split(/\s+/)
+    .filter((t) => {
+      const lower = t.toLowerCase().replace(/[^\w]/g, "");
+      return lower.length > 0 && !TRIAL_INTENT_STOP_WORDS.has(lower);
+    });
+  return tokens.join(" ").trim() || query;
+}
+
 /**
- * Fetch clinical trials from backend
- * @param {string} query - Search query
- * @param {number} limit - Max items to return
- * @param {boolean} sortByDate - When true, sort by lastUpdatePostDate (newest first)
+ * Fetch clinical trials from backend. Uses only the condition/topic (never user profile).
+ * When user asks "recruiting trials for this", the resolved query (e.g. ADHD) is cleaned and used.
  */
 async function fetchTrials(query, limit = 4, sortByDate = false) {
   try {
+    const conditionQuery = cleanQueryForTrialSearch(query);
     const result = await searchClinicalTrials({
-      q: query,
+      q: conditionQuery,
       page: 1,
       pageSize: limit,
       sortByDate,
@@ -448,13 +651,41 @@ async function fetchTrials(query, limit = 4, sortByDate = false) {
   }
 }
 
+/** Common location words so we can split "ADHD in India" into topic + location (chatbot never uses user profile) */
+const EXPERT_LOCATION_MARKERS = new Set([
+  "india", "usa", "us", "uk", "united kingdom", "canada", "australia", "germany", "france",
+  "japan", "china", "brazil", "italy", "spain", "netherlands", "singapore", "south korea",
+  "sweden", "switzerland", "israel", "ireland", "new zealand", "mexico",
+]);
+
 /**
- * Fetch experts using OpenAlex deterministic discovery (same as Experts page)
+ * Parse resolved expert query into topic and location so we never use user profile.
+ * E.g. "ADHD in India" -> { topic: "ADHD", location: "India" }; "India" only -> topic "India", no location.
+ */
+function parseExpertQueryTopicAndLocation(query) {
+  if (!query || typeof query !== "string") return { topic: query || "", location: null };
+  const q = query.trim();
+  const inMatch = q.match(/\s+in\s+(.+)$/i);
+  if (inMatch) {
+    const afterIn = inMatch[1].trim();
+    const lower = afterIn.toLowerCase();
+    if (EXPERT_LOCATION_MARKERS.has(lower) || lower.length <= 30) {
+      const topic = q.slice(0, inMatch.index).trim();
+      if (topic.length >= 2) return { topic, location: afterIn };
+    }
+  }
+  return { topic: q, location: null };
+}
+
+/**
+ * Fetch experts using OpenAlex deterministic discovery (same as Experts page).
+ * Uses only the search query and conversation context—never the user's saved research interests.
  */
 async function fetchExperts(query, limit = 4) {
   try {
-    console.log(`[Chatbot] Fetching experts via OpenAlex for: "${query}"`);
-    const result = await findDeterministicExperts(query, null, 1, limit, {
+    const { topic, location } = parseExpertQueryTopicAndLocation(query);
+    console.log(`[Chatbot] Fetching experts via OpenAlex for: "${topic}"${location ? ` in ${location}` : ""}`);
+    const result = await findDeterministicExperts(topic, location || null, 1, limit, {
       limitOpenAlexProfiles: true,
       skipAISummaries: false,
     });
@@ -555,22 +786,25 @@ function buildItemContext(itemContext) {
     if (item.summary && item.summary !== (item.detailedDescription || item.description)) {
       contextInfo += `\nSummary:\n${item.summary}\n`;
     }
-    if (item.contacts && item.contacts.length > 0) {
+    const contactsList = Array.isArray(item.contacts) ? item.contacts : [];
+    if (contactsList.length > 0) {
       contextInfo += `\nContact Details:\n`;
-      item.contacts.forEach((c, i) => {
+      contactsList.forEach((c, i) => {
         contextInfo += `  ${i + 1}. ${c.name || "Contact"}${c.role ? ` (${c.role})` : ""}`;
         if (c.phone) contextInfo += ` - Phone: ${c.phone}`;
         if (c.email) contextInfo += ` - Email: ${c.email}`;
         contextInfo += "\n";
       });
     }
-    if (item.locations && item.locations.length > 0) {
+    const locationsList = Array.isArray(item.locations) ? item.locations : [];
+    if (locationsList.length > 0) {
       contextInfo += `\nTrial Locations:\n`;
-      item.locations.forEach((loc, i) => {
-        const addr = loc.fullAddress || loc.address || [loc.facility, loc.city, loc.state, loc.country].filter(Boolean).join(", ");
+      locationsList.forEach((loc, i) => {
+        const locObj = typeof loc === "object" && loc !== null ? loc : {};
+        const addr = locObj.fullAddress || locObj.address || [locObj.facility, locObj.city, locObj.state, locObj.country].filter(Boolean).join(", ") || String(loc);
         contextInfo += `  ${i + 1}. ${addr}`;
-        if (loc.contactName || loc.contactPhone || loc.contactEmail) {
-          contextInfo += ` - Contact: ${loc.contactName || ""} ${loc.contactPhone || ""} ${loc.contactEmail || ""}`.trim();
+        if (locObj.contactName || locObj.contactPhone || locObj.contactEmail) {
+          contextInfo += ` - Contact: ${locObj.contactName || ""} ${locObj.contactPhone || ""} ${locObj.contactEmail || ""}`.trim();
         }
         contextInfo += "\n";
       });
@@ -728,7 +962,7 @@ export async function generateChatResponse(messages, res, req = null) {
     const pubTitle = extractPublicationTitleFromLinkRequest(userQuery);
     if (pubTitle) {
       try {
-        const linkResults = await fetchPublications(pubTitle, 3, false);
+        const linkResults = await fetchPublications(pubTitle, 6, false);
         if (linkResults && linkResults.length > 0) {
           const pub = linkResults[0];
           res.setHeader("Content-Type", "text/event-stream");
@@ -808,13 +1042,13 @@ export async function generateChatResponse(messages, res, req = null) {
 
   // If search intent detected and no item context, fetch real data
   if (searchIntent && !itemContext) {
-    searchQuery = extractSearchQuery(userQuery, searchIntent);
+    searchQuery = await resolveSearchQueryWithContext(messages, userQuery, searchIntent);
     const sortByDate = wantsRecentSort(userQuery);
     console.log(`[Chatbot] Detected ${searchIntent} intent for query: "${searchQuery}"${sortByDate ? " (recent/latest sort)" : ""}`);
     
     try {
       if (searchIntent === "publications") {
-        searchResults = await fetchPublications(searchQuery, 4, sortByDate);
+        searchResults = await fetchPublications(searchQuery, 6, sortByDate);
       } else if (searchIntent === "trials") {
         searchResults = await fetchTrials(searchQuery, 4, sortByDate);
       } else if (searchIntent === "experts") {
