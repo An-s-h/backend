@@ -57,6 +57,14 @@ const verifyAdmin = (req, res, next) => {
         .status(401)
         .json({ error: "Session expired. Please sign in again.", code: "TOKEN_EXPIRED" });
     }
+    // JsonWebTokenError = invalid signature (usually JWT_SECRET mismatch between login and this server)
+    if (err.name === "JsonWebTokenError") {
+      console.warn("[admin] JWT verification failed (invalid signature):", err.message);
+      return res.status(401).json({
+        error: "Invalid token. If you just logged in, the server may be using a different JWT_SECRET. Set JWT_SECRET to the same value on every server/instance.",
+        code: "INVALID_SIGNATURE",
+      });
+    }
     return res
       .status(401)
       .json({ error: "Invalid or expired token. Please sign in again.", code: "INVALID_TOKEN" });
