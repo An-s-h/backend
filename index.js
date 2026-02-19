@@ -34,9 +34,6 @@ import feedbackRoutes from "./routes/feedback.routes.js";
 import { optionalSession } from "./middleware/auth.js";
 import { searchLimitMiddleware } from "./middleware/searchLimit.js";
 
-
-dotenv.config();
-
 const app = express();
 app.use(
   cors({
