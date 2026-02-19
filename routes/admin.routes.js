@@ -38,7 +38,7 @@ const verifyAdmin = (req, res, next) => {
   }
 
   const secret =
-    process.env.JWT_SECRET || "your-secret-key-change-in-production";
+    process.env.JWT_SECRET ;
   try {
     const decoded = jwt.verify(token, secret);
     if (decoded.isAdmin !== true) {
