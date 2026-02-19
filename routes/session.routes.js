@@ -97,6 +97,12 @@ router.post("/auth/register", async (req, res) => {
   }
 });
 
+// Case-insensitive email match (avoids 401 when DB has different casing, e.g. production)
+function emailRegex(email) {
+  const escaped = (email || "").trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped}$`, "i");
+}
+
 // POST /api/auth/login - Login with email and password (role optional; resolved from account)
 router.post("/auth/login", async (req, res) => {
   const { email, password, role } = req.body || {};
@@ -108,10 +114,10 @@ router.post("/auth/login", async (req, res) => {
   }
 
   try {
-    // Find user by email; if role provided, use it to disambiguate (same email can be patient + researcher)
+    // Find user by email (case-insensitive); if role provided, use it to disambiguate (same email can be patient + researcher)
     const query = role && ["patient", "researcher"].includes(role)
-      ? { email, role }
-      : { email };
+      ? { email: emailRegex(email), role }
+      : { email: emailRegex(email) };
     const user = await User.findOne(query).sort({ updatedAt: -1 });
 
     if (!user) {

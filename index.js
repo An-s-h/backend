@@ -49,6 +49,8 @@ app.use(
   "https://www.collabiora.com",
   "https://collabiora.com",
   "https://beta.collabiora.com",
+  "https://ansh.pw",
+  "https://www.ansh.pw",
 ],
     credentials: true, // Allow cookies to be sent
   })
