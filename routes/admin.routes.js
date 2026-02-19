@@ -23,7 +23,8 @@ import { uploadImage } from "../services/upload.service.js";
 
 const router = Router();
 
-// Middleware: verify JWT and require isAdmin claim (admin signs in via main /api/auth/login or OAuth)
+// Middleware: verify JWT and require isAdmin claim (admin signs in via main /api/auth/login or OAuth).
+// Production: set ADMIN_EMAILS (comma-separated) and JWT_SECRET in env so login issues tokens with isAdmin: true.
 const verifyAdmin = (req, res, next) => {
   const token =
     req.headers.authorization?.replace("Bearer ", "") ||
@@ -33,7 +34,7 @@ const verifyAdmin = (req, res, next) => {
   if (!token) {
     return res
       .status(401)
-      .json({ error: "Unauthorized. Admin access required." });
+      .json({ error: "Authentication token required", code: "NO_TOKEN" });
   }
 
   const secret =
@@ -42,15 +43,23 @@ const verifyAdmin = (req, res, next) => {
     const decoded = jwt.verify(token, secret);
     if (decoded.isAdmin !== true) {
       return res
-        .status(401)
-        .json({ error: "Unauthorized. Admin access required." });
+        .status(403)
+        .json({
+          error: "Admin access required. Your account is not an admin.",
+          code: "NOT_ADMIN",
+        });
     }
     req.adminUserId = decoded.userId;
     next();
   } catch (err) {
+    if (err.name === "TokenExpiredError") {
+      return res
+        .status(401)
+        .json({ error: "Session expired. Please sign in again.", code: "TOKEN_EXPIRED" });
+    }
     return res
       .status(401)
-      .json({ error: "Unauthorized. Admin access required." });
+      .json({ error: "Invalid or expired token. Please sign in again.", code: "INVALID_TOKEN" });
   }
 };
 

@@ -16,7 +16,8 @@ function generateToken(userId, isAdmin = false) {
   return jwt.sign({ userId, isAdmin: !!isAdmin }, JWT_SECRET, { expiresIn: "7d" });
 }
 
-// Check if user has admin access (DB flag or ADMIN_EMAILS env)
+// Check if user has admin access (DB flag or ADMIN_EMAILS env).
+// Production: set ADMIN_EMAILS=your@email.com (comma-separated) and JWT_SECRET in .env so admin login issues a token with isAdmin: true.
 function isUserAdmin(user) {
   const adminEmails = process.env.ADMIN_EMAILS
     ? process.env.ADMIN_EMAILS.split(",").map((e) => e.trim().toLowerCase()).filter(Boolean)
@@ -97,12 +98,6 @@ router.post("/auth/register", async (req, res) => {
   }
 });
 
-// Case-insensitive email match (avoids 401 when DB has different casing, e.g. production)
-function emailRegex(email) {
-  const escaped = (email || "").trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^${escaped}$`, "i");
-}
-
 // POST /api/auth/login - Login with email and password (role optional; resolved from account)
 router.post("/auth/login", async (req, res) => {
   const { email, password, role } = req.body || {};
@@ -114,10 +109,10 @@ router.post("/auth/login", async (req, res) => {
   }
 
   try {
-    // Find user by email (case-insensitive); if role provided, use it to disambiguate (same email can be patient + researcher)
+    // Find user by email; if role provided, use it to disambiguate (same email can be patient + researcher)
     const query = role && ["patient", "researcher"].includes(role)
-      ? { email: emailRegex(email), role }
-      : { email: emailRegex(email) };
+      ? { email, role }
+      : { email };
     const user = await User.findOne(query).sort({ updatedAt: -1 });
 
     if (!user) {
