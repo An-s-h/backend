@@ -1,7 +1,7 @@
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
-import dotenv from "dotenv";
 import { connectMongo } from "./config/mongo.js";
 import sessionRoutes from "./routes/session.routes.js";
 import profileRoutes from "./routes/profile.routes.js";
