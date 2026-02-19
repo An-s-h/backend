@@ -46,7 +46,7 @@ async function retryWithBackoff(fn, maxRetries = 3, initialDelay = 1000) {
       console.log(
         `PubMed request timeout, retrying in ${delay}ms... (attempt ${
           attempt + 1
-        }/${maxRetries})`
+        }/${maxRetries})`,
       );
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
@@ -119,7 +119,7 @@ export async function searchPubMed({
         // Merge date ranges - use the more restrictive range
         // This is a simple implementation - could be enhanced
         console.log(
-          "Query contains date filter, using query date filter over parameters"
+          "Query contains date filter, using query date filter over parameters",
         );
       }
     }
@@ -186,7 +186,7 @@ export async function searchPubMed({
         article.getElementsByTagName(tag)[0]?.textContent || "";
       const getAllText = (tag) =>
         Array.from(article.getElementsByTagName(tag)).map(
-          (el) => el.textContent || ""
+          (el) => el.textContent || "",
         );
 
       const pmid = getText("PMID");
@@ -249,7 +249,8 @@ export async function searchPubMed({
       if (meshHeadingList.length > 0) {
         const headings = meshHeadingList[0].getElementsByTagName("MeshHeading");
         for (let h = 0; h < headings.length; h++) {
-          const descriptors = headings[h].getElementsByTagName("DescriptorName");
+          const descriptors =
+            headings[h].getElementsByTagName("DescriptorName");
           for (let d = 0; d < descriptors.length; d++) {
             const major = descriptors[d].getAttribute("MajorTopicYN");
             if (major === "Y") {
@@ -262,7 +263,7 @@ export async function searchPubMed({
 
       // Get publication type
       const publicationTypes = Array.from(
-        article.getElementsByTagName("PublicationType")
+        article.getElementsByTagName("PublicationType"),
       )
         .map((type) => type.textContent || "")
         .filter(Boolean);
@@ -272,7 +273,7 @@ export async function searchPubMed({
 
       // Get affiliation (first author's affiliation if available)
       const affiliations = Array.from(
-        article.getElementsByTagName("Affiliation")
+        article.getElementsByTagName("Affiliation"),
       )
         .map((aff) => aff.textContent || "")
         .filter(Boolean);
@@ -289,7 +290,8 @@ export async function searchPubMed({
         doi,
         abstract,
         keywords: keywords.length > 0 ? keywords : undefined,
-        meshMajorTopics: meshMajorTopics.length > 0 ? meshMajorTopics : undefined,
+        meshMajorTopics:
+          meshMajorTopics.length > 0 ? meshMajorTopics : undefined,
         publicationTypes:
           publicationTypes.length > 0 ? publicationTypes : undefined,
         country: country || undefined,
@@ -312,7 +314,7 @@ export async function searchPubMed({
     if (e.code === "ECONNABORTED" || e.message?.includes("timeout")) {
       console.error(
         "PubMed fetch error: timeout exceeded after retries",
-        e.message
+        e.message,
       );
     } else {
       console.error("PubMed fetch error:", e.message);

@@ -17,6 +17,7 @@ import { CommunityMembership } from "../models/CommunityMembership.js";
 import { Subcategory } from "../models/Subcategory.js";
 import { Trial } from "../models/Trial.js";
 import { WorkSubmission } from "../models/WorkSubmission.js";
+import { PageFeedback } from "../models/PageFeedback.js";
 import { uploadSingle } from "../middleware/upload.js";
 import { uploadImage } from "../services/upload.service.js";
 
@@ -334,13 +335,14 @@ router.get("/admin/expert/:userId", verifyAdmin, async (req, res) => {
   }
 });
 
-// Dashboard overview stats (new joiners, totals)
+// Dashboard overview stats (new joiners, totals, trends, platform health)
 router.get("/admin/stats/overview", verifyAdmin, async (req, res) => {
   try {
     const now = new Date();
     const last24 = new Date(now.getTime() - 24 * 60 * 60 * 1000);
     const thisWeek = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const thisMonth = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const lastMonthStart = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000); // 30–60 days ago = "last month"
 
     const [patientUserIds, researcherUserIds] = await Promise.all([
       Profile.find({ role: "patient" }).distinct("userId"),
@@ -351,65 +353,102 @@ router.get("/admin/stats/overview", verifyAdmin, async (req, res) => {
       patientsLast24,
       patientsThisWeek,
       patientsThisMonth,
+      patientsLastMonth,
       researchersLast24,
       researchersThisWeek,
       researchersThisMonth,
+      researchersLastMonth,
       totalForums,
       totalDiscoveryPosts,
+      forumsActiveThisWeek,
+      discoveryPostsLast7Days,
+      unresolvedFeedbackCount,
+      signupsPatientsByDay,
+      signupsResearchersByDay,
+      threadsByDay,
+      postsByDay,
     ] = await Promise.all([
-      patientUserIds.length
-        ? User.countDocuments({
-            _id: { $in: patientUserIds },
-            createdAt: { $gte: last24 },
-          })
-        : 0,
-      patientUserIds.length
-        ? User.countDocuments({
-            _id: { $in: patientUserIds },
-            createdAt: { $gte: thisWeek },
-          })
-        : 0,
-      patientUserIds.length
-        ? User.countDocuments({
-            _id: { $in: patientUserIds },
-            createdAt: { $gte: thisMonth },
-          })
-        : 0,
-      researcherUserIds.length
-        ? User.countDocuments({
-            _id: { $in: researcherUserIds },
-            createdAt: { $gte: last24 },
-          })
-        : 0,
-      researcherUserIds.length
-        ? User.countDocuments({
-            _id: { $in: researcherUserIds },
-            createdAt: { $gte: thisWeek },
-          })
-        : 0,
-      researcherUserIds.length
-        ? User.countDocuments({
-            _id: { $in: researcherUserIds },
-            createdAt: { $gte: thisMonth },
-          })
-        : 0,
+      patientUserIds.length ? User.countDocuments({ _id: { $in: patientUserIds }, createdAt: { $gte: last24 } }) : 0,
+      patientUserIds.length ? User.countDocuments({ _id: { $in: patientUserIds }, createdAt: { $gte: thisWeek } }) : 0,
+      patientUserIds.length ? User.countDocuments({ _id: { $in: patientUserIds }, createdAt: { $gte: thisMonth } }) : 0,
+      patientUserIds.length ? User.countDocuments({ _id: { $in: patientUserIds }, createdAt: { $gte: lastMonthStart, $lt: thisMonth } }) : 0,
+      researcherUserIds.length ? User.countDocuments({ _id: { $in: researcherUserIds }, createdAt: { $gte: last24 } }) : 0,
+      researcherUserIds.length ? User.countDocuments({ _id: { $in: researcherUserIds }, createdAt: { $gte: thisWeek } }) : 0,
+      researcherUserIds.length ? User.countDocuments({ _id: { $in: researcherUserIds }, createdAt: { $gte: thisMonth } }) : 0,
+      researcherUserIds.length ? User.countDocuments({ _id: { $in: researcherUserIds }, createdAt: { $gte: lastMonthStart, $lt: thisMonth } }) : 0,
       ForumCategory.countDocuments(),
       Post.countDocuments(),
+      Thread.countDocuments({ createdAt: { $gte: thisWeek } }),
+      Post.countDocuments({ createdAt: { $gte: thisWeek } }),
+      PageFeedback.countDocuments(),
+      patientUserIds.length
+        ? User.aggregate([
+            { $match: { _id: { $in: patientUserIds }, createdAt: { $gte: thisMonth } } },
+            { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, count: { $sum: 1 } } },
+            { $sort: { _id: 1 } },
+          ])
+        : [],
+      researcherUserIds.length
+        ? User.aggregate([
+            { $match: { _id: { $in: researcherUserIds }, createdAt: { $gte: thisMonth } } },
+            { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, count: { $sum: 1 } } },
+            { $sort: { _id: 1 } },
+          ])
+        : [],
+      Thread.aggregate([
+        { $match: { createdAt: { $gte: thisMonth } } },
+        { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, count: { $sum: 1 } } },
+        { $sort: { _id: 1 } },
+      ]),
+      Post.aggregate([
+        { $match: { createdAt: { $gte: thisMonth } } },
+        { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, count: { $sum: 1 } } },
+        { $sort: { _id: 1 } },
+      ]),
     ]);
+
+    // Build signups over time (fill missing days with 0)
+    const dayMap = {};
+    for (let d = new Date(thisMonth); d <= now; d.setDate(d.getDate() + 1)) {
+      const key = d.toISOString().slice(0, 10);
+      dayMap[key] = { date: key, patients: 0, researchers: 0 };
+    }
+    (signupsPatientsByDay || []).forEach((r) => {
+      if (dayMap[r._id]) dayMap[r._id].patients = r.count;
+    });
+    (signupsResearchersByDay || []).forEach((r) => {
+      if (dayMap[r._id]) dayMap[r._id].researchers = r.count;
+    });
+    const signupsOverTime = Object.values(dayMap).sort((a, b) => a.date.localeCompare(b.date));
+
+    const threadsByDayMap = {};
+    (threadsByDay || []).forEach((r) => { threadsByDayMap[r._id] = r.count; });
+    const postsByDayMap = {};
+    (postsByDay || []).forEach((r) => { postsByDayMap[r._id] = r.count; });
+    const engagementOverTime = Object.keys(dayMap)
+      .sort()
+      .map((date) => ({ date, threads: threadsByDayMap[date] || 0, posts: postsByDayMap[date] || 0 }));
 
     res.json({
       newPatients: {
         last24: patientsLast24,
         thisWeek: patientsThisWeek,
         thisMonth: patientsThisMonth,
+        lastMonth: patientsLastMonth,
       },
       newResearchers: {
         last24: researchersLast24,
         thisWeek: researchersThisWeek,
         thisMonth: researchersThisMonth,
+        lastMonth: researchersLastMonth,
       },
-      totalForums: totalForums,
-      totalDiscoveryPosts: totalDiscoveryPosts,
+      totalForums,
+      totalDiscoveryPosts,
+      forumsActiveThisWeek: forumsActiveThisWeek ?? 0,
+      discoveryPostsLast7Days: discoveryPostsLast7Days ?? 0,
+      unresolvedFeedbackCount: unresolvedFeedbackCount ?? 0,
+      signupsOverTime,
+      engagementOverTime,
     });
   } catch (error) {
     console.error("Error fetching overview stats:", error);

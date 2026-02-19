@@ -255,7 +255,17 @@ function calculatePublicationRelevanceSignals(pub, queryMeta) {
 }
 
 const RELEVANCE_META_WORDS = new Set([
-  "latest", "recent", "new", "updated", "emerging", "publications", "publication", "papers", "articles", "research", "studies",
+  "latest",
+  "recent",
+  "new",
+  "updated",
+  "emerging",
+  "publications",
+  "publication",
+  "papers",
+  "articles",
+  "research",
+  "studies",
 ]);
 
 /** Field-weighted query relevance: Title 0.45, MeSH Major 0.25, Keywords 0.15, Abstract 0.15 */
@@ -271,8 +281,14 @@ function calculateFieldWeightedRelevance(pub, queryMeta) {
     ? pub.meshMajorTopics.join(" ").toLowerCase()
     : "";
 
-  const weights = { title: 0.45, meshMajor: 0.25, keywords: 0.15, abstract: 0.15 };
-  const totalWeight = weights.title + weights.meshMajor + weights.keywords + weights.abstract;
+  const weights = {
+    title: 0.45,
+    meshMajor: 0.25,
+    keywords: 0.15,
+    abstract: 0.15,
+  };
+  const totalWeight =
+    weights.title + weights.meshMajor + weights.keywords + weights.abstract;
   let weightedSum = 0;
   let maxTermScore = 0;
 
@@ -286,7 +302,11 @@ function calculateFieldWeightedRelevance(pub, queryMeta) {
     const inKw = re.test(keywords) ? 1 : 0;
     const inAbs = re.test(abstract) ? 1 : 0;
     const termScore =
-      (inTitle * weights.title + inMesh * weights.meshMajor + inKw * weights.keywords + inAbs * weights.abstract) / totalWeight;
+      (inTitle * weights.title +
+        inMesh * weights.meshMajor +
+        inKw * weights.keywords +
+        inAbs * weights.abstract) /
+      totalWeight;
     weightedSum += termScore * totalWeight;
     if (termScore > maxTermScore) maxTermScore = termScore;
   }
@@ -321,6 +341,118 @@ function passesCoreConceptGate(pub, coreConceptTerms) {
     if (re.test(strong)) return true;
   }
   return false;
+}
+
+/**
+ * Strong abstract match: ≥2 occurrences OR 1 occurrence in first 25% of abstract
+ * OR near a Background/Objective section marker (best-effort heuristic).
+ */
+function hasStrongAbstractMatch(abstractText, term) {
+  if (!abstractText || !term) return false;
+  const abs = abstractText.toLowerCase();
+  const t = term.toLowerCase();
+  const safe = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(safe, "gi");
+  const matches = [...abs.matchAll(re)];
+  if (matches.length >= 2) return true;
+  if (matches.length === 0) return false;
+  const idx = matches[0].index ?? -1;
+  if (idx >= 0 && idx / Math.max(1, abs.length) <= 0.25) return true;
+  const windowStart = Math.max(0, idx - 200);
+  const windowEnd = Math.min(abs.length, idx + 200);
+  const window = abs.slice(windowStart, windowEnd);
+  if (/background\s*[:\-]/i.test(window) || /objective\s*[:\-]/i.test(window)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Check if any term from a concept group strongly matches a publication:
+ * - title / MeSH major / keywords
+ * - or strong abstract match.
+ */
+function strongConceptMatch(pub, terms) {
+  if (!terms?.length) return false;
+  const title = (pub.title || "").toLowerCase();
+  const meshMajor = Array.isArray(pub.meshMajorTopics)
+    ? pub.meshMajorTopics.join(" ").toLowerCase()
+    : "";
+  const keywords = Array.isArray(pub.keywords)
+    ? pub.keywords.join(" ").toLowerCase()
+    : "";
+  const abstract = (pub.abstract || "").toLowerCase();
+  const strongText = `${title} ${meshMajor} ${keywords}`;
+
+  for (const term of terms) {
+    const t = term.trim().toLowerCase();
+    if (!t) continue;
+    const safe = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`\\b${safe}\\b`, "i");
+    if (re.test(strongText)) return true;
+    if (hasStrongAbstractMatch(abstract, t)) return true;
+  }
+  return false;
+}
+
+/**
+ * Assess exposure concept match levels:
+ * - hasAnyExposure: any occurrence in title/mesh/keywords/abstract
+ * - hasStrongExposure: strongConceptMatch
+ * - rareInTitleOrKeywords: any rare term/phrase in title or keywords
+ */
+function assessExposureMatch(pub, exposureTerms = [], rareConcepts = []) {
+  const title = (pub.title || "").toLowerCase();
+  const meshMajor = Array.isArray(pub.meshMajorTopics)
+    ? pub.meshMajorTopics.join(" ").toLowerCase()
+    : "";
+  const keywords = Array.isArray(pub.keywords)
+    ? pub.keywords.join(" ").toLowerCase()
+    : "";
+  const abstract = (pub.abstract || "").toLowerCase();
+  const anyText = `${title} ${meshMajor} ${keywords} ${abstract}`;
+  const anyTerms = exposureTerms || [];
+
+  let hasAnyExposure = false;
+  for (const term of anyTerms) {
+    const t = term.trim().toLowerCase();
+    if (!t) continue;
+    const safe = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`\\b${safe}\\b`, "i");
+    if (re.test(anyText)) {
+      hasAnyExposure = true;
+    }
+  }
+
+  const hasStrongExposure = strongConceptMatch(pub, anyTerms);
+
+  let rareInTitleOrKeywords = false;
+  const titleKw = `${title} ${keywords}`;
+  for (const rc of rareConcepts || []) {
+    const t = rc.trim().toLowerCase();
+    if (!t) continue;
+    const safe = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`\\b${safe}\\b`, "i");
+    if (re.test(titleKw)) {
+      rareInTitleOrKeywords = true;
+      break;
+    }
+  }
+
+  return {
+    hasAnyExposure,
+    hasStrongExposure,
+    rareInTitleOrKeywords,
+  };
+}
+
+/**
+ * Multi-concept must-match gate:
+ * A publication must strongly match all required concept groups.
+ */
+function passesMustConceptGate(pub, mustGroups) {
+  if (!mustGroups?.length) return true;
+  return mustGroups.every((g) => strongConceptMatch(pub, g.terms || []));
 }
 
 router.get("/search/trials", async (req, res) => {
@@ -484,23 +616,29 @@ router.get("/search/trials", async (req, res) => {
     const endIndex = startIndex + requestedPageSize;
     const paginatedResults = sortedResults.slice(startIndex, endIndex);
 
-    // Simplify titles only for the paginated results (much faster!)
-    // This adds simplified titles to each trial object
+    // Simplify titles only for patients (researchers see original titles)
+    const isResearcher = userProfile?.role === "researcher";
     let resultsWithSimplifiedTitles;
-    try {
-      // Use batch processing for much better performance - only for paginated results
-      const simplifiedTitles = await batchSimplifyTrialTitles(paginatedResults);
-      resultsWithSimplifiedTitles = paginatedResults.map((trial, index) => ({
-        ...trial,
-        simplifiedTitle: simplifiedTitles[index] || trial.title,
-      }));
-    } catch (error) {
-      // If batch simplification fails, fallback to original titles
-      console.error("Error batch simplifying titles:", error);
+    if (isResearcher) {
       resultsWithSimplifiedTitles = paginatedResults.map((trial) => ({
         ...trial,
         simplifiedTitle: trial.title,
       }));
+    } else {
+      try {
+        const simplifiedTitles =
+          await batchSimplifyTrialTitles(paginatedResults);
+        resultsWithSimplifiedTitles = paginatedResults.map((trial, index) => ({
+          ...trial,
+          simplifiedTitle: simplifiedTitles[index] || trial.title,
+        }));
+      } catch (error) {
+        console.error("Error batch simplifying titles:", error);
+        resultsWithSimplifiedTitles = paginatedResults.map((trial) => ({
+          ...trial,
+          simplifiedTitle: trial.title,
+        }));
+      }
     }
 
     // Add read status for signed-in users (only for paginated results to reduce DB queries)
@@ -629,30 +767,56 @@ router.get("/search/publications", async (req, res) => {
     } else if (q && q.length > 30) {
       // Long query likely to be an exact title - search in title field
       // Normalize natural language to keywords first, then extract title words
-      const titleQuery =
-        naturalLanguageToSearchKeywords(q) || q;
+      const titleQuery = naturalLanguageToSearchKeywords(q) || q;
       // PubMed's exact phrase matching with "phrase"[Title] FAILS on special characters
       // like apostrophes, colons, periods, etc. (returns 0 results).
       // Instead, split into significant words and AND them together with [ti] field tags.
       // e.g. "Oncology's trial and error: Analysis" → Oncology[ti] AND trial[ti] AND error[ti] AND Analysis[ti]
       const titleStopWords = new Set([
-        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
-        "of", "with", "by", "is", "are", "was", "were", "be", "been", "its",
-        "it", "as", "from", "that", "this", "than", "into", "not", "no",
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "but",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "its",
+        "it",
+        "as",
+        "from",
+        "that",
+        "this",
+        "than",
+        "into",
+        "not",
+        "no",
       ]);
       const titleWords = titleQuery
-        .replace(/[^\w\s-]/g, " ")  // Strip punctuation (apostrophes, colons, periods, etc.)
+        .replace(/[^\w\s-]/g, " ") // Strip punctuation (apostrophes, colons, periods, etc.)
         .split(/\s+/)
         .map((w) => w.trim())
         .filter((w) => w.length >= 2 && !titleStopWords.has(w.toLowerCase()));
 
-        if (titleWords.length > 0) {
-          // Use each significant word with [ti] joined by AND for precise title matching
-          pubmedQuery = titleWords.map((w) => `${w}[ti]`).join(" AND ");
-        } else {
-          // Fallback: just use the normalized query
-          pubmedQuery = titleQuery;
-        }
+      if (titleWords.length > 0) {
+        // Use each significant word with [ti] joined by AND for precise title matching
+        pubmedQuery = titleWords.map((w) => `${w}[ti]`).join(" AND ");
+      } else {
+        // Fallback: just use the normalized query
+        pubmedQuery = titleQuery;
+      }
       console.log("Exact title search detected:", pubmedQuery);
       atmQueryMeta = {
         pubmedQuery,
@@ -663,7 +827,7 @@ router.get("/search/publications", async (req, res) => {
       };
     } else {
       // Layer 1: Natural language → keywords, then concept + intent aware query
-      const searchQ = naturalLanguageToSearchKeywords(q || "") || (q || "");
+      const searchQ = naturalLanguageToSearchKeywords(q || "") || q || "";
       atmQueryMeta = buildConceptAwareQuery(searchQ);
       pubmedQuery = atmQueryMeta.pubmedQuery;
       // Preserve legacy flags for downstream (PMC/PMID/exact title unchanged)
@@ -693,19 +857,104 @@ router.get("/search/publications", async (req, res) => {
     // This ensures results are sorted across all pages, not just within each page
     const requestedPage = parseInt(page, 10);
     const requestedPageSize = parseInt(pageSize, 10);
-    const batchSize = 300;
+    const baseBatchSize = 300;
 
-    const pubmedResult = await searchPubMed({
-      q: pubmedQuery,
-      mindate: effectiveMindate,
-      maxdate: maxdate || "",
-      page: 1, // Always fetch from page 1 for the batch
-      pageSize: batchSize, // Fetch larger batch for sorting
-      sort: sortByDate === "true" || sortByDate === true ? "date" : "relevance",
-      // Skip query parsing for PMC ID, PMID, and exact title searches
-      // to preserve the field tags we've carefully crafted
-      skipParsing: atmQueryMeta.isPmcSearch || atmQueryMeta.isPmidSearch || atmQueryMeta.isExactTitleSearch,
-    });
+    const isMultiConceptQuery =
+      !!atmQueryMeta.isMultiConcept &&
+      !atmQueryMeta.isPmcSearch &&
+      !atmQueryMeta.isPmidSearch &&
+      !atmQueryMeta.isExactTitleSearch;
+
+    // For multi-concept (e.g., disease + mold exposure) queries, increase retmax slightly.
+    const multiConceptBatchSize = Math.min(1000, Math.max(600, baseBatchSize));
+    const batchSize = isMultiConceptQuery ? multiConceptBatchSize : baseBatchSize;
+
+    let pubmedResult;
+    let tier1Items = [];
+    let tier2Items = [];
+
+    // Tiered search: Tier 1 (disease AND exposure AND toxicity) then Tier 2 (disease AND exposure)
+    if (
+      isMultiConceptQuery &&
+      atmQueryMeta.tier1Query &&
+      atmQueryMeta.tier2Query &&
+      !(
+        sortByDate === "true" ||
+        sortByDate === true
+      )
+    ) {
+      // Always use relevance sort for concept-intersection queries.
+      const sortMode = "relevance";
+
+      const tier1Result = await searchPubMed({
+        q: atmQueryMeta.tier1Query,
+        mindate: effectiveMindate,
+        maxdate: maxdate || "",
+        page: 1,
+        pageSize: batchSize,
+        sort: sortMode,
+        skipParsing: false,
+      });
+      tier1Items = tier1Result.items || [];
+
+      let combinedItems = [...tier1Items];
+      let combinedIds = new Set(
+        combinedItems
+          .map((p) => String(p.pmid || p.id || ""))
+          .filter(Boolean),
+      );
+
+      const tier1Count = tier1Result.totalCount || tier1Items.length || 0;
+      if (tier1Count < 20) {
+        const tier2Result = await searchPubMed({
+          q: atmQueryMeta.tier2Query,
+          mindate: effectiveMindate,
+          maxdate: maxdate || "",
+          page: 1,
+          pageSize: batchSize,
+          sort: sortMode,
+          skipParsing: false,
+        });
+        tier2Items = (tier2Result.items || []).filter((p) => {
+          const id = String(p.pmid || p.id || "");
+          return id && !combinedIds.has(id);
+        });
+        combinedItems = [...combinedItems, ...tier2Items];
+        combinedIds = new Set(
+          combinedItems
+            .map((p) => String(p.pmid || p.id || ""))
+            .filter(Boolean),
+        );
+
+        pubmedResult = {
+          items: combinedItems,
+          totalCount:
+            (tier1Result.totalCount || tier1Items.length || 0) +
+            (tier2Result.totalCount || tier2Items.length || 0),
+        };
+      } else {
+        pubmedResult = {
+          items: combinedItems,
+          totalCount: tier1Result.totalCount || combinedItems.length || 0,
+        };
+      }
+    } else {
+      pubmedResult = await searchPubMed({
+        q: pubmedQuery,
+        mindate: effectiveMindate,
+        maxdate: maxdate || "",
+        page: 1, // Always fetch from page 1 for the batch
+        pageSize: batchSize, // Fetch larger batch for sorting
+        sort:
+          sortByDate === "true" || sortByDate === true ? "date" : "relevance",
+        // Skip query parsing for PMC ID, PMID, and exact title searches
+        // to preserve the field tags we've carefully crafted
+        skipParsing:
+          atmQueryMeta.isPmcSearch ||
+          atmQueryMeta.isPmidSearch ||
+          atmQueryMeta.isExactTitleSearch,
+      });
+    }
 
     console.log(
       "PubMed result count:",
@@ -716,14 +965,19 @@ router.get("/search/publications", async (req, res) => {
 
     // Filter out publications without abstracts (but not for exact searches -
     // when user searches by title/ID they want that specific publication regardless)
-    let allResults = (atmQueryMeta.isExactTitleSearch || atmQueryMeta.isPmcSearch || atmQueryMeta.isPmidSearch)
-      ? (pubmedResult.items || [])
-      : (pubmedResult.items || []).filter(
-          (pub) => pub.abstract && pub.abstract.trim().length > 0,
-        );
+    let allResults =
+      atmQueryMeta.isExactTitleSearch ||
+      atmQueryMeta.isPmcSearch ||
+      atmQueryMeta.isPmidSearch
+        ? pubmedResult.items || []
+        : (pubmedResult.items || []).filter(
+            (pub) => pub.abstract && pub.abstract.trim().length > 0,
+          );
 
     // Layer 2: Citation metrics enrichment (iCite)
-    const pmids = allResults.map((p) => String(p.pmid || p.id || "")).filter(Boolean);
+    const pmids = allResults
+      .map((p) => String(p.pmid || p.id || ""))
+      .filter(Boolean);
     let citationMap = new Map();
     if (pmids.length > 0) {
       try {
@@ -810,10 +1064,15 @@ router.get("/search/publications", async (req, res) => {
     // Calculate query relevance score for each publication (PRIMARY ranking factor)
     // This ensures results match what the user actually searched for (matching trials backend)
     let scoredResults;
+    let weakExposureCandidates = [];
     if (q) {
       scoredResults = resultsWithMatch.map((publication) => {
         // For PMC ID, PMID, or exact title searches, give perfect relevance score
-        if (atmQueryMeta.isPmcSearch || atmQueryMeta.isPmidSearch || atmQueryMeta.isExactTitleSearch) {
+        if (
+          atmQueryMeta.isPmcSearch ||
+          atmQueryMeta.isPmidSearch ||
+          atmQueryMeta.isExactTitleSearch
+        ) {
           return {
             ...publication,
             queryRelevanceScore: 1.0, // Perfect match
@@ -824,7 +1083,7 @@ router.get("/search/publications", async (req, res) => {
             hasNctLink: false,
           };
         }
-        
+
         // Use core concept terms for relevance when available, so intent words ("latest", "publications")
         // don't drag scores below threshold (papers about "diabetes" need not mention "latest")
         let relevanceTerms = atmQueryMeta.coreConceptTerms;
@@ -832,7 +1091,8 @@ router.get("/search/publications", async (req, res) => {
           relevanceTerms = relevanceTerms.filter(
             (t) => t && !RELEVANCE_META_WORDS.has(t.toLowerCase().trim()),
           );
-          if (relevanceTerms.length === 0) relevanceTerms = atmQueryMeta.coreConceptTerms;
+          if (relevanceTerms.length === 0)
+            relevanceTerms = atmQueryMeta.coreConceptTerms;
         }
         const relevanceMeta =
           relevanceTerms?.length > 0
@@ -842,9 +1102,53 @@ router.get("/search/publications", async (req, res) => {
           publication,
           relevanceMeta,
         );
-        const fieldWeighted = calculateFieldWeightedRelevance(publication, relevanceMeta);
-        const R = fieldWeighted > 0 ? fieldWeighted : signals.queryRelevanceScore;
-        return { ...publication, ...signals, queryRelevanceScore: R };
+        const fieldWeighted = calculateFieldWeightedRelevance(
+          publication,
+          relevanceMeta,
+        );
+        let R = fieldWeighted > 0 ? fieldWeighted : signals.queryRelevanceScore;
+
+        // Concept-aware relevance adjustments for exposure (e.g., mold/mycotoxin).
+        const exposureTerms = atmQueryMeta.exposureGroupQuery
+          ? (atmQueryMeta.modifierConcepts || [])
+          : [];
+        const rareConcepts = atmQueryMeta.rareConcepts || [];
+        let exposureMatchLevel = "none";
+        if (
+          exposureTerms.length > 0 &&
+          !atmQueryMeta.isPmcSearch &&
+          !atmQueryMeta.isPmidSearch &&
+          !atmQueryMeta.isExactTitleSearch
+        ) {
+          const levels = assessExposureMatch(
+            publication,
+            exposureTerms,
+            rareConcepts,
+          );
+          if (!levels.hasAnyExposure) {
+            R = 0;
+            exposureMatchLevel = "none";
+          } else if (!levels.hasStrongExposure) {
+            R = R * 0.5; // weak abstract-only mention
+            exposureMatchLevel = "weak";
+          } else {
+            exposureMatchLevel = "strong";
+          }
+          if (levels.rareInTitleOrKeywords) {
+            R = Math.min(1.0, R + 0.1); // Scholar-like rare term boost
+          }
+        }
+
+        const enriched = {
+          ...publication,
+          ...signals,
+          queryRelevanceScore: R,
+          exposureMatchLevel,
+        };
+        if (exposureMatchLevel === "weak") {
+          weakExposureCandidates.push(enriched);
+        }
+        return enriched;
       });
     } else {
       // If no query, set relevance to 0 (will be sorted by other factors)
@@ -859,60 +1163,161 @@ router.get("/search/publications", async (req, res) => {
       }));
     }
 
-    // Layer 3: Core concept gate
+    // Preserve a copy of relevance-scored results before any hard concept gating,
+    // so we can fall back to something useful if gates are too strict.
+    const preGateResults = scoredResults ? [...scoredResults] : [];
+
+    // Layer 3: Concept gates
     const coreConceptTerms = atmQueryMeta.coreConceptTerms;
-    if (q && coreConceptTerms?.length && !atmQueryMeta.isPmcSearch && !atmQueryMeta.isPmidSearch && !atmQueryMeta.isExactTitleSearch) {
-      scoredResults = scoredResults.filter((pub) => passesCoreConceptGate(pub, coreConceptTerms));
+    const diseaseTerms = coreConceptTerms || [];
+    const exposureConceptTerms = atmQueryMeta.modifierConcepts || [];
+
+    let strongResults = scoredResults;
+    if (
+      q &&
+      !atmQueryMeta.isPmcSearch &&
+      !atmQueryMeta.isPmidSearch &&
+      !atmQueryMeta.isExactTitleSearch
+    ) {
+      if (
+        atmQueryMeta.isMultiConcept &&
+        diseaseTerms.length &&
+        (atmQueryMeta.rareConcepts?.length || exposureConceptTerms.length)
+      ) {
+        // For multi-concept queries, require strong disease match AND strong match
+        // on the rare/exposure concept group (built from rareConcepts + modifierConcepts).
+        const rareConcepts = atmQueryMeta.rareConcepts || [];
+        const mustExposureTerms = [
+          ...new Set([...(rareConcepts || []), ...exposureConceptTerms]),
+        ];
+        const mustGroups = [
+          { name: "disease", terms: diseaseTerms },
+          { name: "exposure", terms: mustExposureTerms },
+        ];
+        strongResults = scoredResults.filter((pub) =>
+          passesMustConceptGate(pub, mustGroups),
+        );
+        // Keep weakly related migraine papers (strong disease, weak exposure) for optional use.
+        weakExposureCandidates = weakExposureCandidates.filter((pub) =>
+          strongConceptMatch(pub, diseaseTerms),
+        );
+      } else if (coreConceptTerms?.length) {
+        strongResults = scoredResults.filter((pub) =>
+          passesCoreConceptGate(pub, coreConceptTerms),
+        );
+      }
     }
     // Relevance threshold 0.35
-    if (q && !atmQueryMeta.isPmcSearch && !atmQueryMeta.isPmidSearch && !atmQueryMeta.isExactTitleSearch) {
-      scoredResults = scoredResults.filter((publication) => {
+    if (
+      q &&
+      !atmQueryMeta.isPmcSearch &&
+      !atmQueryMeta.isPmidSearch &&
+      !atmQueryMeta.isExactTitleSearch
+    ) {
+      strongResults = strongResults.filter((publication) => {
         const relevance = publication.queryRelevanceScore || 0;
         // Keep if: exact phrase match (1.0), or relevance >= 0.35
         return relevance >= 0.35 || relevance === 1.0;
       });
     }
 
+    scoredResults = strongResults;
+
+    // Fallback: if a multi-concept query (e.g. migraine + mold toxicity) yields
+    // no strong results after concept gates + relevance threshold, but PubMed
+    // did return items, relax to strong migraine + any exposure so we still
+    // show something useful (treated as fully trusted matches in main results).
+    if (
+      atmQueryMeta.isMultiConcept &&
+      q &&
+      !atmQueryMeta.isPmcSearch &&
+      !atmQueryMeta.isPmidSearch &&
+      !atmQueryMeta.isExactTitleSearch &&
+      preGateResults.length > 0 &&
+      (!scoredResults || scoredResults.length === 0)
+    ) {
+      const exposureTermsForGate = atmQueryMeta.exposureGroupQuery
+        ? (atmQueryMeta.modifierConcepts || [])
+        : [];
+      const rareConceptsForGate = atmQueryMeta.rareConcepts || [];
+      const fallback = preGateResults.filter((pub) => {
+        // Prefer strong disease + any exposure when possible
+        if (diseaseTerms.length && strongConceptMatch(pub, diseaseTerms)) {
+          if (exposureTermsForGate.length) {
+            const levels = assessExposureMatch(
+              pub,
+              exposureTermsForGate,
+              rareConceptsForGate,
+            );
+            if (levels.hasAnyExposure) return true;
+          }
+        }
+        return false;
+      });
+      // If we found any migraine+exposure papers, use them; otherwise fall back to all
+      // pre-gate results so the user still sees something.
+      scoredResults = fallback.length > 0 ? fallback : preGateResults;
+    }
+
     // Intent-aware ranking: citationScore, influenceScore, recencyScore, finalScore
-    const citations = scoredResults.map((p) => p.citationCount ?? 0).filter((n) => n >= 0);
+    const citations = scoredResults
+      .map((p) => p.citationCount ?? 0)
+      .filter((n) => n >= 0);
     const p95Index = Math.floor(citations.length * 0.95);
-    const p95Citation = citations.length ? ([...citations].sort((a, b) => a - b)[p95Index] ?? 1) : 1;
+    const p95Citation = citations.length
+      ? ([...citations].sort((a, b) => a - b)[p95Index] ?? 1)
+      : 1;
     const logP95 = Math.log10(1 + p95Citation);
     const nowYear = new Date().getFullYear();
     const intent = atmQueryMeta.intent || { wantsRecent: false };
 
-    scoredResults = scoredResults.map((publication) => {
-      const citationCount = publication.citationCount ?? 0;
-      const citationScore = logP95 > 0 ? Math.log10(1 + citationCount) / logP95 : 0;
-      const rcr = publication.rcr;
-      const normRcr = rcr != null && rcr > 0 ? Math.min(1, rcr / 3) : null;
-      const influenceScore = normRcr != null ? citationScore * 0.7 + normRcr * 0.3 : citationScore;
-      const pubYear = parseInt(publication.year, 10);
-      const ageYears = Number.isInteger(pubYear) && pubYear > 1800 ? nowYear - pubYear : 10;
-      const recencyScore = 1 / (1 + ageYears);
+    function applyFinalScoring(publications) {
+      if (!publications || publications.length === 0) return [];
       const maxAge = Math.max(
-        ...scoredResults.map((p) => {
+        ...publications.map((p) => {
           const y = parseInt(p.year, 10);
           return Number.isInteger(y) && y > 1800 ? nowYear - y : 0;
         }),
         1,
       );
-      const recencyNorm = maxAge > 0 ? recencyScore / (1 / (1 + maxAge)) : recencyScore;
-      const M = (publication.matchPercentage ?? 0) / 100;
-      const R = publication.queryRelevanceScore ?? 0;
-      const C = influenceScore;
-      const Y = recencyNorm;
-      const finalScore = intent.wantsRecent
-        ? 0.3 * M + 0.3 * R + 0.2 * C + 0.2 * Y
-        : 0.35 * M + 0.35 * R + 0.25 * C + 0.05 * Y;
-      return {
-        ...publication,
-        citationScore: Math.round(citationScore * 100) / 100,
-        influenceScore: Math.round(influenceScore * 100) / 100,
-        recencyScore: Math.round(recencyNorm * 100) / 100,
-        finalScore: Math.round(finalScore * 100) / 100,
-      };
-    });
+      return publications.map((publication) => {
+        const citationCount = publication.citationCount ?? 0;
+        const citationScore =
+          logP95 > 0 ? Math.log10(1 + citationCount) / logP95 : 0;
+        const rcr = publication.rcr;
+        const normRcr = rcr != null && rcr > 0 ? Math.min(1, rcr / 3) : null;
+        const influenceScore =
+          normRcr != null
+            ? citationScore * 0.7 + normRcr * 0.3
+            : citationScore;
+        const pubYear = parseInt(publication.year, 10);
+        const ageYears =
+          Number.isInteger(pubYear) && pubYear > 1800 ? nowYear - pubYear : 10;
+        const recencyScore = 1 / (1 + ageYears);
+        const recencyNorm =
+          maxAge > 0 ? recencyScore / (1 / (1 + maxAge)) : recencyScore;
+        const M = (publication.matchPercentage ?? 0) / 100;
+        const R = publication.queryRelevanceScore ?? 0;
+        const C = influenceScore;
+        const Y = recencyNorm;
+        const finalScore = intent.wantsRecent
+          ? 0.3 * M + 0.3 * R + 0.2 * C + 0.2 * Y
+          : 0.35 * M + 0.35 * R + 0.25 * C + 0.05 * Y;
+        return {
+          ...publication,
+          citationScore: Math.round(citationScore * 100) / 100,
+          influenceScore: Math.round(influenceScore * 100) / 100,
+          recencyScore: Math.round(recencyNorm * 100) / 100,
+          finalScore: Math.round(finalScore * 100) / 100,
+        };
+      });
+    }
+
+    scoredResults = applyFinalScoring(scoredResults);
+    const scoredWeakExposure =
+      weakExposureCandidates && weakExposureCandidates.length > 0
+        ? applyFinalScoring(weakExposureCandidates)
+        : [];
 
     const EPSILON = 0.001;
     const sortedResults = scoredResults.sort((a, b) => {
@@ -929,27 +1334,51 @@ router.get("/search/publications", async (req, res) => {
     const endIndex = startIndex + requestedPageSize;
     const paginatedResults = sortedResults.slice(startIndex, endIndex);
 
-    // Simplify titles only for the paginated results (much faster!)
-    // This adds simplified titles to each publication object
+    // Simplify titles only for patients (researchers see original titles)
+    const isResearcherPub = userProfile?.role === "researcher";
     let resultsWithSimplifiedTitles;
-    try {
-      // Use batch processing for much better performance - only for paginated results
-      const titlesToSimplify = paginatedResults.map((pub) => pub.title);
-      const simplifiedTitles =
-        await batchSimplifyPublicationTitles(titlesToSimplify);
-      resultsWithSimplifiedTitles = paginatedResults.map(
-        (publication, index) => ({
-          ...publication,
-          simplifiedTitle: simplifiedTitles[index] || publication.title,
-        }),
-      );
-    } catch (error) {
-      // If batch simplification fails, fallback to original titles
-      console.error("Error batch simplifying publication titles:", error);
+    if (isResearcherPub) {
       resultsWithSimplifiedTitles = paginatedResults.map((publication) => ({
         ...publication,
         simplifiedTitle: publication.title,
       }));
+    } else {
+      try {
+        const titlesToSimplify = paginatedResults.map((pub) => pub.title);
+        const simplifiedTitles =
+          await batchSimplifyPublicationTitles(titlesToSimplify);
+        resultsWithSimplifiedTitles = paginatedResults.map(
+          (publication, index) => ({
+            ...publication,
+            simplifiedTitle: simplifiedTitles[index] || publication.title,
+          }),
+        );
+      } catch (error) {
+        console.error("Error batch simplifying publication titles:", error);
+        resultsWithSimplifiedTitles = paginatedResults.map((publication) => ({
+          ...publication,
+          simplifiedTitle: publication.title,
+        }));
+      }
+    }
+
+    // Optional: weakly related migraine papers (strong disease match, weak exposure)
+    let relatedWeakExposurePapers = [];
+    if (
+      atmQueryMeta.isMultiConcept &&
+      weakExposureCandidates &&
+      weakExposureCandidates.length > 0 &&
+      scoredResults.length < 20
+    ) {
+      const sortedWeak = scoredWeakExposure.sort((a, b) => {
+        const diff = (b.finalScore ?? 0) - (a.finalScore ?? 0);
+        if (Math.abs(diff) > EPSILON) return diff;
+        const rDiff =
+          (b.queryRelevanceScore ?? 0) - (a.queryRelevanceScore ?? 0);
+        if (Math.abs(rDiff) > EPSILON) return rDiff;
+        return (b.influenceScore ?? 0) - (a.influenceScore ?? 0);
+      });
+      relatedWeakExposurePapers = sortedWeak.slice(0, 20);
     }
 
     // Add read status for signed-in users (only for paginated results to reduce DB queries)
@@ -1000,6 +1429,9 @@ router.get("/search/publications", async (req, res) => {
       pageSize: requestedPageSize,
       hasMore: hasMore,
       ...(remaining !== null && { remaining }),
+      ...(relatedWeakExposurePapers.length > 0 && {
+        relatedWeakExposurePapers,
+      }),
     });
   } catch (error) {
     console.error("Error searching publications:", error);

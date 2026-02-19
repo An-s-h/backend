@@ -142,25 +142,19 @@ router.post("/auth/login", async (req, res) => {
   }
 });
 
-// POST /api/auth/forgot-password - Request password reset
+// POST /api/auth/forgot-password - Request password reset (user type determined from email)
 router.post("/auth/forgot-password", async (req, res) => {
-  const { email, role } = req.body || {};
+  const { email } = req.body || {};
 
   if (!email) {
     return res.status(400).json({ error: "Email is required" });
   }
 
   try {
-    // Find user by email and role (if provided)
-    // If role not provided, check both roles
-    let user;
-    if (role && ["patient", "researcher"].includes(role)) {
-      user = await User.findOne({ email, role });
-    } else {
-      // Try patient first, then researcher
-      user = await User.findOne({ email, role: "patient" }) ||
-             await User.findOne({ email, role: "researcher" });
-    }
+    // Find user by email only: try patient first, then researcher
+    const user =
+      (await User.findOne({ email, role: "patient" })) ||
+      (await User.findOne({ email, role: "researcher" }));
 
     // Always return success message (security: prevent email enumeration)
     // If email exists, send reset email; if not, just return success

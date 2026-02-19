@@ -5,12 +5,72 @@
 
 import { mapToMeSHTerminology } from "./medicalTerminology.service.js";
 import { expandQueryWithSynonyms } from "./medicalTerminology.service.js";
+import {
+  EXPOSURE_FAMILIES,
+  EXPOSURE_PHRASES,
+  PROTECTED_EXPOSURE_TOKENS,
+} from "./exposureConcepts.config.js";
 
-const RECENT_TERMS = /\b(latest|recent|new|updated|emerging|202[0-9]|20[3-9][0-9])\b/i;
-const TREATMENT_TERMS = /\b(treatment|therapy|therapeutic|management|drug|medication|intervention)\b/i;
-const TRIAL_TERMS = /\b(trial|randomized|rct|placebo|phase\s+[i\d]+|clinical\s+trial)\b/i;
+const RECENT_TERMS =
+  /\b(latest|recent|new|updated|emerging|202[0-9]|20[3-9][0-9])\b/i;
+const TREATMENT_TERMS =
+  /\b(treatment|therapy|therapeutic|management|drug|medication|intervention)\b/i;
+const TRIAL_TERMS =
+  /\b(trial|randomized|rct|placebo|phase\s+[i\d]+|clinical\s+trial)\b/i;
 
-const MODIFIER_TERMS = /\b(pediatric|adult|elderly|children|geriatric|latest|recent|new)\b/gi;
+const MODIFIER_TERMS =
+  /\b(pediatric|adult|elderly|children|geriatric|latest|recent|new)\b/gi;
+
+const MEDICAL_STOP_WORDS = new Set([
+  "the",
+  "a",
+  "an",
+  "and",
+  "or",
+  "but",
+  "in",
+  "on",
+  "at",
+  "to",
+  "for",
+  "of",
+  "with",
+  "by",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "its",
+  "it",
+  "as",
+  "from",
+  "that",
+  "this",
+  "than",
+  "into",
+  "not",
+  "no",
+  "about",
+  "around",
+  "within",
+  "between",
+  "across",
+]);
+
+function isProtectedExposureToken(token = "") {
+  if (!token) return false;
+  const t = token.toLowerCase();
+  if (PROTECTED_EXPOSURE_TOKENS.has(t)) return true;
+  return (
+    t.startsWith("mold") ||
+    t.startsWith("mould") ||
+    t.startsWith("mycotoxin") ||
+    t === "fungal" ||
+    t === "fungus"
+  );
+}
 
 /**
  * Detect user intent flags from raw query.
@@ -33,6 +93,16 @@ export function detectIntent(rawQuery = "") {
  * @returns {{ conditionConcept: string[], interventionConcept: string[] | null, modifiers: string[] }}
  */
 export function extractConcepts(rawQuery = "") {
+  const v2 = extractConceptsV2(rawQuery);
+  const conditionConcept = v2.coreConcepts.length
+    ? [v2.coreConcepts.join(" ")]
+    : [];
+  const interventionConcept = v2.interventionConcept;
+  const modifiers = v2.modifiers || [];
+  return { conditionConcept, interventionConcept, modifiers };
+}
+
+export function extractConceptsV2(rawQuery = "") {
   let q = (rawQuery || "").trim();
   const modifiers = [];
   let m;
@@ -42,18 +112,41 @@ export function extractConcepts(rawQuery = "") {
   }
   q = q.replace(modRe, " ").replace(/\s+/g, " ").trim();
 
-  const conditionTokens = q
+  const lower = q.toLowerCase();
+
+  const modifierConcepts = [];
+  const rareConcepts = [];
+  for (const phrase of EXPOSURE_PHRASES) {
+    const p = phrase.toLowerCase();
+    if (p && lower.includes(p)) {
+      if (!modifierConcepts.includes(phrase)) modifierConcepts.push(phrase);
+      if (!rareConcepts.includes(phrase)) rareConcepts.push(phrase);
+      const phraseRe = new RegExp(
+        phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+        "ig",
+      );
+      q = q.replace(phraseRe, " ").replace(/\s+/g, " ").trim();
+    }
+  }
+
+  const allTokens = q
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, " ")
     .split(/\s+/)
-    .filter(
-      (t) =>
-        t.length >= 2 &&
-        !/^(treatment|therapy|therapeutic|management|drug|medication|trial|randomized|rct|placebo|phase|clinical|in|for|on|about|and|or)$/i.test(
-          t
-        )
-    );
-  const conditionConcept = conditionTokens.length
-    ? [conditionTokens.join(" ")]
-    : [];
+    .filter(Boolean);
+
+  const coreTokens = [];
+  for (const token of allTokens) {
+    if (isProtectedExposureToken(token)) {
+      if (!modifierConcepts.includes(token)) modifierConcepts.push(token);
+      if (!rareConcepts.includes(token)) rareConcepts.push(token);
+      continue;
+    }
+    if (MEDICAL_STOP_WORDS.has(token)) continue;
+    coreTokens.push(token);
+  }
+
+  const coreConcepts = coreTokens.length ? [coreTokens.join(" ")] : [];
 
   let interventionConcept = null;
   if (TREATMENT_TERMS.test(rawQuery)) {
@@ -76,7 +169,13 @@ export function extractConcepts(rawQuery = "") {
       : trialTerms;
   }
 
-  return { conditionConcept, interventionConcept, modifiers };
+  return {
+    coreConcepts,
+    modifierConcepts,
+    rareConcepts,
+    interventionConcept,
+    modifiers,
+  };
 }
 
 /**
@@ -116,6 +215,18 @@ function buildConceptClause(terms, useMeSH = true) {
  * @param {string} rawQuery
  * @returns {{ pubmedQuery: string, intent: { wantsRecent: boolean, wantsTreatment: boolean, wantsTrial: boolean }, queryTerms: string[], rawQueryLower: string, hasFieldTags: boolean }}
  */
+function buildExposureConceptClause(terms) {
+  if (!terms || terms.length === 0) return "";
+  const parts = [];
+  for (const t of terms) {
+    const trimmed = t.trim();
+    if (!trimmed) continue;
+    const quoted = trimmed.includes(" ") ? `"${trimmed}"` : trimmed;
+    parts.push(`(${quoted}[tiab])`);
+  }
+  return parts.length ? `(${parts.join(" OR ")})` : "";
+}
+
 export function buildConceptAwareQuery(rawQuery = "") {
   const hasFieldTags = /\[[A-Za-z]{2,}\]/.test(rawQuery || "");
   if (hasFieldTags || !rawQuery || !rawQuery.trim()) {
@@ -131,22 +242,93 @@ export function buildConceptAwareQuery(rawQuery = "") {
         : [],
       rawQueryLower: (rawQuery || "").toLowerCase().trim(),
       hasFieldTags: true,
+      coreConceptTerms: [],
     };
   }
 
   const intent = detectIntent(rawQuery);
-  const { conditionConcept, interventionConcept } = extractConcepts(rawQuery);
+  const {
+    coreConcepts,
+    modifierConcepts,
+    rareConcepts,
+    interventionConcept,
+  } = extractConceptsV2(rawQuery);
 
-  const conceptA = buildConceptClause(conditionConcept, true);
-  const conceptB = interventionConcept
-    ? `(${interventionConcept.join(" OR ")})`
-    : "";
+  const diseaseGroupQuery = buildConceptClause(coreConcepts, true);
+
+  const lower = rawQuery.toLowerCase();
+  const exposureTerms = new Set();
+  // Seed from detected modifier concepts
+  for (const mc of modifierConcepts) {
+    if (mc && mc.trim()) exposureTerms.add(mc.trim());
+  }
+  // Activate exposure families when any of their phrases or tokens appear in the raw query,
+  // then add the full family synonym set (tokens + phrases).
+  for (const fam of EXPOSURE_FAMILIES) {
+    let familyActive = false;
+    for (const phrase of fam.phrases || []) {
+      const p = phrase.toLowerCase();
+      if (p && lower.includes(p)) {
+        familyActive = true;
+        break;
+      }
+    }
+    if (!familyActive) {
+      for (const tok of fam.tokens || []) {
+        const t = tok.toLowerCase();
+        if (t && lower.includes(t)) {
+          familyActive = true;
+          break;
+        }
+      }
+    }
+    if (familyActive) {
+      (fam.tokens || []).forEach((t) => {
+        if (t && t.trim()) exposureTerms.add(t.trim());
+      });
+      (fam.phrases || []).forEach((p) => {
+        if (p && p.trim()) exposureTerms.add(p.trim());
+      });
+    }
+  }
+  const exposureGroupQuery = buildExposureConceptClause([...exposureTerms]);
+
+  const toxicityTokens = new Set();
+  for (const fam of EXPOSURE_FAMILIES) {
+    (fam.toxicityTokens || []).forEach((t) => toxicityTokens.add(t));
+  }
+  const toxicityGroupQuery = buildExposureConceptClause([...toxicityTokens]);
+
+  const interventionGroup =
+    interventionConcept && interventionConcept.length > 0
+      ? `(${interventionConcept.join(" OR ")})`
+      : "";
+
+  const hasDisease = !!diseaseGroupQuery;
+  const hasExposure = !!exposureGroupQuery;
+  const hasToxicity = !!toxicityGroupQuery;
+  const isMultiConcept = hasDisease && hasExposure;
+
+  let tier1Query = "";
+  let tier2Query = "";
+  if (hasDisease && hasExposure) {
+    tier2Query = `${diseaseGroupQuery} AND ${exposureGroupQuery}`;
+    tier1Query = hasToxicity
+      ? `${tier2Query} AND ${toxicityGroupQuery}`
+      : tier2Query;
+  }
 
   let pubmedQuery;
-  if (conceptA && conceptB) {
-    pubmedQuery = `${conceptA} AND ${conceptB}`;
-  } else if (conceptA) {
-    pubmedQuery = conceptA;
+  if (tier1Query) {
+    pubmedQuery = tier1Query;
+  } else if (tier2Query) {
+    pubmedQuery = tier2Query;
+  } else if (diseaseGroupQuery && interventionGroup) {
+    pubmedQuery = `${diseaseGroupQuery} AND ${interventionGroup}`;
+  } else if (diseaseGroupQuery) {
+    pubmedQuery = diseaseGroupQuery;
+  } else if (interventionGroup) {
+    pubmedQuery = interventionGroup;
   } else {
     pubmedQuery = rawQuery.replace(/\s+/g, " ").trim();
   }
@@ -157,15 +339,16 @@ export function buildConceptAwareQuery(rawQuery = "") {
     .split(/\s+/)
     .filter((t) => t.length > 2);
 
-  // Core concept terms (condition) for filtering and relevance: include each token so "diabetes" matches
-  // even when the full phrase is "publications diabetes" (don't require "latest"/"publications" in papers)
-  const conditionTokens = conditionConcept.join(" ")
+  const conditionTokens = coreConcepts
+    .join(" ")
     .toLowerCase()
     .split(/\s+/)
     .filter((t) => t.length >= 2);
-  const coreConceptTerms = [...new Set([...conditionConcept, ...conditionTokens])];
-  const synExp = expandQueryWithSynonyms(conditionConcept.join(" "));
-  if (synExp && synExp !== conditionConcept.join(" ")) {
+  const coreConceptTerms = [
+    ...new Set([...coreConcepts, ...conditionTokens]),
+  ];
+  const synExp = expandQueryWithSynonyms(coreConcepts.join(" "));
+  if (synExp && synExp !== coreConcepts.join(" ")) {
     synExp.split(/\s+OR\s+/).forEach((s) => {
       const t = s.trim();
       if (t && !coreConceptTerms.includes(t)) coreConceptTerms.push(t);
@@ -179,5 +362,14 @@ export function buildConceptAwareQuery(rawQuery = "") {
     rawQueryLower: rawQuery.toLowerCase().trim(),
     hasFieldTags: false,
     coreConceptTerms,
+    coreConcepts,
+    modifierConcepts,
+    rareConcepts,
+    diseaseGroupQuery,
+    exposureGroupQuery,
+    toxicityGroupQuery,
+    tier1Query: tier1Query || undefined,
+    tier2Query: tier2Query || undefined,
+    isMultiConcept,
   };
 }

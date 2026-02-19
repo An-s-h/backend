@@ -324,21 +324,28 @@ router.get("/recommendations/:userId", async (req, res) => {
     // Limit to top 9 trials (for recommendations)
     const topTrials = sortedTrials.slice(0, 9);
 
-    // Simplify titles only for the top 9 trials (same approach as search route)
+    // Simplify titles only for patients (researchers see original titles)
+    const isResearcher = profile?.role === "researcher";
     let trialsWithSimplifiedTitles;
-    try {
-      const simplifiedTitles = await batchSimplifyTrialTitles(topTrials);
-      trialsWithSimplifiedTitles = topTrials.map((trial, index) => ({
-        ...trial,
-        simplifiedTitle: simplifiedTitles[index] || trial.title,
-      }));
-    } catch (error) {
-      // If batch simplification fails, fallback to original titles
-      console.error("Error batch simplifying trial titles:", error);
+    if (isResearcher) {
       trialsWithSimplifiedTitles = topTrials.map((trial) => ({
         ...trial,
         simplifiedTitle: trial.title,
       }));
+    } else {
+      try {
+        const simplifiedTitles = await batchSimplifyTrialTitles(topTrials);
+        trialsWithSimplifiedTitles = topTrials.map((trial, index) => ({
+          ...trial,
+          simplifiedTitle: simplifiedTitles[index] || trial.title,
+        }));
+      } catch (error) {
+        console.error("Error batch simplifying trial titles:", error);
+        trialsWithSimplifiedTitles = topTrials.map((trial) => ({
+          ...trial,
+          simplifiedTitle: trial.title,
+        }));
+      }
     }
 
     const publicationsWithMatch = publications.map((pub) => {
