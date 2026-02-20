@@ -55,7 +55,6 @@ import {
   getSearchLimitDebug,
   MAX_FREE_SEARCHES,
 } from "../middleware/searchLimit.js";
-import { searchSemanticScholar } from "../services/semanticScholar.service.js";
 
 const router = Router();
 
