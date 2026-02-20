@@ -426,6 +426,46 @@ export async function fetchPublicationById(pmid) {
 }
 
 /**
+ * Fetch full publication details by source and id (for view-publication page).
+ * Supports: pubmed (pmid), openalex (openalex_id), semantic_scholar (paperId or DOI), crossref (DOI), arxiv (arxiv id).
+ * Returns normalized publication with source-specific fields (openAccessPdf, pdfUrl, etc.).
+ */
+export async function fetchPublicationBySource(id, source = "pubmed") {
+  const rawId = (id || "").trim();
+  if (!rawId) return null;
+
+  const src = (source || "pubmed").toLowerCase().replace(/\s/g, "_");
+
+  if (src === "pubmed") {
+    return fetchPublicationById(rawId);
+  }
+
+  try {
+    if (src === "openalex") {
+      const { getWorkById } = await import("./openalex.service.js");
+      return getWorkById(rawId);
+    }
+    if (src === "semantic_scholar") {
+      const { getPaperByIdOrDoi } = await import("./semanticscholar.service.js");
+      return getPaperByIdOrDoi(rawId);
+    }
+    if (src === "crossref") {
+      const { getWorkByDoi } = await import("./crossref.service.js");
+      return getWorkByDoi(rawId);
+    }
+    if (src === "arxiv") {
+      const { getArxivById } = await import("./arxiv.service.js");
+      return getArxivById(rawId);
+    }
+  } catch (err) {
+    console.warn("fetchPublicationBySource error:", err?.message);
+    return null;
+  }
+
+  return fetchPublicationById(rawId);
+}
+
+/**
  * Main function to fetch data from URL
  */
 export async function fetchDataFromUrl(url) {

@@ -1,6 +1,10 @@
 import { Router } from "express";
 import { searchClinicalTrials } from "../services/clinicalTrials.service.js";
 import { searchPubMed } from "../services/pubmed.service.js";
+import { searchPublicationsBatch } from "../services/publicationSearch.service.js";
+import { searchOpenAlex } from "../services/openalex.service.js";
+import { searchSemanticScholar } from "../services/semanticscholar.service.js";
+import { searchArxiv } from "../services/arxiv.service.js";
 import { searchORCID } from "../services/orcid.service.js";
 import { findResearchersWithGemini } from "../services/geminiExperts.service.js";
 import { searchGoogleScholarPublications } from "../services/googleScholar.service.js";
@@ -13,6 +17,7 @@ import {
 import {
   fetchTrialById,
   fetchPublicationById,
+  fetchPublicationBySource,
 } from "../services/urlParser.service.js";
 import {
   simplifyTrialDetails,
@@ -70,12 +75,91 @@ const PUBLICATION_STOP_WORDS = new Set([
   "by",
 ]);
 
+/** Generic terms that must not alone qualify non-PubMed papers. Avoids unrelated matches (e.g. "Alzheimer's disease" for "asthma heart disease", "proton therapy" for "eczema treatment"). */
+const GENERIC_INTERVENTION_TERMS = new Set([
+  "treatment",
+  "therapy",
+  "therapeutic",
+  "management",
+  "drug",
+  "medication",
+  "intervention",
+  "radiation",
+  "trial",
+  "randomized",
+  "rct",
+  "placebo",
+  "clinical",
+  "disease",
+]);
+
 function tokenizeForRelevance(text = "") {
   return text
     .toLowerCase()
     .replace(/[^\w\s-]/g, " ")
     .split(/\s+/)
     .filter((term) => term.length > 2 && !PUBLICATION_STOP_WORDS.has(term));
+}
+
+/** Strip PubMed-style field tags for Semantic Scholar, Crossref, arXiv (tiered path). */
+function plainQueryFromTier(tierQuery) {
+  return (tierQuery || "")
+    .replace(/\s*\[[a-z A-Z0-9]+\]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Build a concept-focused query for arXiv: specific terms only (no generic "disease"/"treatment"), so AND-query returns only relevant papers. */
+function arxivQueryFromConcepts(atmQueryMeta, fallbackPlain) {
+  const core = atmQueryMeta?.coreConcepts || [];
+  const mod = atmQueryMeta?.modifierConcepts || [];
+  const rare = atmQueryMeta?.rareConcepts || [];
+  const tokens = [...core, ...mod, ...rare]
+    .filter((t) => t && typeof t === "string" && t.trim())
+    .flatMap((t) =>
+      t
+        .trim()
+        .replace(/\s+/g, " ")
+        .split(" ")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 1),
+    )
+    .filter((t) => !GENERIC_INTERVENTION_TERMS.has(t.toLowerCase()));
+  const unique = [...new Set(tokens)];
+  const q = unique.join(" ").trim();
+  return q || fallbackPlain || "";
+}
+
+/** Merge items from an extra source into combinedItems with DOI/title dedupe. Returns count added. */
+function mergeTieredSource(combinedItems, combinedIds, items, source, idField) {
+  const norm = (s) => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
+  const seenDoi = new Set(
+    combinedItems
+      .map((p) => norm((p.doi || "").replace(/^https?:\/\/doi\.org\//i, "")))
+      .filter(Boolean),
+  );
+  const seenTitle = new Set(
+    combinedItems.map((p) => norm(p.title)).filter(Boolean),
+  );
+  let added = 0;
+  for (const p of items || []) {
+    const id = String(p[idField] || p.id || p.pmid || "").trim();
+    if (id && combinedIds.has(id)) continue;
+    const doi = norm((p.doi || "").replace(/^https?:\/\/doi\.org\//i, ""));
+    const title = norm(p.title);
+    if (doi && seenDoi.has(doi)) continue;
+    if (title && seenTitle.has(title)) continue;
+    if (doi) seenDoi.add(doi);
+    if (title) seenTitle.add(title);
+    if (id) combinedIds.add(id);
+    combinedItems.push({
+      ...p,
+      source,
+      id: p.pmid || p[idField] || p.id || "",
+    });
+    added += 1;
+  }
+  return added;
 }
 
 function buildATMQuery(rawQuery = "") {
@@ -122,6 +206,46 @@ function countTermHits(term, text = "") {
   const regex = new RegExp(`\\b${safe}\\b`, "gi");
   const matches = text.match(regex);
   return matches ? matches.length : 0;
+}
+
+/**
+ * Google Scholar–style relevance: title placement has strong impact; term frequency in body has weak impact.
+ * Returns 0–1: all terms in title → highest; all in title+abstract → high; partial → lower.
+ */
+function getScholarStyleRelevance(pub, queryTerms) {
+  if (!queryTerms?.length) return 0;
+  const title = (pub.title || "").toLowerCase();
+  const keywords = Array.isArray(pub.keywords)
+    ? pub.keywords.join(" ").toLowerCase()
+    : "";
+  const abstract = (pub.abstract || "").toLowerCase();
+  const titleAndKw = `${title} ${keywords}`;
+  const fullText = `${titleAndKw} ${abstract}`;
+
+  let termsInTitle = 0;
+  let termsAnywhere = 0;
+  for (const term of queryTerms) {
+    const t = term.trim().toLowerCase();
+    if (!t || t.length < 2) continue;
+    const re = new RegExp(
+      `\\b${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+      "i",
+    );
+    if (re.test(titleAndKw)) termsInTitle++;
+    if (re.test(fullText)) termsAnywhere++;
+  }
+  const total = queryTerms.filter(
+    (t) => t && t.trim().length >= 2,
+  ).length;
+  if (total === 0) return 0;
+  const ratioAnywhere = termsAnywhere / total;
+  const ratioInTitle = termsInTitle / total;
+
+  if (ratioInTitle === 1) return 0.96; // all terms in title (Scholar: strong impact)
+  if (ratioAnywhere === 1 && ratioInTitle >= 0.5)
+    return 0.75 + ratioInTitle * 0.15; // 0.825–0.9: all terms, half+ in title
+  if (ratioAnywhere === 1) return 0.5 + ratioInTitle * 0.25; // 0.5–0.75: all in abstract/title
+  return ratioAnywhere * 0.5; // partial: scale by fraction (Scholar: frequency weak)
 }
 
 function calculatePublicationRelevanceSignals(pub, queryMeta) {
@@ -453,6 +577,32 @@ function assessExposureMatch(pub, exposureTerms = [], rareConcepts = []) {
 function passesMustConceptGate(pub, mustGroups) {
   if (!mustGroups?.length) return true;
   return mustGroups.every((g) => strongConceptMatch(pub, g.terms || []));
+}
+
+/** True if at least one term from the list appears in title or keywords (word-boundary). */
+function hasConceptInTitle(pub, terms) {
+  if (!terms?.length) return true;
+  const title = (pub.title || "").toLowerCase();
+  const keywords = Array.isArray(pub.keywords)
+    ? pub.keywords.join(" ").toLowerCase()
+    : "";
+  const text = `${title} ${keywords}`;
+  for (const term of terms) {
+    const t = term.trim().toLowerCase();
+    if (!t) continue;
+    const safe = t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`\\b${safe}\\b`, "i").test(text)) return true;
+  }
+  return false;
+}
+
+/** 2 = all concept groups present in title/keywords; 1 = all groups match (e.g. abstract); 0 = not multi-concept. */
+function getMultiConceptMatchStrength(pub, mustGroups) {
+  if (!mustGroups?.length) return 0;
+  const allInTitle = mustGroups.every((g) =>
+    hasConceptInTitle(pub, g.terms || []),
+  );
+  return allInTitle ? 2 : 1;
 }
 
 router.get("/search/trials", async (req, res) => {
@@ -828,7 +978,9 @@ router.get("/search/publications", async (req, res) => {
     } else {
       // Layer 1: Natural language → keywords, then concept + intent aware query
       const searchQ = naturalLanguageToSearchKeywords(q || "") || q || "";
-      atmQueryMeta = buildConceptAwareQuery(searchQ);
+      atmQueryMeta = buildConceptAwareQuery(searchQ, {
+        simplifiedExposure: process.env.OPENALEX_ENABLED !== "false",
+      });
       pubmedQuery = atmQueryMeta.pubmedQuery;
       // Preserve legacy flags for downstream (PMC/PMID/exact title unchanged)
       atmQueryMeta.isPmcSearch = false;
@@ -867,9 +1019,13 @@ router.get("/search/publications", async (req, res) => {
 
     // For multi-concept (e.g., disease + mold exposure) queries, increase retmax slightly.
     const multiConceptBatchSize = Math.min(1000, Math.max(600, baseBatchSize));
-    const batchSize = isMultiConceptQuery ? multiConceptBatchSize : baseBatchSize;
+    const batchSize = isMultiConceptQuery
+      ? multiConceptBatchSize
+      : baseBatchSize;
 
     let pubmedResult;
+    /** When using combined PubMed + OpenAlex search: { sourcesUsed, sourceCounts } for client visibility */
+    let publicationSourceMeta = null;
     let tier1Items = [];
     let tier2Items = [];
 
@@ -878,10 +1034,7 @@ router.get("/search/publications", async (req, res) => {
       isMultiConceptQuery &&
       atmQueryMeta.tier1Query &&
       atmQueryMeta.tier2Query &&
-      !(
-        sortByDate === "true" ||
-        sortByDate === true
-      )
+      !(sortByDate === "true" || sortByDate === true)
     ) {
       // Always use relevance sort for concept-intersection queries.
       const sortMode = "relevance";
@@ -895,13 +1048,14 @@ router.get("/search/publications", async (req, res) => {
         sort: sortMode,
         skipParsing: false,
       });
-      tier1Items = tier1Result.items || [];
+      tier1Items = (tier1Result.items || []).map((p) => ({
+        ...p,
+        source: "pubmed",
+      }));
 
       let combinedItems = [...tier1Items];
       let combinedIds = new Set(
-        combinedItems
-          .map((p) => String(p.pmid || p.id || ""))
-          .filter(Boolean),
+        combinedItems.map((p) => String(p.pmid || p.id || "")).filter(Boolean),
       );
 
       const tier1Count = tier1Result.totalCount || tier1Items.length || 0;
@@ -915,10 +1069,12 @@ router.get("/search/publications", async (req, res) => {
           sort: sortMode,
           skipParsing: false,
         });
-        tier2Items = (tier2Result.items || []).filter((p) => {
-          const id = String(p.pmid || p.id || "");
-          return id && !combinedIds.has(id);
-        });
+        tier2Items = (tier2Result.items || [])
+          .map((p) => ({ ...p, source: "pubmed" }))
+          .filter((p) => {
+            const id = String(p.pmid || p.id || "");
+            return id && !combinedIds.has(id);
+          });
         combinedItems = [...combinedItems, ...tier2Items];
         combinedIds = new Set(
           combinedItems
@@ -926,53 +1082,290 @@ router.get("/search/publications", async (req, res) => {
             .filter(Boolean),
         );
 
+        const plainTier = plainQueryFromTier(atmQueryMeta.tier2Query);
+        const arxivQueryTier = arxivQueryFromConcepts(atmQueryMeta, plainTier);
+
+        if (process.env.OPENALEX_ENABLED !== "false") {
+          try {
+            const oa = await searchOpenAlex({
+              q: atmQueryMeta.tier2Query,
+              mindate: effectiveMindate,
+              maxdate: maxdate || "",
+              page: 1,
+              pageSize: Math.min(200, batchSize),
+              sort: sortMode,
+            });
+            mergeTieredSource(
+              combinedItems,
+              combinedIds,
+              oa.items || [],
+              "openalex",
+              "openalex_id",
+            );
+          } catch (err) {
+            console.warn("OpenAlex tiered merge failed:", err?.message);
+          }
+        }
+
+        const tieredExtraPromises = [];
+        if (plainTier && process.env.SEMANTIC_SCHOLAR_ENABLED !== "false") {
+          tieredExtraPromises.push(
+            searchSemanticScholar({ q: plainTier, page: 1, pageSize: 50 }).then(
+              (res) => ({
+                source: "semantic_scholar",
+                idField: "semantic_scholar_id",
+                items: res?.items || [],
+              }),
+            ),
+          );
+        }
+        if (
+          (arxivQueryTier || plainTier) &&
+          process.env.ARXIV_ENABLED !== "false"
+        ) {
+          const qForArxiv = arxivQueryTier || plainTier;
+          tieredExtraPromises.push(
+            searchArxiv({ q: qForArxiv, page: 1, pageSize: 50 }).then(
+              (res) => ({
+                source: "arxiv",
+                idField: "arxiv_id",
+                items: res?.items || [],
+              }),
+            ),
+          );
+        }
+        if (tieredExtraPromises.length > 0) {
+          const tieredExtra = await Promise.allSettled(tieredExtraPromises);
+          for (const r of tieredExtra) {
+            if (r.status === "fulfilled" && r.value?.items?.length) {
+              mergeTieredSource(
+                combinedItems,
+                combinedIds,
+                r.value.items,
+                r.value.source,
+                r.value.idField,
+              );
+            }
+          }
+        }
+
+        publicationSourceMeta = {
+          sourcesUsed: [
+            "pubmed",
+            "openalex",
+            "semantic_scholar",
+            "arxiv",
+          ].filter((s) => combinedItems.some((p) => p.source === s)),
+          sourceCounts: {
+            pubmed: combinedItems.filter((x) => x.source === "pubmed").length,
+            openalex: combinedItems.filter((x) => x.source === "openalex")
+              .length,
+            semantic_scholar: combinedItems.filter(
+              (x) => x.source === "semantic_scholar",
+            ).length,
+            arxiv: combinedItems.filter((x) => x.source === "arxiv").length,
+          },
+        };
+        if (publicationSourceMeta.sourcesUsed.length > 0) {
+          console.log(
+            "Publication sources (tiered):",
+            publicationSourceMeta.sourcesUsed.join(", "),
+            "merged:",
+            combinedItems.length,
+          );
+        }
+
+        const pubmedOnlyCount =
+          (tier1Result.totalCount || tier1Items.length || 0) +
+          (tier2Result.totalCount || tier2Items.length || 0);
         pubmedResult = {
           items: combinedItems,
-          totalCount:
-            (tier1Result.totalCount || tier1Items.length || 0) +
-            (tier2Result.totalCount || tier2Items.length || 0),
+          totalCount: Math.max(pubmedOnlyCount, combinedItems.length),
         };
       } else {
+        // Tier1 had 20+ results; add OpenAlex + Semantic Scholar, Crossref, arXiv when enabled
+        if (process.env.OPENALEX_ENABLED !== "false") {
+          try {
+            const oa = await searchOpenAlex({
+              q: atmQueryMeta.tier2Query,
+              mindate: effectiveMindate,
+              maxdate: maxdate || "",
+              page: 1,
+              pageSize: Math.min(200, batchSize),
+              sort: sortMode,
+            });
+            mergeTieredSource(
+              combinedItems,
+              combinedIds,
+              oa.items || [],
+              "openalex",
+              "openalex_id",
+            );
+          } catch (err) {
+            console.warn("OpenAlex tiered merge failed:", err?.message);
+          }
+        }
+
+        const plainTierElse = plainQueryFromTier(atmQueryMeta.tier2Query);
+        const arxivQueryElse = arxivQueryFromConcepts(
+          atmQueryMeta,
+          plainTierElse,
+        );
+        const tieredElsePromises = [];
+        if (plainTierElse && process.env.SEMANTIC_SCHOLAR_ENABLED !== "false") {
+          tieredElsePromises.push(
+            searchSemanticScholar({
+              q: plainTierElse,
+              page: 1,
+              pageSize: 50,
+            }).then((res) => ({
+              source: "semantic_scholar",
+              idField: "semantic_scholar_id",
+              items: res?.items || [],
+            })),
+          );
+        }
+        if (
+          (arxivQueryElse || plainTierElse) &&
+          process.env.ARXIV_ENABLED !== "false"
+        ) {
+          const qForArxivElse = arxivQueryElse || plainTierElse;
+          tieredElsePromises.push(
+            searchArxiv({ q: qForArxivElse, page: 1, pageSize: 50 }).then(
+              (res) => ({
+                source: "arxiv",
+                idField: "arxiv_id",
+                items: res?.items || [],
+              }),
+            ),
+          );
+        }
+        if (tieredElsePromises.length > 0) {
+          const tieredElse = await Promise.allSettled(tieredElsePromises);
+          for (const r of tieredElse) {
+            if (r.status === "fulfilled" && r.value?.items?.length) {
+              mergeTieredSource(
+                combinedItems,
+                combinedIds,
+                r.value.items,
+                r.value.source,
+                r.value.idField,
+              );
+            }
+          }
+        }
+
+        publicationSourceMeta = {
+          sourcesUsed: [
+            "pubmed",
+            "openalex",
+            "semantic_scholar",
+            "arxiv",
+          ].filter((s) => combinedItems.some((p) => p.source === s)),
+          sourceCounts: {
+            pubmed: combinedItems.filter((x) => x.source === "pubmed").length,
+            openalex: combinedItems.filter((x) => x.source === "openalex")
+              .length,
+            semantic_scholar: combinedItems.filter(
+              (x) => x.source === "semantic_scholar",
+            ).length,
+            arxiv: combinedItems.filter((x) => x.source === "arxiv").length,
+          },
+        };
+        if (publicationSourceMeta.sourcesUsed.length > 0) {
+          console.log(
+            "Publication sources (tiered):",
+            publicationSourceMeta.sourcesUsed.join(", "),
+            "merged:",
+            combinedItems.length,
+          );
+        }
+
         pubmedResult = {
           items: combinedItems,
-          totalCount: tier1Result.totalCount || combinedItems.length || 0,
+          totalCount: Math.max(
+            tier1Result.totalCount || 0,
+            combinedItems.length,
+          ),
         };
       }
     } else {
-      pubmedResult = await searchPubMed({
-        q: pubmedQuery,
-        mindate: effectiveMindate,
-        maxdate: maxdate || "",
-        page: 1, // Always fetch from page 1 for the batch
-        pageSize: batchSize, // Fetch larger batch for sorting
-        sort:
-          sortByDate === "true" || sortByDate === true ? "date" : "relevance",
-        // Skip query parsing for PMC ID, PMID, and exact title searches
-        // to preserve the field tags we've carefully crafted
-        skipParsing:
-          atmQueryMeta.isPmcSearch ||
-          atmQueryMeta.isPmidSearch ||
-          atmQueryMeta.isExactTitleSearch,
-      });
+      // Combined PubMed + OpenAlex for broader coverage (skip OpenAlex for field-tagged exact lookups)
+      const useCombinedSearch =
+        !atmQueryMeta.isPmcSearch &&
+        !atmQueryMeta.isPmidSearch &&
+        !atmQueryMeta.isExactTitleSearch &&
+        process.env.OPENALEX_ENABLED !== "false";
+
+      if (useCombinedSearch) {
+        const combined = await searchPublicationsBatch({
+          q: pubmedQuery,
+          mindate: effectiveMindate,
+          maxdate: maxdate || "",
+          sort:
+            sortByDate === "true" || sortByDate === true ? "date" : "relevance",
+          skipParsing:
+            atmQueryMeta.isPmcSearch ||
+            atmQueryMeta.isPmidSearch ||
+            atmQueryMeta.isExactTitleSearch,
+          batchSize,
+        });
+        pubmedResult = {
+          items: combined.items,
+          totalCount: combined.items.length,
+        };
+        publicationSourceMeta = {
+          sourcesUsed: combined.sourcesUsed || [],
+          sourceCounts: combined.sourceCounts || { pubmed: 0, openalex: 0 },
+        };
+        if (combined.sourcesUsed?.length) {
+          console.log(
+            "Publication sources:",
+            combined.sourcesUsed.join(", "),
+            "counts:",
+            publicationSourceMeta.sourceCounts,
+            "merged:",
+            combined.items?.length,
+          );
+        }
+      } else {
+        pubmedResult = await searchPubMed({
+          q: pubmedQuery,
+          mindate: effectiveMindate,
+          maxdate: maxdate || "",
+          page: 1,
+          pageSize: batchSize,
+          sort:
+            sortByDate === "true" || sortByDate === true ? "date" : "relevance",
+          skipParsing:
+            atmQueryMeta.isPmcSearch ||
+            atmQueryMeta.isPmidSearch ||
+            atmQueryMeta.isExactTitleSearch,
+        });
+      }
     }
 
     console.log(
-      "PubMed result count:",
+      "Publication result count:",
       pubmedResult.totalCount,
       "items fetched:",
       pubmedResult.items?.length,
     );
 
-    // Filter out publications without abstracts (but not for exact searches -
-    // when user searches by title/ID they want that specific publication regardless)
+    // Filter out publications without abstracts (but not for exact searches).
+    // OpenAlex: require abstract so cards show a snippet; Semantic Scholar and arXiv may show with title only.
     let allResults =
       atmQueryMeta.isExactTitleSearch ||
       atmQueryMeta.isPmcSearch ||
       atmQueryMeta.isPmidSearch
         ? pubmedResult.items || []
-        : (pubmedResult.items || []).filter(
-            (pub) => pub.abstract && pub.abstract.trim().length > 0,
-          );
+        : (pubmedResult.items || []).filter((pub) => {
+            const hasAbstract = pub.abstract && pub.abstract.trim().length > 0;
+            if (pub.source === "openalex") return hasAbstract;
+            if (["semantic_scholar", "arxiv"].includes(pub.source))
+              return hasAbstract || (pub.title && pub.title.trim().length > 0);
+            return hasAbstract;
+          });
 
     // Layer 2: Citation metrics enrichment (iCite)
     const pmids = allResults
@@ -991,8 +1384,8 @@ router.get("/search/publications", async (req, res) => {
       const metrics = citationMap.get(pid) || {};
       return {
         ...pub,
-        citationCount: metrics.citationCount ?? 0,
-        rcr: metrics.rcr ?? null,
+        citationCount: metrics.citationCount ?? pub.citationCount ?? 0,
+        rcr: metrics.rcr ?? pub.rcr ?? null,
       };
     });
 
@@ -1106,11 +1499,26 @@ router.get("/search/publications", async (req, res) => {
           publication,
           relevanceMeta,
         );
-        let R = fieldWeighted > 0 ? fieldWeighted : signals.queryRelevanceScore;
+        // Google Scholar–style: title placement has strong impact; rank by relevance + citations, don't hard-filter.
+        const scholarR = getScholarStyleRelevance(
+          publication,
+          relevanceMeta.queryTerms || [],
+        );
+        let R =
+          scholarR > 0
+            ? Math.max(scholarR, fieldWeighted > 0 ? fieldWeighted : signals.queryRelevanceScore)
+            : fieldWeighted > 0
+              ? fieldWeighted
+              : signals.queryRelevanceScore;
 
-        // Concept-aware relevance adjustments for exposure (e.g., mold/mycotoxin).
+        // Slight boost for OpenAlex when they already match well so they can appear alongside PubMed (they often have less metadata)
+        if (publication.source === "openalex" && R >= 0.35) {
+          R = Math.min(1, R + 0.06);
+        }
+
+        // Soft exposure signal for multi-concept: boost when exposure appears in title/keywords (Scholar-like), no zero-out.
         const exposureTerms = atmQueryMeta.exposureGroupQuery
-          ? (atmQueryMeta.modifierConcepts || [])
+          ? atmQueryMeta.modifierConcepts || []
           : [];
         const rareConcepts = atmQueryMeta.rareConcepts || [];
         let exposureMatchLevel = "none";
@@ -1125,24 +1533,18 @@ router.get("/search/publications", async (req, res) => {
             exposureTerms,
             rareConcepts,
           );
-          if (!levels.hasAnyExposure) {
-            R = 0;
-            exposureMatchLevel = "none";
-          } else if (!levels.hasStrongExposure) {
-            R = R * 0.5; // weak abstract-only mention
-            exposureMatchLevel = "weak";
-          } else {
+          if (levels.hasStrongExposure) {
             exposureMatchLevel = "strong";
-          }
-          if (levels.rareInTitleOrKeywords) {
-            R = Math.min(1.0, R + 0.1); // Scholar-like rare term boost
+            if (levels.rareInTitleOrKeywords) R = Math.min(1.0, R + 0.08);
+          } else if (levels.hasAnyExposure) {
+            exposureMatchLevel = "weak";
           }
         }
 
         const enriched = {
           ...publication,
           ...signals,
-          queryRelevanceScore: R,
+          queryRelevanceScore: Math.min(1, Math.max(0, R)),
           exposureMatchLevel,
         };
         if (exposureMatchLevel === "weak") {
@@ -1171,6 +1573,20 @@ router.get("/search/publications", async (req, res) => {
     const coreConceptTerms = atmQueryMeta.coreConceptTerms;
     const diseaseTerms = coreConceptTerms || [];
     const exposureConceptTerms = atmQueryMeta.modifierConcepts || [];
+    const hasMultipleSources =
+      new Set(scoredResults.map((p) => p.source).filter(Boolean)).size > 1;
+
+    const diseaseOnlyTerms =
+      diseaseTerms.length > 0
+        ? diseaseTerms.filter(
+            (t) =>
+              t &&
+              t.trim() &&
+              !GENERIC_INTERVENTION_TERMS.has(t.trim().toLowerCase()),
+          )
+        : [];
+    const termsForNonPubmedGate =
+      diseaseOnlyTerms.length > 0 ? diseaseOnlyTerms : diseaseTerms;
 
     let strongResults = scoredResults;
     if (
@@ -1179,27 +1595,26 @@ router.get("/search/publications", async (req, res) => {
       !atmQueryMeta.isPmidSearch &&
       !atmQueryMeta.isExactTitleSearch
     ) {
+      // Google Scholar–style: no hard "both concepts required" filter; rank by relevance + citations.
+      // Require at least one query concept (disease or exposure) so results stay on-topic; ranking does the rest.
       if (
         atmQueryMeta.isMultiConcept &&
         diseaseTerms.length &&
         (atmQueryMeta.rareConcepts?.length || exposureConceptTerms.length)
       ) {
-        // For multi-concept queries, require strong disease match AND strong match
-        // on the rare/exposure concept group (built from rareConcepts + modifierConcepts).
         const rareConcepts = atmQueryMeta.rareConcepts || [];
-        const mustExposureTerms = [
-          ...new Set([...(rareConcepts || []), ...exposureConceptTerms]),
-        ];
-        const mustGroups = [
-          { name: "disease", terms: diseaseTerms },
-          { name: "exposure", terms: mustExposureTerms },
+        const allConceptTerms = [
+          ...new Set([
+            ...diseaseTerms,
+            ...(rareConcepts || []),
+            ...exposureConceptTerms,
+          ]),
         ];
         strongResults = scoredResults.filter((pub) =>
-          passesMustConceptGate(pub, mustGroups),
+          passesCoreConceptGate(pub, allConceptTerms),
         );
-        // Keep weakly related migraine papers (strong disease, weak exposure) for optional use.
         weakExposureCandidates = weakExposureCandidates.filter((pub) =>
-          strongConceptMatch(pub, diseaseTerms),
+          strongConceptMatch(pub, termsForNonPubmedGate),
         );
       } else if (coreConceptTerms?.length) {
         strongResults = scoredResults.filter((pub) =>
@@ -1207,7 +1622,7 @@ router.get("/search/publications", async (req, res) => {
         );
       }
     }
-    // Relevance threshold 0.35
+    // Relevance threshold: 0.35 for PubMed; 0.25 for other non-PubMed; 0.4 for arXiv to reduce unrelated preprints
     if (
       q &&
       !atmQueryMeta.isPmcSearch &&
@@ -1216,8 +1631,16 @@ router.get("/search/publications", async (req, res) => {
     ) {
       strongResults = strongResults.filter((publication) => {
         const relevance = publication.queryRelevanceScore || 0;
-        // Keep if: exact phrase match (1.0), or relevance >= 0.35
-        return relevance >= 0.35 || relevance === 1.0;
+        if (relevance === 1.0) return true;
+        let threshold = 0.35;
+        if (
+          hasMultipleSources &&
+          publication.source &&
+          publication.source !== "pubmed"
+        ) {
+          threshold = publication.source === "arxiv" ? 0.4 : 0.25;
+        }
+        return relevance >= threshold;
       });
     }
 
@@ -1237,7 +1660,7 @@ router.get("/search/publications", async (req, res) => {
       (!scoredResults || scoredResults.length === 0)
     ) {
       const exposureTermsForGate = atmQueryMeta.exposureGroupQuery
-        ? (atmQueryMeta.modifierConcepts || [])
+        ? atmQueryMeta.modifierConcepts || []
         : [];
       const rareConceptsForGate = atmQueryMeta.rareConcepts || [];
       const fallback = preGateResults.filter((pub) => {
@@ -1257,6 +1680,29 @@ router.get("/search/publications", async (req, res) => {
       // If we found any migraine+exposure papers, use them; otherwise fall back to all
       // pre-gate results so the user still sees something.
       scoredResults = fallback.length > 0 ? fallback : preGateResults;
+    }
+
+    // Multi-concept ranking: prefer papers with both concepts in title over abstract-only
+    if (
+      atmQueryMeta.isMultiConcept &&
+      diseaseTerms.length &&
+      (atmQueryMeta.rareConcepts?.length || exposureConceptTerms.length)
+    ) {
+      const rareConcepts = atmQueryMeta.rareConcepts || [];
+      const mustExposureTerms = [
+        ...new Set([...(rareConcepts || []), ...exposureConceptTerms]),
+      ];
+      const mustGroupsForRank = [
+        { name: "disease", terms: diseaseTerms },
+        { name: "exposure", terms: mustExposureTerms },
+      ];
+      scoredResults = scoredResults.map((pub) => ({
+        ...pub,
+        multiConceptMatchStrength: getMultiConceptMatchStrength(
+          pub,
+          mustGroupsForRank,
+        ),
+      }));
     }
 
     // Intent-aware ranking: citationScore, influenceScore, recencyScore, finalScore
@@ -1287,9 +1733,7 @@ router.get("/search/publications", async (req, res) => {
         const rcr = publication.rcr;
         const normRcr = rcr != null && rcr > 0 ? Math.min(1, rcr / 3) : null;
         const influenceScore =
-          normRcr != null
-            ? citationScore * 0.7 + normRcr * 0.3
-            : citationScore;
+          normRcr != null ? citationScore * 0.7 + normRcr * 0.3 : citationScore;
         const pubYear = parseInt(publication.year, 10);
         const ageYears =
           Number.isInteger(pubYear) && pubYear > 1800 ? nowYear - pubYear : 10;
@@ -1319,12 +1763,16 @@ router.get("/search/publications", async (req, res) => {
         ? applyFinalScoring(weakExposureCandidates)
         : [];
 
+    // Google Scholar–style sort: citation-weighted score first, then relevance (title-weighted), then tie-breakers.
     const EPSILON = 0.001;
     const sortedResults = scoredResults.sort((a, b) => {
       const diff = (b.finalScore ?? 0) - (a.finalScore ?? 0);
       if (Math.abs(diff) > EPSILON) return diff;
       const rDiff = (b.queryRelevanceScore ?? 0) - (a.queryRelevanceScore ?? 0);
       if (Math.abs(rDiff) > EPSILON) return rDiff;
+      const multiDiff =
+        (b.multiConceptMatchStrength ?? 0) - (a.multiConceptMatchStrength ?? 0);
+      if (multiDiff !== 0) return multiDiff;
       return (b.influenceScore ?? 0) - (a.influenceScore ?? 0);
     });
 
@@ -1431,6 +1879,9 @@ router.get("/search/publications", async (req, res) => {
       ...(remaining !== null && { remaining }),
       ...(relatedWeakExposurePapers.length > 0 && {
         relatedWeakExposurePapers,
+      }),
+      ...(publicationSourceMeta && {
+        publicationSources: publicationSourceMeta,
       }),
     });
   } catch (error) {
@@ -2199,29 +2650,31 @@ router.get("/search/trial/:nctId/simplified", async (req, res) => {
   }
 });
 
-// Endpoint to fetch detailed publication information by PMID
+// Endpoint to fetch detailed publication information by ID and optional source
+// GET /search/publication/:id?source=pubmed|openalex|semantic_scholar|crossref|arxiv
 router.get("/search/publication/:pmid", async (req, res) => {
   try {
-    const { pmid } = req.params;
+    const { pmid: idParam } = req.params;
+    const source = (req.query.source || "pubmed").trim();
 
-    if (!pmid || !pmid.trim()) {
-      return res.status(400).json({ error: "PMID is required" });
+    if (!idParam || !idParam.trim()) {
+      return res.status(400).json({ error: "Publication ID is required" });
     }
 
-    // Clean up PMID (remove whitespace)
-    const cleanPmid = pmid.trim();
+    const cleanId = idParam.trim();
 
-    // Fetch detailed publication information
-    const publication = await fetchPublicationById(cleanPmid);
+    const publication = await fetchPublicationBySource(cleanId, source);
 
     if (!publication) {
       return res.status(404).json({
-        error: `Publication with ID ${cleanPmid} not found`,
+        error: `Publication not found`,
         publication: null,
       });
     }
 
-    res.json({ publication });
+    res.json({
+      publication: { ...publication, source: publication.source || source },
+    });
   } catch (error) {
     console.error("Error fetching publication details:", error);
     res.status(500).json({
@@ -2231,20 +2684,18 @@ router.get("/search/publication/:pmid", async (req, res) => {
   }
 });
 
-// Endpoint to fetch simplified publication details by PMID
+// Endpoint to fetch simplified publication details by ID and optional source
 router.get("/search/publication/:pmid/simplified", async (req, res) => {
   try {
-    const { pmid } = req.params;
+    const { pmid: idParam } = req.params;
+    const source = (req.query.source || "pubmed").trim();
+    const cleanPmid = (idParam || "").trim();
 
-    if (!pmid || !pmid.trim()) {
-      return res.status(400).json({ error: "PMID is required" });
+    if (!cleanPmid) {
+      return res.status(400).json({ error: "Publication ID is required" });
     }
 
-    // Clean up PMID (remove whitespace)
-    const cleanPmid = pmid.trim();
-
-    // Fetch detailed publication information
-    const publication = await fetchPublicationById(cleanPmid);
+    const publication = await fetchPublicationBySource(cleanPmid, source);
 
     if (!publication) {
       return res.status(404).json({

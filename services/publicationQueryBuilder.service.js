@@ -227,7 +227,12 @@ function buildExposureConceptClause(terms) {
   return parts.length ? `(${parts.join(" OR ")})` : "";
 }
 
-export function buildConceptAwareQuery(rawQuery = "") {
+/**
+ * @param {string} rawQuery
+ * @param {{ simplifiedExposure?: boolean }} [opts] - If true, exposure uses only modifierConcepts + rareConcepts (no full EXPOSURE_FAMILIES expansion). Use when combining multiple sources.
+ */
+export function buildConceptAwareQuery(rawQuery = "", opts = {}) {
+  const simplifiedExposure = opts.simplifiedExposure === true;
   const hasFieldTags = /\[[A-Za-z]{2,}\]/.test(rawQuery || "");
   if (hasFieldTags || !rawQuery || !rawQuery.trim()) {
     return {
@@ -262,33 +267,37 @@ export function buildConceptAwareQuery(rawQuery = "") {
   for (const mc of modifierConcepts) {
     if (mc && mc.trim()) exposureTerms.add(mc.trim());
   }
-  // Activate exposure families when any of their phrases or tokens appear in the raw query,
-  // then add the full family synonym set (tokens + phrases).
-  for (const fam of EXPOSURE_FAMILIES) {
-    let familyActive = false;
-    for (const phrase of fam.phrases || []) {
-      const p = phrase.toLowerCase();
-      if (p && lower.includes(p)) {
-        familyActive = true;
-        break;
-      }
-    }
-    if (!familyActive) {
-      for (const tok of fam.tokens || []) {
-        const t = tok.toLowerCase();
-        if (t && lower.includes(t)) {
+  for (const r of rareConcepts || []) {
+    if (r && r.trim()) exposureTerms.add(r.trim());
+  }
+  if (!simplifiedExposure) {
+    const lower = rawQuery.toLowerCase();
+    for (const fam of EXPOSURE_FAMILIES) {
+      let familyActive = false;
+      for (const phrase of fam.phrases || []) {
+        const p = phrase.toLowerCase();
+        if (p && lower.includes(p)) {
           familyActive = true;
           break;
         }
       }
-    }
-    if (familyActive) {
-      (fam.tokens || []).forEach((t) => {
-        if (t && t.trim()) exposureTerms.add(t.trim());
-      });
-      (fam.phrases || []).forEach((p) => {
-        if (p && p.trim()) exposureTerms.add(p.trim());
-      });
+      if (!familyActive) {
+        for (const tok of fam.tokens || []) {
+          const t = tok.toLowerCase();
+          if (t && lower.includes(t)) {
+            familyActive = true;
+            break;
+          }
+        }
+      }
+      if (familyActive) {
+        (fam.tokens || []).forEach((t) => {
+          if (t && t.trim()) exposureTerms.add(t.trim());
+        });
+        (fam.phrases || []).forEach((p) => {
+          if (p && p.trim()) exposureTerms.add(p.trim());
+        });
+      }
     }
   }
   const exposureGroupQuery = buildExposureConceptClause([...exposureTerms]);

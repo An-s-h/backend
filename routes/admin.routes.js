@@ -38,16 +38,14 @@ const verifyAdmin = (req, res, next) => {
   }
 
   const secret =
-    process.env.JWT_SECRET ;
+    process.env.JWT_SECRET || "your-secret-key-change-in-production";
   try {
     const decoded = jwt.verify(token, secret);
     if (decoded.isAdmin !== true) {
-      return res
-        .status(403)
-        .json({
-          error: "Admin access required. Your account is not an admin.",
-          code: "NOT_ADMIN",
-        });
+      return res.status(403).json({
+        error: "Admin access required. Your account is not an admin.",
+        code: "NOT_ADMIN",
+      });
     }
     req.adminUserId = decoded.userId;
     next();
@@ -55,19 +53,17 @@ const verifyAdmin = (req, res, next) => {
     if (err.name === "TokenExpiredError") {
       return res
         .status(401)
-        .json({ error: "Session expired. Please sign in again.", code: "TOKEN_EXPIRED" });
-    }
-    // JsonWebTokenError = invalid signature (usually JWT_SECRET mismatch between login and this server)
-    if (err.name === "JsonWebTokenError") {
-      console.warn("[admin] JWT verification failed (invalid signature):", err.message);
-      return res.status(401).json({
-        error: "Invalid token. If you just logged in, the server may be using a different JWT_SECRET. Set JWT_SECRET to the same value on every server/instance.",
-        code: "INVALID_SIGNATURE",
-      });
+        .json({
+          error: "Session expired. Please sign in again.",
+          code: "TOKEN_EXPIRED",
+        });
     }
     return res
       .status(401)
-      .json({ error: "Invalid or expired token. Please sign in again.", code: "INVALID_TOKEN" });
+      .json({
+        error: "Invalid or expired token. Please sign in again.",
+        code: "INVALID_TOKEN",
+      });
   }
 };
 
@@ -385,14 +381,54 @@ router.get("/admin/stats/overview", verifyAdmin, async (req, res) => {
       threadsByDay,
       postsByDay,
     ] = await Promise.all([
-      patientUserIds.length ? User.countDocuments({ _id: { $in: patientUserIds }, createdAt: { $gte: last24 } }) : 0,
-      patientUserIds.length ? User.countDocuments({ _id: { $in: patientUserIds }, createdAt: { $gte: thisWeek } }) : 0,
-      patientUserIds.length ? User.countDocuments({ _id: { $in: patientUserIds }, createdAt: { $gte: thisMonth } }) : 0,
-      patientUserIds.length ? User.countDocuments({ _id: { $in: patientUserIds }, createdAt: { $gte: lastMonthStart, $lt: thisMonth } }) : 0,
-      researcherUserIds.length ? User.countDocuments({ _id: { $in: researcherUserIds }, createdAt: { $gte: last24 } }) : 0,
-      researcherUserIds.length ? User.countDocuments({ _id: { $in: researcherUserIds }, createdAt: { $gte: thisWeek } }) : 0,
-      researcherUserIds.length ? User.countDocuments({ _id: { $in: researcherUserIds }, createdAt: { $gte: thisMonth } }) : 0,
-      researcherUserIds.length ? User.countDocuments({ _id: { $in: researcherUserIds }, createdAt: { $gte: lastMonthStart, $lt: thisMonth } }) : 0,
+      patientUserIds.length
+        ? User.countDocuments({
+            _id: { $in: patientUserIds },
+            createdAt: { $gte: last24 },
+          })
+        : 0,
+      patientUserIds.length
+        ? User.countDocuments({
+            _id: { $in: patientUserIds },
+            createdAt: { $gte: thisWeek },
+          })
+        : 0,
+      patientUserIds.length
+        ? User.countDocuments({
+            _id: { $in: patientUserIds },
+            createdAt: { $gte: thisMonth },
+          })
+        : 0,
+      patientUserIds.length
+        ? User.countDocuments({
+            _id: { $in: patientUserIds },
+            createdAt: { $gte: lastMonthStart, $lt: thisMonth },
+          })
+        : 0,
+      researcherUserIds.length
+        ? User.countDocuments({
+            _id: { $in: researcherUserIds },
+            createdAt: { $gte: last24 },
+          })
+        : 0,
+      researcherUserIds.length
+        ? User.countDocuments({
+            _id: { $in: researcherUserIds },
+            createdAt: { $gte: thisWeek },
+          })
+        : 0,
+      researcherUserIds.length
+        ? User.countDocuments({
+            _id: { $in: researcherUserIds },
+            createdAt: { $gte: thisMonth },
+          })
+        : 0,
+      researcherUserIds.length
+        ? User.countDocuments({
+            _id: { $in: researcherUserIds },
+            createdAt: { $gte: lastMonthStart, $lt: thisMonth },
+          })
+        : 0,
       ForumCategory.countDocuments(),
       Post.countDocuments(),
       Thread.countDocuments({ createdAt: { $gte: thisWeek } }),
@@ -400,26 +436,60 @@ router.get("/admin/stats/overview", verifyAdmin, async (req, res) => {
       PageFeedback.countDocuments(),
       patientUserIds.length
         ? User.aggregate([
-            { $match: { _id: { $in: patientUserIds }, createdAt: { $gte: thisMonth } } },
-            { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, count: { $sum: 1 } } },
+            {
+              $match: {
+                _id: { $in: patientUserIds },
+                createdAt: { $gte: thisMonth },
+              },
+            },
+            {
+              $group: {
+                _id: {
+                  $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+                },
+                count: { $sum: 1 },
+              },
+            },
             { $sort: { _id: 1 } },
           ])
         : [],
       researcherUserIds.length
         ? User.aggregate([
-            { $match: { _id: { $in: researcherUserIds }, createdAt: { $gte: thisMonth } } },
-            { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, count: { $sum: 1 } } },
+            {
+              $match: {
+                _id: { $in: researcherUserIds },
+                createdAt: { $gte: thisMonth },
+              },
+            },
+            {
+              $group: {
+                _id: {
+                  $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+                },
+                count: { $sum: 1 },
+              },
+            },
             { $sort: { _id: 1 } },
           ])
         : [],
       Thread.aggregate([
         { $match: { createdAt: { $gte: thisMonth } } },
-        { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, count: { $sum: 1 } } },
+        {
+          $group: {
+            _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+            count: { $sum: 1 },
+          },
+        },
         { $sort: { _id: 1 } },
       ]),
       Post.aggregate([
         { $match: { createdAt: { $gte: thisMonth } } },
-        { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, count: { $sum: 1 } } },
+        {
+          $group: {
+            _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+            count: { $sum: 1 },
+          },
+        },
         { $sort: { _id: 1 } },
       ]),
     ]);
@@ -436,15 +506,25 @@ router.get("/admin/stats/overview", verifyAdmin, async (req, res) => {
     (signupsResearchersByDay || []).forEach((r) => {
       if (dayMap[r._id]) dayMap[r._id].researchers = r.count;
     });
-    const signupsOverTime = Object.values(dayMap).sort((a, b) => a.date.localeCompare(b.date));
+    const signupsOverTime = Object.values(dayMap).sort((a, b) =>
+      a.date.localeCompare(b.date),
+    );
 
     const threadsByDayMap = {};
-    (threadsByDay || []).forEach((r) => { threadsByDayMap[r._id] = r.count; });
+    (threadsByDay || []).forEach((r) => {
+      threadsByDayMap[r._id] = r.count;
+    });
     const postsByDayMap = {};
-    (postsByDay || []).forEach((r) => { postsByDayMap[r._id] = r.count; });
+    (postsByDay || []).forEach((r) => {
+      postsByDayMap[r._id] = r.count;
+    });
     const engagementOverTime = Object.keys(dayMap)
       .sort()
-      .map((date) => ({ date, threads: threadsByDayMap[date] || 0, posts: postsByDayMap[date] || 0 }));
+      .map((date) => ({
+        date,
+        threads: threadsByDayMap[date] || 0,
+        posts: postsByDayMap[date] || 0,
+      }));
 
     res.json({
       newPatients: {

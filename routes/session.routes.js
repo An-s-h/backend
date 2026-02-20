@@ -9,7 +9,7 @@ import { verifySession } from "../middleware/auth.js";
 
 const router = Router();
 const JWT_SECRET =
-  process.env.JWT_SECRET ;
+  process.env.JWT_SECRET || "your-secret-key-change-in-production";
 
 // Generate JWT token (include isAdmin for admin route verification)
 function generateToken(userId, isAdmin = false) {
