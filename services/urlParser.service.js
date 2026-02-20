@@ -446,7 +446,7 @@ export async function fetchPublicationBySource(id, source = "pubmed") {
       return getWorkById(rawId);
     }
     if (src === "semantic_scholar") {
-      const { getPaperByIdOrDoi } = await import("./semanticscholar.service.js");
+      const { getPaperByIdOrDoi } = await import("./semanticScholar.service.js");
       return getPaperByIdOrDoi(rawId);
     }
     if (src === "crossref") {
