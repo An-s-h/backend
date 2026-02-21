@@ -5,7 +5,7 @@
 
 import { searchPubMed } from "./pubmed.service.js";
 import { searchOpenAlex } from "./openalex.service.js";
-import { searchSemanticScholar } from "./semanticscholar.service.js";
+import { searchSemanticScholar } from "./semanticScholar.service.js";
 import { searchArxiv } from "./arxiv.service.js";
 
 /** Normalize DOI for deduplication (lowercase, no URL prefix). */

@@ -3,7 +3,7 @@ import { searchClinicalTrials } from "../services/clinicalTrials.service.js";
 import { searchPubMed } from "../services/pubmed.service.js";
 import { searchPublicationsBatch } from "../services/publicationSearch.service.js";
 import { searchOpenAlex } from "../services/openalex.service.js";
-import { searchSemanticScholar } from "../services/semanticscholar.service.js";
+import { searchSemanticScholar } from "../services/semanticScholar.service.js";
 import { searchArxiv } from "../services/arxiv.service.js";
 import { searchORCID } from "../services/orcid.service.js";
 import { findResearchersWithGemini } from "../services/geminiExperts.service.js";
