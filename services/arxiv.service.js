@@ -34,13 +34,10 @@ function buildSearchQuery(query) {
 /**
  * Search arXiv. Returns items in common publication shape.
  */
-export async function searchArxiv({
-  q = "",
-  page = 1,
-  pageSize = 25,
-} = {}) {
+export async function searchArxiv({ q = "", page = 1, pageSize = 25 } = {}) {
   const query = (q || "").trim().replace(/\s+/g, " ");
-  if (!query) return { items: [], totalCount: 0, page: 1, pageSize: 25, hasMore: false };
+  if (!query)
+    return { items: [], totalCount: 0, page: 1, pageSize: 25, hasMore: false };
 
   const searchQuery = buildSearchQuery(query);
   const key = `arxiv:${searchQuery}:${page}:${pageSize}`;
@@ -52,7 +49,7 @@ export async function searchArxiv({
 
   try {
     const url = `https://export.arxiv.org/api/query?search_query=${encodeURIComponent(
-      searchQuery
+      searchQuery,
     )}&start=${start}&max_results=${maxResults}&sortBy=relevance`;
     const res = await axios.get(url, {
       timeout: 15000,
@@ -66,19 +63,30 @@ export async function searchArxiv({
     const items = entries.map((entry) => {
       const idEl = entry.getElementsByTagName("id")[0];
       const idUrl = idEl?.textContent || "";
-      const arxivId = idUrl.split("/abs/")[1] || idUrl.split("arxiv.org/abs/")[1] || "";
-      const title = (entry.getElementsByTagName("title")[0]?.textContent || "").replace(/\s+/g, " ").trim();
-      const summary = (entry.getElementsByTagName("summary")[0]?.textContent || "").replace(/\s+/g, " ").trim();
-      const authors = Array.from(entry.getElementsByTagName("author")).map(
-        (a) => (a.getElementsByTagName("name")[0]?.textContent || "").trim()
-      ).filter(Boolean);
-      const published = entry.getElementsByTagName("published")[0]?.textContent || "";
+      const arxivId =
+        idUrl.split("/abs/")[1] || idUrl.split("arxiv.org/abs/")[1] || "";
+      const title = (entry.getElementsByTagName("title")[0]?.textContent || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      const summary = (
+        entry.getElementsByTagName("summary")[0]?.textContent || ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      const authors = Array.from(entry.getElementsByTagName("author"))
+        .map((a) =>
+          (a.getElementsByTagName("name")[0]?.textContent || "").trim(),
+        )
+        .filter(Boolean);
+      const published =
+        entry.getElementsByTagName("published")[0]?.textContent || "";
       const year = published ? published.slice(0, 4) : "";
       const linkEls = entry.getElementsByTagName("link");
       let pdfUrl = "";
       let absUrl = idUrl;
       for (let i = 0; i < linkEls.length; i++) {
-        const rel = linkEls[i].getAttribute("title") || linkEls[i].getAttribute("rel");
+        const rel =
+          linkEls[i].getAttribute("title") || linkEls[i].getAttribute("rel");
         const href = linkEls[i].getAttribute("href") || "";
         if (rel === "pdf" || href.includes("/pdf/")) pdfUrl = href;
         if (href.includes("/abs/")) absUrl = href;
@@ -94,12 +102,14 @@ export async function searchArxiv({
         authors,
         abstract: summary,
         url: absUrl,
-        pdfUrl: pdfUrl || (arxivId ? `https://arxiv.org/pdf/${arxivId}.pdf` : ""),
+        pdfUrl:
+          pdfUrl || (arxivId ? `https://arxiv.org/pdf/${arxivId}.pdf` : ""),
         citationCount: null,
       };
     });
 
-    const total = items.length < maxResults ? start + items.length : start + maxResults + 1;
+    const total =
+      items.length < maxResults ? start + items.length : start + maxResults + 1;
     const result = {
       items,
       totalCount: total,
@@ -140,12 +150,19 @@ export async function getArxivById(arxivId) {
 
     const idEl = entry.getElementsByTagName("id")[0];
     const idUrl = idEl?.textContent || "";
-    const title = (entry.getElementsByTagName("title")[0]?.textContent || "").replace(/\s+/g, " ").trim();
-    const summary = (entry.getElementsByTagName("summary")[0]?.textContent || "").replace(/\s+/g, " ").trim();
-    const authors = Array.from(entry.getElementsByTagName("author")).map(
-      (a) => (a.getElementsByTagName("name")[0]?.textContent || "").trim()
-    ).filter(Boolean);
-    const published = entry.getElementsByTagName("published")[0]?.textContent || "";
+    const title = (entry.getElementsByTagName("title")[0]?.textContent || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const summary = (
+      entry.getElementsByTagName("summary")[0]?.textContent || ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    const authors = Array.from(entry.getElementsByTagName("author"))
+      .map((a) => (a.getElementsByTagName("name")[0]?.textContent || "").trim())
+      .filter(Boolean);
+    const published =
+      entry.getElementsByTagName("published")[0]?.textContent || "";
     const year = published ? published.slice(0, 4) : "";
     const linkEls = entry.getElementsByTagName("link");
     let pdfUrl = "";

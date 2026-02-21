@@ -3,7 +3,7 @@ import { searchClinicalTrials } from "../services/clinicalTrials.service.js";
 import { searchPubMed } from "../services/pubmed.service.js";
 import { searchPublicationsBatch } from "../services/publicationSearch.service.js";
 import { searchOpenAlex } from "../services/openalex.service.js";
-import { searchSemanticScholar } from "../services/semanticScholar.service.js";
+import { searchSemanticScholar } from "../services/semanticscholar.service.js";
 import { searchArxiv } from "../services/arxiv.service.js";
 import { searchORCID } from "../services/orcid.service.js";
 import { findResearchersWithGemini } from "../services/geminiExperts.service.js";
@@ -46,6 +46,8 @@ import {
 } from "../services/medicalTerminology.service.js";
 import { buildConceptAwareQuery } from "../services/publicationQueryBuilder.service.js";
 import { fetchCitationMetrics } from "../services/citationMetrics.service.js";
+import { fetchFullText, checkUnpaywall } from "../services/fullText.service.js";
+import axios from "axios";
 
 // Browser-based search limit system (strict 6 searches per device/browser)
 // Uses deviceId from localStorage (survives IP changes, proxies, browser restarts)
@@ -234,9 +236,7 @@ function getScholarStyleRelevance(pub, queryTerms) {
     if (re.test(titleAndKw)) termsInTitle++;
     if (re.test(fullText)) termsAnywhere++;
   }
-  const total = queryTerms.filter(
-    (t) => t && t.trim().length >= 2,
-  ).length;
+  const total = queryTerms.filter((t) => t && t.trim().length >= 2).length;
   if (total === 0) return 0;
   const ratioAnywhere = termsAnywhere / total;
   const ratioInTitle = termsInTitle / total;
@@ -1506,7 +1506,10 @@ router.get("/search/publications", async (req, res) => {
         );
         let R =
           scholarR > 0
-            ? Math.max(scholarR, fieldWeighted > 0 ? fieldWeighted : signals.queryRelevanceScore)
+            ? Math.max(
+                scholarR,
+                fieldWeighted > 0 ? fieldWeighted : signals.queryRelevanceScore,
+              )
             : fieldWeighted > 0
               ? fieldWeighted
               : signals.queryRelevanceScore;
@@ -2681,6 +2684,198 @@ router.get("/search/publication/:pmid", async (req, res) => {
       error: "Failed to fetch publication details",
       publication: null,
     });
+  }
+});
+
+// Endpoint to fetch full-text content and access level for in-platform reading
+// GET /search/publication/:id/fulltext?source=pubmed|openalex|semantic_scholar|arxiv
+router.get("/search/publication/:pmid/fulltext", async (req, res) => {
+  try {
+    const { pmid: idParam } = req.params;
+    const source = (req.query.source || "pubmed").trim();
+
+    if (!idParam || !idParam.trim()) {
+      return res.status(400).json({ error: "Publication ID is required" });
+    }
+
+    const publication = await fetchPublicationBySource(idParam.trim(), source);
+    if (!publication) {
+      return res.status(404).json({
+        error: "Publication not found",
+        accessLevel: null,
+        fullText: null,
+        pdfUrl: null,
+      });
+    }
+
+    const { accessLevel, fullText, pdfUrl, unpaywall } = await fetchFullText(publication);
+    const publisher = unpaywall?.publisher || publication.journal || null;
+
+    res.json({
+      publication: { ...publication, source: publication.source || source },
+      accessLevel,
+      fullText,
+      pdfUrl,
+      publisher,
+    });
+  } catch (error) {
+    console.error("Error fetching full text:", error);
+    res.status(500).json({
+      error: "Failed to fetch full text",
+      accessLevel: null,
+      fullText: null,
+      pdfUrl: null,
+    });
+  }
+});
+
+// PDF proxy: fetches PDF and streams with Content-Disposition: inline
+// Production flow: DOI → Unpaywall → best_oa_location.url → validate content-type → allow
+// Fallback: allowlist for sources without DOI (arXiv, Semantic Scholar, etc.)
+const PDF_PROXY_ALLOWED_HOSTS = [
+  "arxiv.org",
+  "semanticscholar.org",
+  "pdfs.semanticscholar.org",
+  "openalex.org",
+  "europepmc.org",
+  "eurpmc.org",
+  "ebi.ac.uk",
+  "pubmedcentral.nih.gov",
+  "pmc.ncbi.nlm.nih.gov",
+  "ncbi.nlm.nih.gov",
+  "pubmed.ncbi.nlm.nih.gov",
+  "wiley.com",
+  "onlinelibrary.wiley.com",
+  "ugeskriftet.dk",
+  "content.ugeskriftet.dk",
+];
+
+function isAllowedPdfUrlFallback(url) {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    return PDF_PROXY_ALLOWED_HOSTS.some(
+      (allowed) => host === allowed || host.endsWith("." + allowed)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function urlMatches(a, b) {
+  if (!a || !b) return false;
+  try {
+    const u1 = new URL(a);
+    const u2 = new URL(b);
+    if (u1.origin + u1.pathname === u2.origin + u2.pathname) return true;
+    // Same path (e.g. /doi/pdfdirect/10.1002/xxx) - different subdomains (onlinelibrary.wiley.com vs movementdisorders.onlinelibrary.wiley.com)
+    if (u1.pathname === u2.pathname) {
+      const base1 = u1.hostname.split(".").slice(-2).join(".");
+      const base2 = u2.hostname.split(".").slice(-2).join(".");
+      return base1 === base2;
+    }
+    return false;
+  } catch {
+    return a === b;
+  }
+}
+
+/** Check if url contains the given DOI and is from a known publisher host */
+function urlContainsDoiAndTrustedHost(url, doi) {
+  if (!url || !doi) return false;
+  const cleanDoi = doi.replace(/^https?:\/\/doi\.org\//i, "").trim();
+  if (!cleanDoi) return false;
+  try {
+    const u = new URL(url);
+    const pathLower = (u.pathname + u.search).toLowerCase();
+    const doiInPath = pathLower.includes(cleanDoi.toLowerCase());
+    const trustedHosts = ["wiley.com", "onlinelibrary.wiley.com", "springer.com", "nature.com", "plos.org", "mdpi.com", "frontiersin.org", "tandfonline.com", "oup.com", "bmj.com", "sciencedirect.com", "ugeskriftet.dk"];
+    const host = u.hostname.toLowerCase();
+    const isTrusted = trustedHosts.some((h) => host === h || host.endsWith("." + h));
+    return doiInPath && isTrusted;
+  } catch {
+    return false;
+  }
+}
+
+function isPdfContentType(ct, url) {
+  if (!ct) return false;
+  const m = ct.toLowerCase().split(";")[0].trim();
+  if (m === "application/pdf") return true;
+  if (m === "application/octet-stream" && url && /\.pdf(\?|$)/i.test(url))
+    return true;
+  return false;
+}
+
+router.get("/search/pdf-proxy", async (req, res) => {
+  try {
+    const url = req.query.url;
+    const doi = req.query.doi;
+    if (!url || typeof url !== "string") {
+      return res.status(400).json({ error: "Missing url parameter" });
+    }
+
+    let allowed = false;
+    if (doi && typeof doi === "string") {
+      const cleanDoi = doi.replace(/^https?:\/\/doi\.org\//i, "").trim();
+      if (cleanDoi) {
+        const unpaywall = await checkUnpaywall(cleanDoi);
+        const loc = unpaywall?.best_oa_location;
+        if (loc) {
+          const pdfUrl = loc.url_for_pdf || loc.url;
+          if (pdfUrl && urlMatches(url, pdfUrl)) allowed = true;
+        }
+        if (!allowed && unpaywall?.is_oa && urlContainsDoiAndTrustedHost(url, cleanDoi)) {
+          allowed = true;
+        }
+      }
+    }
+    if (!allowed && isAllowedPdfUrlFallback(url)) {
+      allowed = true;
+    }
+    if (!allowed) {
+      return res.status(403).json({ error: "URL not allowed for proxy" });
+    }
+
+    const requestUrl = new URL(url);
+    const referer = doi
+      ? `https://doi.org/${doi.replace(/^https?:\/\/doi\.org\//i, "").trim()}`
+      : requestUrl.origin + "/";
+    const resp = await axios.get(url, {
+      responseType: "stream",
+      timeout: 60000,
+      maxContentLength: 50 * 1024 * 1024, // 50MB
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        Accept: "application/pdf,application/octet-stream,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        Referer: referer,
+      },
+      validateStatus: (s) => s === 200,
+      maxRedirects: 5,
+    });
+    if (resp.status !== 200) {
+      return res.status(502).json({ error: "Failed to fetch PDF" });
+    }
+    const ct = resp.headers["content-type"];
+    if (!isPdfContentType(ct, url)) {
+      return res.status(415).json({ error: "Resource is not a PDF" });
+    }
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", "inline; filename=publication.pdf");
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    resp.data.pipe(res);
+  } catch (err) {
+    const status = err.response?.status;
+    const is403 = status === 403;
+    console.warn("PDF proxy error:", err?.message, is403 ? "(publisher blocked)" : "");
+    if (is403) {
+      return res.status(403).json({
+        error: "Publisher blocks embedded viewing. Use Open in new tab to read the PDF.",
+      });
+    }
+    res.status(502).json({ error: "Failed to fetch PDF" });
   }
 });
 
