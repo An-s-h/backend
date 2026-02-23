@@ -1,7 +1,7 @@
-import { PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
-import s3Client, { s3Config } from '../config/s3.js';
-import { v4 as uuidv4 } from 'uuid';
-import path from 'path';
+import { PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import s3Client, { s3Config } from "../config/s3.js";
+import { v4 as uuidv4 } from "uuid";
+import path from "path";
 
 /**
  * Generate a unique file key for S3
@@ -35,7 +35,12 @@ function getPublicUrl(key) {
  * @param {string} mimetype - MIME type of the file
  * @returns {Promise<Object>} - Upload result with url, key, etc.
  */
-export async function uploadImage(fileBuffer, folder = 'posts/images', originalName = 'image', mimetype = 'image/jpeg') {
+export async function uploadImage(
+  fileBuffer,
+  folder = "posts/images",
+  originalName = "image",
+  mimetype = "image/jpeg",
+) {
   try {
     const key = generateFileKey(folder, originalName);
 
@@ -60,7 +65,7 @@ export async function uploadImage(fileBuffer, folder = 'posts/images', originalN
       bucket: s3Config.bucket,
     };
   } catch (error) {
-    console.error('Error uploading image to S3:', error);
+    console.error("Error uploading image to S3:", error);
     throw new Error(`Failed to upload image: ${error.message}`);
   }
 }
@@ -73,7 +78,12 @@ export async function uploadImage(fileBuffer, folder = 'posts/images', originalN
  * @param {string} mimetype - MIME type of the file
  * @returns {Promise<Object>} - Upload result with url, key, etc.
  */
-export async function uploadFile(fileBuffer, folder = 'posts/files', originalName = 'file', mimetype = 'application/octet-stream') {
+export async function uploadFile(
+  fileBuffer,
+  folder = "posts/files",
+  originalName = "file",
+  mimetype = "application/octet-stream",
+) {
   try {
     const key = generateFileKey(folder, originalName);
 
@@ -98,7 +108,7 @@ export async function uploadFile(fileBuffer, folder = 'posts/files', originalNam
       bucket: s3Config.bucket,
     };
   } catch (error) {
-    console.error('Error uploading file to S3:', error);
+    console.error("Error uploading file to S3:", error);
     throw new Error(`Failed to upload file: ${error.message}`);
   }
 }
@@ -109,7 +119,7 @@ export async function uploadFile(fileBuffer, folder = 'posts/files', originalNam
  * @param {string} resourceType - Not used for S3, kept for backward compatibility
  * @returns {Promise<Object>} - Deletion result
  */
-export async function deleteFile(key, resourceType = 'image') {
+export async function deleteFile(key, resourceType = "image") {
   try {
     const command = new DeleteObjectCommand({
       Bucket: s3Config.bucket,
@@ -119,11 +129,11 @@ export async function deleteFile(key, resourceType = 'image') {
     await s3Client.send(command);
 
     return {
-      result: 'ok',
-      message: 'File deleted successfully',
+      result: "ok",
+      message: "File deleted successfully",
     };
   } catch (error) {
-    console.error('Error deleting file from S3:', error);
+    console.error("Error deleting file from S3:", error);
     throw new Error(`Failed to delete file: ${error.message}`);
   }
 }

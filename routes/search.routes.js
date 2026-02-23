@@ -3,7 +3,7 @@ import { searchClinicalTrials } from "../services/clinicalTrials.service.js";
 import { searchPubMed } from "../services/pubmed.service.js";
 import { searchPublicationsBatch } from "../services/publicationSearch.service.js";
 import { searchOpenAlex } from "../services/openalex.service.js";
-import { searchSemanticScholar } from "../services/semanticScholar.service.js";
+import { searchSemanticScholar } from "../services/semanticscholar.service.js";
 import { searchArxiv } from "../services/arxiv.service.js";
 import { searchORCID } from "../services/orcid.service.js";
 import { findResearchersWithGemini } from "../services/geminiExperts.service.js";
@@ -44,13 +44,23 @@ import {
   expandQueryWithSynonyms,
   mapToMeSHTerminology,
 } from "../services/medicalTerminology.service.js";
-import { buildConceptAwareQuery } from "../services/publicationQueryBuilder.service.js";
+import {
+  buildConceptAwareQuery,
+  detectIntent,
+} from "../services/publicationQueryBuilder.service.js";
+import {
+  generatePublicationKeywords,
+  buildSearchQueryFromKeywords,
+} from "../services/publicationKeywords.service.js";
+import { rerankPublicationsWithGemini } from "../services/geminiReranker.service.js";
 import { fetchCitationMetrics } from "../services/citationMetrics.service.js";
 import { fetchFullText, checkUnpaywall } from "../services/fullText.service.js";
 import axios from "axios";
+import { TUTORIAL_PUBLICATIONS } from "../data/tutorialPublications.js";
+import { TUTORIAL_TRIALS } from "../data/tutorialTrials.js";
+import { TUTORIAL_EXPERTS } from "../data/tutorialExperts.js";
 
-// Browser-based search limit system (strict 6 searches per device/browser)
-// Uses deviceId from localStorage (survives IP changes, proxies, browser restarts)
+// Guest search limit: server tracks by deviceId (lenient - fail open when missing)
 import {
   checkSearchLimit,
   incrementSearchCount,
@@ -101,6 +111,91 @@ function tokenizeForRelevance(text = "") {
     .replace(/[^\w\s-]/g, " ")
     .split(/\s+/)
     .filter((term) => term.length > 2 && !PUBLICATION_STOP_WORDS.has(term));
+}
+
+/** True if the query looks like a natural-language question (use keyword extraction, not exact title). */
+function looksLikeNaturalLanguageQuestion(query) {
+  if (!query || typeof query !== "string") return false;
+  const q = query.trim();
+  if (q.includes("?")) return true;
+  const lower = q.toLowerCase();
+  const questionStart =
+    /^\s*(what|how|which|why|when|where|who|are\s|is\s|can\s|does\s|do\s|did\s|will\s|would\s|could\s|should\s|have\s|has\s|had\s|tell\s|show\s|explain|describe|list|name\s|give\s)/;
+  if (questionStart.test(lower)) return true;
+  if (
+    /\b(what\s+are|what\s+is|what\s+vitamins|what\s+is\s+the|are\s+there|is\s+there)\b/.test(
+      lower,
+    )
+  )
+    return true;
+  return false;
+}
+
+/** Stopwords and question words to strip from display keywords (frontend "Searching for: ..."). */
+const DISPLAY_KEYWORD_STOPWORDS = new Set([
+  "the",
+  "a",
+  "an",
+  "and",
+  "or",
+  "not",
+  "of",
+  "in",
+  "for",
+  "to",
+  "with",
+  "on",
+  "at",
+  "by",
+  "from",
+  "what",
+  "is",
+  "are",
+  "does",
+  "do",
+  "can",
+  "could",
+  "should",
+  "would",
+  "how",
+  "why",
+  "when",
+  "where",
+  "who",
+  "vs",
+  "versus",
+  "about",
+  "overall",
+  "general",
+  "getting",
+  "good",
+  "during",
+]);
+
+/**
+ * Clean keywords for frontend display: strip question words and stopwords, keep meaningful terms only.
+ * e.g. ["what are risks", "colorectal cancer"] → ["risks", "colorectal cancer"]
+ */
+function cleanDisplayKeywords(keywords) {
+  if (!Array.isArray(keywords) || keywords.length === 0) return [];
+  const out = [];
+  for (const k of keywords) {
+    const s = String(k).trim();
+    if (!s) continue;
+    const tokens = s
+      .toLowerCase()
+      .replace(/[^\w\s-]/g, " ")
+      .split(/\s+/)
+      .filter(Boolean);
+    const meaningful = tokens.filter(
+      (t) => t.length >= 2 && !DISPLAY_KEYWORD_STOPWORDS.has(t),
+    );
+    const cleaned = meaningful.join(" ").trim();
+    if (cleaned && cleaned.length >= 2 && !out.includes(cleaned)) {
+      out.push(cleaned);
+    }
+  }
+  return out.slice(0, 3);
 }
 
 /** Strip PubMed-style field tags for Semantic Scholar, Crossref, arXiv (tiered path). */
@@ -607,14 +702,14 @@ function getMultiConceptMatchStrength(pub, mustGroups) {
 
 router.get("/search/trials", async (req, res) => {
   try {
-    // Check search limit for anonymous users (browser-based deviceId)
+    // Check search limit for guests (lenient: allows when deviceId missing)
     if (!req.user) {
       const limitCheck = await checkSearchLimit(req);
       if (!limitCheck.canSearch) {
         return res.status(429).json({
           error:
             limitCheck.message ||
-            "You've used all your free searches! Sign in to continue searching.",
+            "You've reached your search limit. Sign in to continue.",
           remaining: 0,
           results: [],
           showSignUpPrompt: limitCheck.showSignUpPrompt,
@@ -812,12 +907,10 @@ router.get("/search/trials", async (req, res) => {
       }
     }
 
-    // Increment search count for anonymous users only after results are successfully loaded and processed
     if (!req.user) {
       await incrementSearchCount(req);
     }
 
-    // Get remaining searches for anonymous users
     let remaining = null;
     if (!req.user) {
       const limitCheck = await checkSearchLimit(req);
@@ -840,16 +933,60 @@ router.get("/search/trials", async (req, res) => {
   }
 });
 
+// Pre-loaded hypertension results for the Publications tutorial (no search limit, no external API)
+router.get("/search/publications/tutorial", (req, res) => {
+  try {
+    res.json({
+      results: TUTORIAL_PUBLICATIONS,
+      totalCount: TUTORIAL_PUBLICATIONS.length,
+      page: 1,
+      pageSize: TUTORIAL_PUBLICATIONS.length,
+      hasMore: false,
+      searchKeywords: ["hypertension"],
+    });
+  } catch (err) {
+    console.error("Tutorial publications error:", err);
+    res.status(500).json({ error: "Tutorial data unavailable", results: [] });
+  }
+});
+
+// Pre-loaded hypertension trial results for the Trials page tutorial (no search limit, no external API)
+router.get("/search/trials/tutorial", (req, res) => {
+  try {
+    res.json({
+      results: TUTORIAL_TRIALS,
+      totalCount: TUTORIAL_TRIALS.length,
+      hasMore: false,
+    });
+  } catch (err) {
+    console.error("Tutorial trials error:", err);
+    res.status(500).json({ error: "Tutorial data unavailable", results: [] });
+  }
+});
+
+// Pre-loaded sample experts for the Experts page tutorial (no search limit, no external API)
+router.get("/search/experts/tutorial", (req, res) => {
+  try {
+    res.json({
+      results: TUTORIAL_EXPERTS,
+      totalFound: TUTORIAL_EXPERTS.length,
+      hasMore: false,
+    });
+  } catch (err) {
+    console.error("Tutorial experts error:", err);
+    res.status(500).json({ error: "Tutorial data unavailable", results: [] });
+  }
+});
+
 router.get("/search/publications", async (req, res) => {
   try {
-    // Check search limit for anonymous users (browser-based deviceId)
     if (!req.user) {
       const limitCheck = await checkSearchLimit(req);
       if (!limitCheck.canSearch) {
         return res.status(429).json({
           error:
             limitCheck.message ||
-            "You've used all your free searches! Sign in to continue searching.",
+            "You've reached your search limit. Sign in to continue.",
           remaining: 0,
           results: [],
           showSignUpPrompt: limitCheck.showSignUpPrompt,
@@ -888,6 +1025,8 @@ router.get("/search/publications", async (req, res) => {
     const pmidMatch = q?.match(/^(\d{7,8})$/);
     let pubmedQuery = "";
     let atmQueryMeta = null;
+    /** 2–3 display keywords for frontend (from extracted/concept terms) */
+    let searchKeywordsForFrontend = null;
 
     if (pmcIdMatch && pmcIdMatch[1]) {
       // PMC ID search with PMC prefix - use exact PMC ID field tag
@@ -901,6 +1040,7 @@ router.get("/search/publications", async (req, res) => {
         hasFieldTags: true,
         isPmcSearch: true,
       };
+      searchKeywordsForFrontend = q ? [q.trim()] : [];
     } else if (pmidMatch) {
       // PMID search (just numbers, could be PMID or PMC without prefix)
       // Try both PMID and PMCID for better coverage
@@ -914,9 +1054,11 @@ router.get("/search/publications", async (req, res) => {
         hasFieldTags: true,
         isPmidSearch: true,
       };
-    } else if (q && q.length > 30) {
-      // Long query likely to be an exact title - search in title field
-      // Normalize natural language to keywords first, then extract title words
+      searchKeywordsForFrontend = q ? [q.trim()] : [];
+    } else if (q && q.length > 30 && !looksLikeNaturalLanguageQuestion(q)) {
+      // Long query that does NOT look like a question → treat as exact title search
+      // (e.g. pasted paper title). Questions like "what are risks in getting colorectal cancer"
+      // go to keyword extraction below.
       const titleQuery = naturalLanguageToSearchKeywords(q) || q;
       // PubMed's exact phrase matching with "phrase"[Title] FAILS on special characters
       // like apostrophes, colons, periods, etc. (returns 0 results).
@@ -975,6 +1117,39 @@ router.get("/search/publications", async (req, res) => {
         hasFieldTags: true,
         isExactTitleSearch: true,
       };
+      searchKeywordsForFrontend = titleWords?.length
+        ? titleWords.slice(0, 3)
+        : q
+          ? [q.trim()]
+          : [];
+    } else if (process.env.USE_ATM_V2_PUBLICATIONS === "true") {
+      // V2: User query → Gemini + MeSH keywords → search all sources → current ranking
+      const keywords = await generatePublicationKeywords(q || "");
+      const { pubmedQuery: v2PubmedQuery, queryTerms: v2QueryTerms } =
+        buildSearchQueryFromKeywords(keywords);
+      pubmedQuery = v2PubmedQuery || (q || "").trim();
+      // Use tokenized queryTerms for the concept gate so we don't require exact phrases
+      // (e.g. "ADHD" in title passes; "ADHD treatment" as single phrase would filter out most papers)
+      atmQueryMeta = {
+        pubmedQuery,
+        queryTerms: v2QueryTerms,
+        rawQueryLower: (q || "").toLowerCase().trim(),
+        coreConceptTerms: v2QueryTerms?.length
+          ? v2QueryTerms
+          : keywords.primaryKeywords || [],
+        hasFieldTags: true,
+        isPmcSearch: false,
+        isPmidSearch: false,
+        isExactTitleSearch: false,
+        intent: detectIntent(q || ""),
+        isMultiConcept: false,
+        modifierConcepts: [],
+        rareConcepts: [],
+        exposureGroupQuery: "",
+      };
+      const pk = (keywords.primaryKeywords || []).slice(0, 2);
+      const mt = (keywords.meshTerms || []).slice(0, 1);
+      searchKeywordsForFrontend = [...pk, ...mt].filter(Boolean).slice(0, 3);
     } else {
       // Layer 1: Natural language → keywords, then concept + intent aware query
       const searchQ = naturalLanguageToSearchKeywords(q || "") || q || "";
@@ -986,6 +1161,10 @@ router.get("/search/publications", async (req, res) => {
       atmQueryMeta.isPmcSearch = false;
       atmQueryMeta.isPmidSearch = false;
       atmQueryMeta.isExactTitleSearch = false;
+      searchKeywordsForFrontend = (atmQueryMeta.coreConceptTerms || []).slice(
+        0,
+        3,
+      );
     }
 
     // Add location (country) to query if provided and not already in advanced query
@@ -1768,7 +1947,7 @@ router.get("/search/publications", async (req, res) => {
 
     // Google Scholar–style sort: citation-weighted score first, then relevance (title-weighted), then tie-breakers.
     const EPSILON = 0.001;
-    const sortedResults = scoredResults.sort((a, b) => {
+    let sortedResults = scoredResults.sort((a, b) => {
       const diff = (b.finalScore ?? 0) - (a.finalScore ?? 0);
       if (Math.abs(diff) > EPSILON) return diff;
       const rDiff = (b.queryRelevanceScore ?? 0) - (a.queryRelevanceScore ?? 0);
@@ -1778,6 +1957,25 @@ router.get("/search/publications", async (req, res) => {
       if (multiDiff !== 0) return multiDiff;
       return (b.influenceScore ?? 0) - (a.influenceScore ?? 0);
     });
+
+    // Optional: quick Gemini rerank of top results by relevance to user query
+    if (
+      process.env.PUBLICATION_GEMINI_RERANK_ENABLED === "true" &&
+      q &&
+      sortedResults.length > 0
+    ) {
+      try {
+        sortedResults = await rerankPublicationsWithGemini(q, sortedResults, {
+          maxDocs:
+            parseInt(process.env.PUBLICATION_GEMINI_RERANK_MAX_DOCS, 10) || 20,
+          maxDocChars:
+            parseInt(process.env.PUBLICATION_GEMINI_RERANK_MAX_CHARS, 10) ||
+            280,
+        });
+      } catch (err) {
+        console.warn("Publication Gemini rerank failed:", err?.message);
+      }
+    }
 
     // Paginate FIRST, then simplify only the titles that will be shown to the user
     // This is much faster than simplifying all publications in the batch
@@ -1857,12 +2055,10 @@ router.get("/search/publications", async (req, res) => {
       }
     }
 
-    // Increment search count for anonymous users only after results are successfully loaded and processed
     if (!req.user) {
       await incrementSearchCount(req);
     }
 
-    // Get remaining searches for anonymous users
     let remaining = null;
     if (!req.user) {
       const limitCheck = await checkSearchLimit(req);
@@ -1870,8 +2066,11 @@ router.get("/search/publications", async (req, res) => {
     }
 
     // Calculate if there are more results
-    // Note: We're only showing results from the batch we fetched, so hasMore is based on batch size
     const hasMore = endIndex < sortedResults.length;
+
+    const displayKeywords = cleanDisplayKeywords(
+      searchKeywordsForFrontend || [],
+    );
 
     res.json({
       results: resultsWithReadStatus,
@@ -1886,6 +2085,7 @@ router.get("/search/publications", async (req, res) => {
       ...(publicationSourceMeta && {
         publicationSources: publicationSourceMeta,
       }),
+      ...(displayKeywords.length > 0 && { searchKeywords: displayKeywords }),
     });
   } catch (error) {
     console.error("Error searching publications:", error);
@@ -1900,14 +2100,13 @@ router.get("/search/publications", async (req, res) => {
 
 router.get("/search/experts", async (req, res) => {
   try {
-    // Check search limit for anonymous users (browser-based deviceId)
     if (!req.user) {
       const limitCheck = await checkSearchLimit(req);
       if (!limitCheck.canSearch) {
         return res.status(429).json({
           error:
             limitCheck.message ||
-            "You've used all your free searches! Sign in to continue searching.",
+            "You've reached your search limit. Sign in to continue.",
           remaining: 0,
           results: [],
           showSignUpPrompt: limitCheck.showSignUpPrompt,
@@ -1973,12 +2172,16 @@ router.get("/search/experts", async (req, res) => {
       expertsQuery = `${queryTrimmed} global`;
     }
 
-    // Use Gemini to find researchers based on the search query
     const experts = await findResearchersWithGemini(expertsQuery);
 
-    // Increment search count for anonymous users after successful search
     if (!req.user) {
       await incrementSearchCount(req);
+    }
+
+    let remaining = null;
+    if (!req.user) {
+      const limitCheck = await checkSearchLimit(req);
+      remaining = limitCheck.remaining;
     }
 
     // If no experts found and it might be due to overload, return a helpful message
@@ -2069,13 +2272,6 @@ router.get("/search/experts", async (req, res) => {
           };
         })
       : experts;
-
-    // Get remaining searches for anonymous users
-    let remaining = null;
-    if (!req.user) {
-      const limitCheck = await checkSearchLimit(req);
-      remaining = limitCheck.remaining;
-    }
 
     res.json({
       results: resultsWithMatch,
@@ -2323,14 +2519,13 @@ router.get("/search/experts/platform", async (req, res) => {
 // New pipeline: verified experts (Gemini candidate names -> OpenAlex + Semantic Scholar verification -> metric scoring)
 router.get("/search/experts/v2", async (req, res) => {
   try {
-    // Check search limit for anonymous users (browser-based deviceId)
     if (!req.user) {
       const limitCheck = await checkSearchLimit(req);
       if (!limitCheck.canSearch) {
         return res.status(429).json({
           error:
             limitCheck.message ||
-            "You've used all your free searches! Sign in to continue searching.",
+            "You've reached your search limit. Sign in to continue.",
           remaining: 0,
           results: [],
           showSignUpPrompt: limitCheck.showSignUpPrompt,
@@ -2348,12 +2543,10 @@ router.get("/search/experts/v2", async (req, res) => {
       limit: parsedLimit,
     });
 
-    // Increment search count for anonymous users after successful search
     if (!req.user) {
       await incrementSearchCount(req);
     }
 
-    // Get remaining searches for anonymous users
     let remaining = null;
     if (!req.user) {
       const limitCheck = await checkSearchLimit(req);
@@ -2377,14 +2570,13 @@ router.get("/search/experts/v2", async (req, res) => {
 // Flow: Gemini (constraints only) -> OpenAlex works -> Extract authors -> Semantic Scholar verification -> Ranking -> Gemini (summaries)
 router.get("/search/experts/deterministic", async (req, res) => {
   try {
-    // Check search limit for anonymous users (browser-based deviceId)
     if (!req.user) {
       const limitCheck = await checkSearchLimit(req);
       if (!limitCheck.canSearch) {
         return res.status(429).json({
           error:
             limitCheck.message ||
-            "You've used all your free searches! Sign in to continue searching.",
+            "You've reached your search limit. Sign in to continue.",
           remaining: 0,
           results: [],
           showSignUpPrompt: limitCheck.showSignUpPrompt,
@@ -2426,15 +2618,12 @@ router.get("/search/experts/deterministic", async (req, res) => {
       parsedPageSize,
     );
 
-    // Format for API response
     const formattedExperts = formatExpertsForResponse(experts);
 
-    // Increment search count for anonymous users only on page 1 (first search)
-    if (!req.user && parsedPage === 1) {
+    if (!req.user) {
       await incrementSearchCount(req);
     }
 
-    // Get remaining searches for anonymous users
     let remaining = null;
     if (!req.user) {
       const limitCheck = await checkSearchLimit(req);
@@ -2536,26 +2725,16 @@ router.get("/expert/profile", async (req, res) => {
 });
 
 // Endpoint to get remaining searches for anonymous users
-// Optimized with lean() query and early returns
+// Server tracks by deviceId (lenient - fail open when missing)
 router.get("/search/remaining", async (req, res) => {
   try {
-    // Authenticated users have unlimited searches - return immediately
     if (req.user) {
       return res.json({ remaining: null, unlimited: true });
     }
-
-    // Check remaining searches for anonymous users (browser-based deviceId)
-    try {
-      const limitCheck = await checkSearchLimit(req);
-      return res.json({ remaining: limitCheck.remaining, unlimited: false });
-    } catch (dbError) {
-      console.error("Database error getting remaining searches:", dbError);
-      // Fallback to max searches on error
-      return res.json({ remaining: MAX_FREE_SEARCHES, unlimited: false });
-    }
+    const limitCheck = await checkSearchLimit(req);
+    return res.json({ remaining: limitCheck.remaining, unlimited: false });
   } catch (error) {
     console.error("Error getting remaining searches:", error);
-    // Return default instead of error to prevent UI issues
     return res.json({ remaining: MAX_FREE_SEARCHES, unlimited: false });
   }
 });
@@ -2608,9 +2787,12 @@ router.get("/search/trial/:nctId", async (req, res) => {
 });
 
 // Endpoint to fetch simplified trial details by NCT ID
+// ?audience=researcher for researcher-friendly (technical terms, concise) | patient (default) for plain language
 router.get("/search/trial/:nctId/simplified", async (req, res) => {
   try {
     const { nctId } = req.params;
+    const audience = (req.query.audience || "patient").toLowerCase();
+    const validAudience = audience === "researcher" ? "researcher" : "patient";
 
     if (!nctId || !nctId.trim()) {
       return res.status(400).json({ error: "NCT ID is required" });
@@ -2629,8 +2811,8 @@ router.get("/search/trial/:nctId/simplified", async (req, res) => {
       });
     }
 
-    // Simplify trial details using AI
-    const simplifiedResult = await simplifyTrialDetails(trial);
+    // Simplify trial details using AI (researcher = technical terms; patient = plain language)
+    const simplifiedResult = await simplifyTrialDetails(trial, validAudience);
 
     // Handle case where simplifyTrialDetails returns null (shouldn't happen, but safety check)
     if (!simplifiedResult) {
@@ -2708,7 +2890,8 @@ router.get("/search/publication/:pmid/fulltext", async (req, res) => {
       });
     }
 
-    const { accessLevel, fullText, pdfUrl, unpaywall } = await fetchFullText(publication);
+    const { accessLevel, fullText, pdfUrl, unpaywall } =
+      await fetchFullText(publication);
     const publisher = unpaywall?.publisher || publication.journal || null;
 
     res.json({
@@ -2755,7 +2938,7 @@ function isAllowedPdfUrlFallback(url) {
     const u = new URL(url);
     const host = u.hostname.toLowerCase();
     return PDF_PROXY_ALLOWED_HOSTS.some(
-      (allowed) => host === allowed || host.endsWith("." + allowed)
+      (allowed) => host === allowed || host.endsWith("." + allowed),
     );
   } catch {
     return false;
@@ -2789,9 +2972,24 @@ function urlContainsDoiAndTrustedHost(url, doi) {
     const u = new URL(url);
     const pathLower = (u.pathname + u.search).toLowerCase();
     const doiInPath = pathLower.includes(cleanDoi.toLowerCase());
-    const trustedHosts = ["wiley.com", "onlinelibrary.wiley.com", "springer.com", "nature.com", "plos.org", "mdpi.com", "frontiersin.org", "tandfonline.com", "oup.com", "bmj.com", "sciencedirect.com", "ugeskriftet.dk"];
+    const trustedHosts = [
+      "wiley.com",
+      "onlinelibrary.wiley.com",
+      "springer.com",
+      "nature.com",
+      "plos.org",
+      "mdpi.com",
+      "frontiersin.org",
+      "tandfonline.com",
+      "oup.com",
+      "bmj.com",
+      "sciencedirect.com",
+      "ugeskriftet.dk",
+    ];
     const host = u.hostname.toLowerCase();
-    const isTrusted = trustedHosts.some((h) => host === h || host.endsWith("." + h));
+    const isTrusted = trustedHosts.some(
+      (h) => host === h || host.endsWith("." + h),
+    );
     return doiInPath && isTrusted;
   } catch {
     return false;
@@ -2825,7 +3023,11 @@ router.get("/search/pdf-proxy", async (req, res) => {
           const pdfUrl = loc.url_for_pdf || loc.url;
           if (pdfUrl && urlMatches(url, pdfUrl)) allowed = true;
         }
-        if (!allowed && unpaywall?.is_oa && urlContainsDoiAndTrustedHost(url, cleanDoi)) {
+        if (
+          !allowed &&
+          unpaywall?.is_oa &&
+          urlContainsDoiAndTrustedHost(url, cleanDoi)
+        ) {
           allowed = true;
         }
       }
@@ -2869,10 +3071,15 @@ router.get("/search/pdf-proxy", async (req, res) => {
   } catch (err) {
     const status = err.response?.status;
     const is403 = status === 403;
-    console.warn("PDF proxy error:", err?.message, is403 ? "(publisher blocked)" : "");
+    console.warn(
+      "PDF proxy error:",
+      err?.message,
+      is403 ? "(publisher blocked)" : "",
+    );
     if (is403) {
       return res.status(403).json({
-        error: "Publisher blocks embedded viewing. Use Open in new tab to read the PDF.",
+        error:
+          "Publisher blocks embedded viewing. Use Open in new tab to read the PDF.",
       });
     }
     res.status(502).json({ error: "Failed to fetch PDF" });
@@ -2880,10 +3087,13 @@ router.get("/search/pdf-proxy", async (req, res) => {
 });
 
 // Endpoint to fetch simplified publication details by ID and optional source
+// ?audience=researcher for researcher-friendly (technical terms, concise) | patient (default) for plain language
 router.get("/search/publication/:pmid/simplified", async (req, res) => {
   try {
     const { pmid: idParam } = req.params;
     const source = (req.query.source || "pubmed").trim();
+    const audience = (req.query.audience || "patient").toLowerCase();
+    const validAudience = audience === "researcher" ? "researcher" : "patient";
     const cleanPmid = (idParam || "").trim();
 
     if (!cleanPmid) {
@@ -2899,8 +3109,11 @@ router.get("/search/publication/:pmid/simplified", async (req, res) => {
       });
     }
 
-    // Simplify publication details using AI
-    const simplifiedResult = await simplifyPublicationDetails(publication);
+    // Simplify publication details using AI (researcher = technical terms; patient = plain language)
+    const simplifiedResult = await simplifyPublicationDetails(
+      publication,
+      validAudience,
+    );
 
     res.json({
       publication: simplifiedResult.publication,

@@ -6,6 +6,7 @@ import { User } from "../models/User.js";
 import { fetchFullORCIDProfile } from "../services/orcid.service.js";
 import { fetchPageMetadata } from "../services/adminPageMetadata.service.js";
 import { SearchLimit } from "../models/SearchLimit.js";
+import { IPLimit } from "../models/IPLimit.js";
 import { ForumCategory } from "../models/ForumCategory.js";
 import { Thread } from "../models/Thread.js";
 import { Reply } from "../models/Reply.js";
@@ -706,18 +707,28 @@ router.delete("/admin/experts/:id", verifyAdmin, async (req, res) => {
 // SEARCH LIMIT MANAGEMENT ENDPOINTS (FOR TESTING)
 // ============================================
 
-// Reset all search limits (token-based)
+// Reset all search limits (deviceId-based IPLimit + legacy SearchLimit)
 router.post("/admin/search/reset-all", verifyAdmin, async (req, res) => {
   try {
-    const result = await SearchLimit.updateMany(
-      {},
-      { $set: { searchCount: 0, lastSearchAt: null } },
-    );
+    const [ipLimitResult, searchLimitResult] = await Promise.all([
+      IPLimit.updateMany(
+        {},
+        { $set: { searchCount: 0, lastSearchAt: null } },
+      ),
+      SearchLimit.updateMany(
+        {},
+        { $set: { searchCount: 0, lastSearchAt: null } },
+      ),
+    ]);
+
+    const totalReset = ipLimitResult.modifiedCount + searchLimitResult.modifiedCount;
 
     res.json({
       success: true,
       message: "Reset all search limits successfully",
-      recordsReset: result.modifiedCount,
+      recordsReset: totalReset,
+      deviceLimitsReset: ipLimitResult.modifiedCount,
+      tokenLimitsReset: searchLimitResult.modifiedCount,
     });
   } catch (error) {
     console.error("Error resetting search limits:", error);
@@ -733,8 +744,17 @@ router.get("/admin/search/config", verifyAdmin, async (req, res) => {
       10,
     );
 
-    // Get statistics
-    const [tokenCount, totalSearches] = await Promise.all([
+    // Statistics for deviceId-based limits (IPLimit) + legacy SearchLimit
+    const [
+      deviceCount,
+      deviceTotalSearches,
+      tokenCount,
+      tokenTotalSearches,
+    ] = await Promise.all([
+      IPLimit.countDocuments({}),
+      IPLimit.aggregate([
+        { $group: { _id: null, total: { $sum: "$searchCount" } } },
+      ]),
       SearchLimit.countDocuments({}),
       SearchLimit.aggregate([
         { $group: { _id: null, total: { $sum: "$searchCount" } } },
@@ -744,9 +764,13 @@ router.get("/admin/search/config", verifyAdmin, async (req, res) => {
     res.json({
       maxFreeSearches: MAX_FREE_SEARCHES,
       statistics: {
-        anonymousTokens: {
+        deviceLimits: {
+          total: deviceCount,
+          totalSearches: deviceTotalSearches[0]?.total || 0,
+        },
+        legacyTokenLimits: {
           total: tokenCount,
-          totalSearches: totalSearches[0]?.total || 0,
+          totalSearches: tokenTotalSearches[0]?.total || 0,
         },
       },
     });

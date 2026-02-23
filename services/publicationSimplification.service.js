@@ -121,10 +121,11 @@ No extra text, no explanations, no quotes.`;
 }
 
 /**
- * Simplify publication details using AI to convert complex medical/scientific language
- * into high school level plain language
+ * Simplify publication details using AI.
+ * @param {Object} publication - The publication to simplify
+ * @param {string} [audience='patient'] - 'patient' = plain language, high school level; 'researcher' = clear, structured, technical terms retained
  */
-export async function simplifyPublicationDetails(publication) {
+export async function simplifyPublicationDetails(publication, audience = "patient") {
   if (!publication) {
     return null;
   }
@@ -137,6 +138,8 @@ export async function simplifyPublicationDetails(publication) {
       publication: publication,
     };
   }
+
+  const isResearcher = audience === "researcher";
 
   try {
     const modelName = "gemini-2.5-flash-lite";
@@ -158,7 +161,31 @@ export async function simplifyPublicationDetails(publication) {
         : publication.keywords || "",
     };
 
-    const prompt = `You are a medical communication expert. Your task is to simplify this research publication information into plain, easy-to-understand language that a high school student could understand. Use simple words, short sentences, and avoid medical jargon.
+    const prompt = isResearcher
+      ? `You are a medical research expert. Clarify and structure this research publication for researchers and clinicians. Use appropriate technical terminology, retain key scientific terms, and be concise. Not lay language, but not dense raw text either—strike a balance: clear structure, professional tone, appropriate jargon.
+
+Return a JSON object with the following structure:
+{
+  "abstract": "Structured summary of the abstract (2-4 sentences). Clarify the research question, design, and main findings using appropriate technical terms.",
+  "methods": "Concise description of methodology—design, sample, interventions, endpoints. Use standard research terminology.",
+  "results": "Key findings with relevant outcomes, effect sizes, or statistics where applicable.",
+  "conclusion": "Clinical/scientific implications and significance (2-3 sentences).",
+  "keyTakeaways": "3-5 bullet points summarizing the most important scientific findings. Use professional language.",
+  "whatThisMeansForYou": "Brief relevance for clinical practice or future research (2-3 sentences)."
+}
+
+RULES: Use technical terminology where appropriate. Be concise. No unnecessary simplification of scientific terms. Professional tone.
+
+Publication Information:
+Title: ${pubInfo.title}
+Abstract: ${pubInfo.abstract}
+Journal: ${pubInfo.journal}
+Authors: ${pubInfo.authors}
+Year: ${pubInfo.year}
+Keywords: ${pubInfo.keywords}
+
+Return ONLY valid JSON, no markdown formatting, no code blocks.`
+      : `You are a medical communication expert. Your task is to simplify this research publication information into plain, easy-to-understand language that a high school student could understand. Use simple words, short sentences, and avoid medical jargon.
 
 Return a JSON object with the following structure:
 {

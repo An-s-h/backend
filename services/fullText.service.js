@@ -21,7 +21,9 @@ import * as cheerio from "cheerio";
 import sanitizeHtml from "sanitize-html";
 
 const UNPAYWALL_EMAIL =
-  process.env.UNPAYWALL_EMAIL || process.env.OPENALEX_MAILTO || "support@curalink.org";
+  process.env.UNPAYWALL_EMAIL ||
+  process.env.OPENALEX_MAILTO ||
+  "support@curalink.org";
 
 const cache = new Map();
 const CACHE_TTL_MS = 1000 * 60 * 60; // 1 hour for full-text
@@ -186,7 +188,8 @@ function parsePmcXml(xmlString) {
         for (let i = 0; i < divs.length; i++) {
           const div = divs[i];
           const t = div.getElementsByTagName("title")[0];
-          const label = div.getAttribute("id") || (t?.textContent?.trim()) || `Part ${i + 1}`;
+          const label =
+            div.getAttribute("id") || t?.textContent?.trim() || `Part ${i + 1}`;
           const text = div.textContent?.trim();
           if (text) sections.push({ label, content: text });
         }
@@ -247,7 +250,7 @@ function isAllowedHtmlUrl(url) {
     const u = new URL(url);
     const host = u.hostname.toLowerCase();
     return HTML_FETCH_ALLOWED_HOSTS.some(
-      (h) => host === h || host.endsWith("." + h)
+      (h) => host === h || host.endsWith("." + h),
     );
   } catch {
     return false;
@@ -283,7 +286,9 @@ async function fetchHtmlArticle(htmlUrl) {
     if (!html || typeof html !== "string") return null;
 
     const $ = cheerio.load(html);
-    $("script, style, nav, header, footer, aside, .sidebar, .nav, .menu, .ad, .ads, [role='navigation']").remove();
+    $(
+      "script, style, nav, header, footer, aside, .sidebar, .nav, .menu, .ad, .ads, [role='navigation']",
+    ).remove();
     let content = "";
     const selectors = [
       "article",
@@ -386,7 +391,8 @@ async function fetchHtmlArticle(htmlUrl) {
 
     const out = {
       source: "html",
-      title: $("title").text()?.trim() || $("h1").first().text()?.trim() || null,
+      title:
+        $("title").text()?.trim() || $("h1").first().text()?.trim() || null,
       sections: [{ label: "Full article", content: cleanHtml, isHtml: true }],
     };
     setCache(key, out);
@@ -430,7 +436,11 @@ async function fetchEuropePmcArticle(pmidOrDoi) {
 /**
  * Determine access level for display.
  */
-export function getAccessLevel(publication, unpaywallResult, fullTextAvailable) {
+export function getAccessLevel(
+  publication,
+  unpaywallResult,
+  fullTextAvailable,
+) {
   const source = (publication?.source || "").toLowerCase();
 
   if (source === "arxiv") {

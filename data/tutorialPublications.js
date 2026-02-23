@@ -1,0 +1,73 @@
+/**
+ * Pre-loaded hypertension publication results for the Publications page tutorial.
+ * Returned by GET /api/search/publications/tutorial so the tour always shows the same content
+ * without calling PubMed/OpenAlex or using search limits.
+ */
+export const TUTORIAL_PUBLICATIONS = [
+  {
+    pmid: "38272345",
+    id: "38272345",
+    title: "Hypertension and cardiovascular risk: a focus on dietary and lifestyle factors.",
+    abstract: "Hypertension remains a leading modifiable risk factor for cardiovascular disease. This review summarizes evidence on dietary patterns, sodium reduction, physical activity, and weight management in the prevention and control of hypertension, with implications for clinical practice and public health.",
+    authors: ["Smith J", "Johnson A", "Williams R"],
+    year: "2024",
+    journal: "Current Hypertension Reports",
+    source: "pubmed",
+    citationCount: 42,
+  },
+  {
+    pmid: "38123456",
+    id: "38123456",
+    title: "Resistant hypertension: definition, prevalence, and treatment strategies.",
+    abstract: "Resistant hypertension is defined as blood pressure that remains above goal despite concurrent use of three antihypertensive agents. We discuss updated prevalence estimates, diagnostic workup, and evidence-based treatment options including lifestyle modification and device-based therapies.",
+    authors: ["Brown K", "Davis M", "Miller L"],
+    year: "2024",
+    journal: "Journal of Human Hypertension",
+    source: "pubmed",
+    citationCount: 28,
+  },
+  {
+    pmid: "37987654",
+    id: "37987654",
+    title: "Salt sensitivity of blood pressure: mechanisms and clinical relevance.",
+    abstract: "Salt sensitivity varies widely among individuals and contributes to hypertension in a subset of patients. This article reviews genetic and environmental determinants, assessment methods, and personalized approaches to dietary sodium counseling in hypertensive and normotensive adults.",
+    authors: ["Garcia P", "Martinez S", "Lopez F"],
+    year: "2023",
+    journal: "American Journal of Hypertension",
+    source: "pubmed",
+    citationCount: 35,
+  },
+  {
+    pmid: "37890123",
+    id: "37890123",
+    title: "Blood pressure targets in older adults with hypertension: an updated meta-analysis.",
+    abstract: "We conducted a systematic review and meta-analysis of randomized trials comparing intensive versus standard systolic blood pressure targets in adults aged 60 years and older. Outcomes included cardiovascular events, mortality, and adverse effects.",
+    authors: ["Anderson T", "Thomas N", "Clark E"],
+    year: "2023",
+    journal: "Hypertension",
+    source: "pubmed",
+    citationCount: 51,
+  },
+  {
+    pmid: "37765432",
+    id: "37765432",
+    title: "Digital health interventions for hypertension self-management: effectiveness and adherence.",
+    abstract: "Mobile applications, home blood pressure monitoring, and telehealth have expanded options for hypertension management. This review evaluates the effectiveness of digital interventions on blood pressure control and medication adherence in adults with hypertension.",
+    authors: ["Wilson H", "Taylor O", "Lee C"],
+    year: "2023",
+    journal: "Journal of the American Heart Association",
+    source: "pubmed",
+    citationCount: 19,
+  },
+  {
+    pmid: "37654321",
+    id: "37654321",
+    title: "Hypertension in pregnancy: screening, diagnosis, and management.",
+    abstract: "Hypertensive disorders of pregnancy remain a major cause of maternal and perinatal morbidity. We provide an evidence-based overview of screening recommendations, diagnostic criteria for preeclampsia and chronic hypertension in pregnancy, and treatment algorithms.",
+    authors: ["Rodriguez A", "Kim Y", "Patel D"],
+    year: "2023",
+    journal: "Obstetrics & Gynecology",
+    source: "pubmed",
+    citationCount: 33,
+  },
+];

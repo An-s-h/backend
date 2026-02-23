@@ -1,6 +1,6 @@
 import { IPLimit } from "../models/IPLimit.js";
 
-// Configuration - Strict limit of 6 searches per browser/device (hardcoded to ensure strictness)
+// Configuration - Lenient limit of 6 searches per device (fail open when deviceId missing)
 const MAX_FREE_SEARCHES = 6;
 
 /**
@@ -36,16 +36,13 @@ export async function checkSearchLimit(req, res = null) {
   const deviceId = getDeviceIdentifier(req);
 
   if (!deviceId) {
-    // If we can't get device identifier, block to be strict
-    console.warn(
-      "[SearchLimit] Failed to get deviceId - blocking request"
-    );
+    // Lenient: fail open - allow search (e.g. incognito, no x-device-id)
     return {
-      canSearch: false,
-      remaining: 0,
-      action: "BLOCKED",
-      message: "Unable to verify request. Please try again.",
-      showSignUpPrompt: true,
+      canSearch: true,
+      remaining: MAX_FREE_SEARCHES,
+      action: "NO_DEVICE_ID",
+      message: null,
+      showSignUpPrompt: false,
     };
   }
 
@@ -113,13 +110,6 @@ export async function checkSearchLimit(req, res = null) {
     }
 
     // Allow search
-    if (process.env.NODE_ENV !== "production") {
-      const idDisplay = `deviceId=${deviceId.substring(0, 12)}...`;
-      console.log(
-        `[SearchLimit] ALLOWED: ${idDisplay}, count=${searchCount}, remaining=${remaining}`
-      );
-    }
-
     return {
       canSearch: true,
       remaining,
@@ -130,12 +120,12 @@ export async function checkSearchLimit(req, res = null) {
     };
   } catch (error) {
     console.error("[SearchLimit] Error checking limit:", error);
-    // Fail closed - block request if there's an error (strict mode)
+    // Lenient: fail open - allow search on error
     return {
-      canSearch: false,
-      remaining: 0,
-      action: "ERROR",
-      message: "An error occurred. Please try again later.",
+      canSearch: true,
+      remaining: MAX_FREE_SEARCHES,
+      action: "ERROR_FALLBACK",
+      message: null,
       showSignUpPrompt: false,
     };
   }

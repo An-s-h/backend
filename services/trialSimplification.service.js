@@ -309,10 +309,11 @@ Return ONLY a numbered list (1-${uncachedTrials.length}), one simplified title p
 }
 
 /**
- * Simplify trial details using AI to convert complex medical language
- * into high school level plain language
+ * Simplify trial details using AI.
+ * @param {Object} trial - The trial to simplify
+ * @param {string} [audience='patient'] - 'patient' = plain language, high school level; 'researcher' = clear, structured, technical terms retained
  */
-export async function simplifyTrialDetails(trial) {
+export async function simplifyTrialDetails(trial, audience = "patient") {
   if (!trial) {
     return null;
   }
@@ -361,7 +362,42 @@ export async function simplifyTrialDetails(trial) {
       status: trial.status || "Unknown",
     };
 
-    const prompt = `You are a medical communication expert. Your task is to simplify this clinical trial information into plain, easy-to-understand language that a high school student could understand. Use simple words, short sentences, and avoid medical jargon.
+    const isResearcher = audience === "researcher";
+
+    const prompt = isResearcher
+      ? `You are a medical research expert. Clarify and structure this clinical trial information for researchers and clinicians. Use appropriate technical terminology, retain key clinical terms, and be concise. Not lay language, but not dense raw text either—strike a balance: clear structure, professional tone, appropriate jargon.
+
+Return a JSON object with the following structure:
+{
+  "title": "Clear, concise trial title (10-15 words). Keep technical terms where appropriate.",
+  "studyPurpose": "Structured summary of study objectives and design (2-3 sentences). Use clinical/research terminology.",
+  "eligibilityCriteria": {
+    "summary": "Concise eligibility overview for researchers.",
+    "gender": "Gender criteria (e.g., 'All', 'Male', 'Female').",
+    "ageRange": "Age range (e.g., '18-65 years', '18 Years and older').",
+    "volunteers": "Healthy volunteer status (e.g., 'Accepts healthy volunteers', 'No').",
+    "detailedCriteria": "Structured eligibility: inclusion and exclusion criteria. Format clearly with proper medical terminology. Keep criteria technically accurate. Use bullet points or short paragraphs."
+  },
+  "conditionsStudied": "Conditions or diseases under study. Use MeSH/standard terms where appropriate.",
+  "whatToExpect": "Study procedures, visits, interventions, and timeline in concise clinical terms (2-3 sentences)."
+}
+
+RULES: Use technical terminology where appropriate. Be concise. No unnecessary simplification. Professional tone.
+
+Trial Information:
+Title: ${trialInfo.title}
+Description: ${trialInfo.description}
+Eligibility Criteria: ${trialInfo.eligibility.criteria}
+Gender: ${trialInfo.eligibility.gender}
+Age Range: ${trialInfo.eligibility.minimumAge} to ${trialInfo.eligibility.maximumAge}
+Healthy Volunteers: ${trialInfo.eligibility.healthyVolunteers}
+Study Population: ${trialInfo.eligibility.population}
+Conditions: ${trialInfo.conditions.join(", ")}
+Phase: ${trialInfo.phase}
+Status: ${trialInfo.status}
+
+Return ONLY valid JSON, no markdown formatting, no code blocks.`
+      : `You are a medical communication expert. Your task is to simplify this clinical trial information into plain, easy-to-understand language that a high school student could understand. Use simple words, short sentences, and avoid medical jargon.
 
 Return a JSON object with the following structure:
 {
