@@ -11,6 +11,7 @@ import {
 } from "../services/matching.service.js";
 import { extractBiomarkers } from "../services/medicalTerminology.service.js";
 import { batchSimplifyTrialTitles } from "../services/trialSimplification.service.js";
+import { batchSimplifyPublicationTitles } from "../services/summary.service.js";
 
 const router = Router();
 
@@ -200,6 +201,13 @@ router.get("/recommendations/:userId", async (req, res) => {
     // This ensures we get top results sorted by match percentage
     const batchSize = 500;
 
+    // Dashboard: publications from last 3 months only; trials from last 3 months and RECRUITING
+    const dashboardPublicationsMonths = 3;
+    const dashboardTrialsMonths = 3;
+    const cutoffPub = new Date();
+    cutoffPub.setMonth(cutoffPub.getMonth() - dashboardPublicationsMonths);
+    const pubMindate = `${cutoffPub.getFullYear()}/${String(cutoffPub.getMonth() + 1).padStart(2, "0")}`;
+
     // Fetch all data in parallel for better performance
     // For trials, use the same logic as search route: fetch large batch, calculate matches, sort, then limit
     // Wrap each promise with error handling to prevent crashes
@@ -208,17 +216,23 @@ router.get("/recommendations/:userId", async (req, res) => {
         searchClinicalTrials({
           q: primaryTopic,
           location: locationForTrials,
-          status: "RECRUITING", // Keep RECRUITING filter for recommendations
+          status: "RECRUITING", // Dashboard default: recruiting only
           biomarkers, // Pass extracted biomarkers (same as search route)
           page: 1, // Always fetch from page 1 for the batch
           pageSize: batchSize, // Fetch larger batch for sorting
+          recentMonths: dashboardTrialsMonths, // Dashboard: only trials updated in last 3 months
         }).catch((error) => {
           console.error("Error fetching clinical trials:", error);
           return { items: [], totalCount: 0, hasMore: false };
         }),
-        // Fetch more publications to ensure we have at least 9 after filtering by abstract
-        // Similar to search route, fetch a larger batch to account for filtering
-        searchPubMed({ q: pubmedQuery, page: 1, pageSize: 50 }).catch(
+        // Dashboard: publications from last 3 months only (mindate so only specified timeline)
+        searchPubMed({
+          q: pubmedQuery,
+          mindate: pubMindate,
+          maxdate: "",
+          page: 1,
+          pageSize: 50,
+        }).catch(
           (error) => {
             console.error("Error fetching PubMed publications:", error);
             return {
@@ -364,6 +378,34 @@ router.get("/recommendations/:userId", async (req, res) => {
       .sort((a, b) => (b.matchPercentage || 0) - (a.matchPercentage || 0))
       .slice(0, 9); // Limit to top 9 publications with highest match percentage
 
+    // Simplify publication titles for patients (same as Publications page / search route)
+    let publicationsWithSimplifiedTitles = sortedPublications;
+    if (!isResearcher) {
+      try {
+        const pubTitles = sortedPublications.map((p) => p.title || "");
+        const simplifiedPubTitles =
+          await batchSimplifyPublicationTitles(pubTitles);
+        publicationsWithSimplifiedTitles = sortedPublications.map(
+          (pub, index) => ({
+            ...pub,
+            simplifiedTitle:
+              simplifiedPubTitles[index] || pub.title || "Untitled Publication",
+          }),
+        );
+      } catch (error) {
+        console.error("Error batch simplifying publication titles:", error);
+        publicationsWithSimplifiedTitles = sortedPublications.map((pub) => ({
+          ...pub,
+          simplifiedTitle: pub.title || "Untitled Publication",
+        }));
+      }
+    } else {
+      publicationsWithSimplifiedTitles = sortedPublications.map((pub) => ({
+        ...pub,
+        simplifiedTitle: pub.title || "Untitled Publication",
+      }));
+    }
+
     const expertsWithMatch = experts.map((expert) => {
       const match = calculateExpertMatch(expert, profile);
       return {
@@ -385,7 +427,7 @@ router.get("/recommendations/:userId", async (req, res) => {
     // Build the complete recommendations response
     const recommendations = {
       trials: trialsWithSimplifiedTitles, // Use trials with simplified titles
-      publications: sortedPublications, // Use sorted publications instead of unsorted
+      publications: publicationsWithSimplifiedTitles, // Use publications with simplified titles (patients)
       experts: expertsWithMatch,
       globalExperts: globalExpertsWithMatch,
     };
