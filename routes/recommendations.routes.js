@@ -12,70 +12,13 @@ import {
 import { extractBiomarkers } from "../services/medicalTerminology.service.js";
 import { batchSimplifyTrialTitles } from "../services/trialSimplification.service.js";
 import { batchSimplifyPublicationTitles } from "../services/summary.service.js";
+import {
+  getRecommendationsCache,
+  setRecommendationsCache,
+  clearRecommendationsCache,
+} from "../services/recommendationsCache.js";
 
 const router = Router();
-
-// Cache for recommendations data per user
-const recommendationsCache = new Map();
-const RECOMMENDATIONS_CACHE_TTL_MS = 1000 * 60 * 30; // 30 minutes cache
-
-function getRecommendationsCache(userId) {
-  const key = `recommendations:${userId}`;
-  const item = recommendationsCache.get(key);
-  if (!item) return null;
-  if (Date.now() > item.expires) {
-    recommendationsCache.delete(key);
-    return null;
-  }
-  return item.value;
-}
-
-function setRecommendationsCache(userId, value) {
-  const key = `recommendations:${userId}`;
-  recommendationsCache.set(key, {
-    value,
-    expires: Date.now() + RECOMMENDATIONS_CACHE_TTL_MS,
-  });
-
-  // Cleanup old cache entries if cache gets too large (prevent memory leaks)
-  if (recommendationsCache.size > 100) {
-    const now = Date.now();
-    const keysToDelete = [];
-    for (const [k, v] of recommendationsCache.entries()) {
-      if (now > v.expires) {
-        keysToDelete.push(k);
-      }
-    }
-    // Delete expired entries
-    keysToDelete.forEach((k) => recommendationsCache.delete(k));
-
-    // If still too large, remove oldest entries (FIFO)
-    if (recommendationsCache.size > 100) {
-      const entries = Array.from(recommendationsCache.entries());
-      entries.sort((a, b) => a[1].expires - b[1].expires);
-      const toRemove = entries.slice(0, entries.length - 100);
-      toRemove.forEach(([k]) => recommendationsCache.delete(k));
-    }
-  }
-}
-
-// Periodic cleanup of expired cache entries (every 10 minutes)
-setInterval(
-  () => {
-    const now = Date.now();
-    const keysToDelete = [];
-    for (const [k, v] of recommendationsCache.entries()) {
-      if (now > v.expires) {
-        keysToDelete.push(k);
-      }
-    }
-    keysToDelete.forEach((k) => recommendationsCache.delete(k));
-    if (keysToDelete.length > 0) {
-      console.log(`Cleaned up ${keysToDelete.length} expired cache entries`);
-    }
-  },
-  1000 * 60 * 10,
-); // Every 10 minutes
 
 // Get all researchers (for dashboards)
 router.get("/researchers", async (req, res) => {
@@ -133,12 +76,37 @@ router.get("/recommendations/:userId", async (req, res) => {
     let topics = [];
     if (profile?.role === "patient") {
       topics = profile?.patient?.conditions || [];
+      const indices = profile?.patient?.primaryConditionIndices;
+      if (
+        Array.isArray(indices) &&
+        indices.length >= 1 &&
+        indices.length <= 2 &&
+        topics.length > 0
+      ) {
+        const selected = indices
+          .filter((i) => i >= 0 && i < topics.length)
+          .map((i) => topics[i])
+          .filter(Boolean);
+        if (selected.length > 0) topics = selected;
+      }
     } else if (profile?.role === "researcher") {
-      // For researchers, use ALL interests (not just the first one)
       topics =
         profile?.researcher?.interests ||
         profile?.researcher?.specialties ||
         [];
+      const indices = profile?.researcher?.primaryInterestIndices;
+      if (
+        Array.isArray(indices) &&
+        indices.length >= 1 &&
+        indices.length <= 2 &&
+        topics.length > 0
+      ) {
+        const selected = indices
+          .filter((i) => i >= 0 && i < topics.length)
+          .map((i) => topics[i])
+          .filter(Boolean);
+        if (selected.length > 0) topics = selected;
+      }
     }
 
     // For researchers with multiple interests, combine them for better search results
@@ -451,9 +419,7 @@ router.delete("/recommendations/cache/:userId", async (req, res) => {
   const { userId } = req.params;
 
   try {
-    const key = `recommendations:${userId}`;
-    const hadCache = recommendationsCache.has(key);
-    recommendationsCache.delete(key);
+    const hadCache = clearRecommendationsCache(userId);
 
     res.json({
       success: true,
@@ -465,6 +431,284 @@ router.delete("/recommendations/cache/:userId", async (req, res) => {
   } catch (error) {
     console.error("Error clearing cache:", error);
     res.status(500).json({ error: "Failed to clear cache" });
+  }
+});
+
+// GET /recommendations/:userId/section?type=trials|publications|experts
+// Fetches only one section (no cache) for dashboard refresh: active section first, others in background.
+router.get("/recommendations/:userId/section", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const type = (req.query.type || "").toLowerCase();
+    if (!["trials", "publications", "experts"].includes(type)) {
+      return res.status(400).json({
+        error: "Invalid type",
+        message: "type must be one of: trials, publications, experts",
+      });
+    }
+
+    const profile = await Profile.findOne({ userId }).lean();
+    let topics = [];
+    if (profile?.role === "patient") {
+      topics = profile?.patient?.conditions || [];
+      const indices = profile?.patient?.primaryConditionIndices;
+      if (
+        Array.isArray(indices) &&
+        indices.length >= 1 &&
+        indices.length <= 2 &&
+        topics.length > 0
+      ) {
+        const selected = indices
+          .filter((i) => i >= 0 && i < topics.length)
+          .map((i) => topics[i])
+          .filter(Boolean);
+        if (selected.length > 0) topics = selected;
+      }
+    } else if (profile?.role === "researcher") {
+      topics =
+        profile?.researcher?.interests ||
+        profile?.researcher?.specialties ||
+        [];
+      const indices = profile?.researcher?.primaryInterestIndices;
+      if (
+        Array.isArray(indices) &&
+        indices.length >= 1 &&
+        indices.length <= 2 &&
+        topics.length > 0
+      ) {
+        const selected = indices
+          .filter((i) => i >= 0 && i < topics.length)
+          .map((i) => topics[i])
+          .filter(Boolean);
+        if (selected.length > 0) topics = selected;
+      }
+    }
+    const primaryTopic = topics[0] || "oncology";
+    const combinedQuery =
+      topics.length > 1 ? topics.join(" OR ") : primaryTopic;
+
+    const userLocation =
+      profile?.patient?.location || profile?.researcher?.location;
+    let locationForTrials = null;
+    let locationStringForExperts = null;
+    if (userLocation) {
+      if (userLocation.country) locationForTrials = userLocation.country;
+      const locationParts = [
+        userLocation.city,
+        userLocation.state,
+        userLocation.country,
+      ].filter(Boolean);
+      locationStringForExperts =
+        locationParts.length > 0
+          ? locationParts.join(", ")
+          : userLocation.country || null;
+    }
+
+    let biomarkers = [];
+    if (profile?.patient?.conditions) {
+      const s = profile.patient.conditions.join(" ");
+      if (s) biomarkers.push(...extractBiomarkers(s));
+    }
+    if (profile?.patient?.keywords) {
+      const s = profile.patient.keywords.join(" ");
+      if (s) biomarkers.push(...extractBiomarkers(s));
+    }
+    biomarkers = [...new Set(biomarkers)];
+
+    const batchSize = 500;
+    const dashboardPublicationsMonths = 3;
+    const dashboardTrialsMonths = 3;
+    const cutoffPub = new Date();
+    cutoffPub.setMonth(cutoffPub.getMonth() - dashboardPublicationsMonths);
+    const pubMindate = `${cutoffPub.getFullYear()}/${String(cutoffPub.getMonth() + 1).padStart(2, "0")}`;
+    const isResearcher = profile?.role === "researcher";
+
+    if (type === "trials") {
+      const trialsResult = await searchClinicalTrials({
+        q: primaryTopic,
+        location: locationForTrials,
+        status: "RECRUITING",
+        biomarkers,
+        page: 1,
+        pageSize: batchSize,
+        recentMonths: dashboardTrialsMonths,
+      }).catch((err) => {
+        console.error("Error fetching trials section:", err);
+        return { items: [], totalCount: 0, hasMore: false };
+      });
+      const allTrials = trialsResult?.items || [];
+      const trialsWithMatch = allTrials.map((trial) => {
+        const match = calculateTrialMatch(trial, profile);
+        return {
+          ...trial,
+          matchPercentage: match.matchPercentage,
+          matchExplanation: match.matchExplanation,
+        };
+      });
+      const sortedTrials = trialsWithMatch.sort(
+        (a, b) => (b.matchPercentage || -1) - (a.matchPercentage || -1),
+      );
+      const topTrials = sortedTrials.slice(0, 9);
+      let trialsWithSimplifiedTitles;
+      if (isResearcher) {
+        trialsWithSimplifiedTitles = topTrials.map((t) => ({
+          ...t,
+          simplifiedTitle: t.title,
+        }));
+      } else {
+        try {
+          const simplifiedTitles = await batchSimplifyTrialTitles(topTrials);
+          trialsWithSimplifiedTitles = topTrials.map((t, i) => ({
+            ...t,
+            simplifiedTitle: simplifiedTitles[i] || t.title,
+          }));
+        } catch {
+          trialsWithSimplifiedTitles = topTrials.map((t) => ({
+            ...t,
+            simplifiedTitle: t.title,
+          }));
+        }
+      }
+      return res.json({ trials: trialsWithSimplifiedTitles });
+    }
+
+    if (type === "publications") {
+      const publicationsResult = await searchPubMed({
+        q: combinedQuery,
+        mindate: pubMindate,
+        maxdate: "",
+        page: 1,
+        pageSize: 50,
+      }).catch((err) => {
+        console.error("Error fetching publications section:", err);
+        return {
+          items: [],
+          totalCount: 0,
+          page: 1,
+          pageSize: 50,
+          hasMore: false,
+        };
+      });
+      const publications = (publicationsResult?.items || []).filter(
+        (pub) => pub.abstract && pub.abstract.trim().length > 0,
+      );
+      const publicationsWithMatch = publications.map((pub) => {
+        const match = calculatePublicationMatch(pub, profile);
+        return {
+          ...pub,
+          matchPercentage: match.matchPercentage,
+          matchExplanation: match.matchExplanation,
+        };
+      });
+      const sortedPublications = publicationsWithMatch
+        .sort((a, b) => (b.matchPercentage || 0) - (a.matchPercentage || 0))
+        .slice(0, 9);
+      let publicationsWithSimplifiedTitles = sortedPublications;
+      if (!isResearcher) {
+        try {
+          const pubTitles = sortedPublications.map((p) => p.title || "");
+          const simplifiedPubTitles =
+            await batchSimplifyPublicationTitles(pubTitles);
+          publicationsWithSimplifiedTitles = sortedPublications.map((p, i) => ({
+            ...p,
+            simplifiedTitle:
+              simplifiedPubTitles[i] || p.title || "Untitled Publication",
+          }));
+        } catch {
+          publicationsWithSimplifiedTitles = sortedPublications.map((p) => ({
+            ...p,
+            simplifiedTitle: p.title || "Untitled Publication",
+          }));
+        }
+      } else {
+        publicationsWithSimplifiedTitles = sortedPublications.map((p) => ({
+          ...p,
+          simplifiedTitle: p.title || "Untitled Publication",
+        }));
+      }
+      return res.json({ publications: publicationsWithSimplifiedTitles });
+    }
+
+    // type === "experts"
+    const [globalExperts, researcherProfiles] = await Promise.all([
+      findDeterministicExperts(
+        primaryTopic,
+        locationStringForExperts || null,
+        1,
+        6,
+        {
+          limitOpenAlexProfiles: true,
+          skipAISummaries: true,
+        },
+      ).catch((err) => {
+        console.error("Error fetching global experts section:", err);
+        return {
+          experts: [],
+          totalFound: 0,
+          page: 1,
+          pageSize: 6,
+          hasMore: false,
+        };
+      }),
+      Profile.find({ role: "researcher" })
+        .populate("userId", "username email")
+        .lean(),
+    ]);
+
+    const globalExpertsList = globalExperts?.experts || [];
+    let experts = (researcherProfiles || [])
+      .filter((p) => {
+        if (
+          profile?.role === "researcher" &&
+          p.userId?._id?.toString() === userId
+        )
+          return false;
+        return p.userId && p.researcher && p.researcher.isVerified === true;
+      })
+      .map((p) => {
+        const user = p.userId;
+        const researcher = p.researcher || {};
+        return {
+          _id: p.userId._id || p.userId.id,
+          userId: p.userId._id || p.userId.id,
+          name: user.username || "Unknown Researcher",
+          email: user.email,
+          orcid: researcher.orcid || null,
+          bio: researcher.bio || null,
+          location: researcher.location || null,
+          specialties: researcher.specialties || [],
+          interests: researcher.interests || [],
+          available: researcher.available || false,
+          isVerified: researcher.isVerified || false,
+        };
+      });
+
+    const expertsWithMatch = experts.map((expert) => {
+      const match = calculateExpertMatch(expert, profile);
+      return {
+        ...expert,
+        matchPercentage: match.matchPercentage,
+        matchExplanation: match.matchExplanation,
+      };
+    });
+    const globalExpertsWithMatch = (globalExpertsList || []).map((expert) => {
+      const match = calculateExpertMatch(expert, profile);
+      return {
+        ...expert,
+        matchPercentage: match.matchPercentage,
+        matchExplanation: match.matchExplanation,
+      };
+    });
+    return res.json({
+      experts: expertsWithMatch,
+      globalExperts: globalExpertsWithMatch,
+    });
+  } catch (error) {
+    console.error("Error in /recommendations/:userId/section:", error);
+    res.status(500).json({
+      error: "Failed to fetch section",
+      message: error.message,
+    });
   }
 });
 

@@ -12,6 +12,7 @@ const locationSchema = new mongoose.Schema(
 const patientSchema = new mongoose.Schema(
   {
     conditions: [{ type: String }],
+    primaryConditionIndices: [{ type: Number }], // up to 2 indices into conditions used for search query
     location: locationSchema,
     keywords: [{ type: String }],
     gender: String,
@@ -55,6 +56,7 @@ const researcherSchema = new mongoose.Schema(
     academicRank: String, // e.g. Professor, Associate Professor, etc.
     specialties: [{ type: String }],
     interests: [{ type: String }],
+    primaryInterestIndices: [{ type: Number }], // up to 2 indices into interests used for search query
     certifications: [{ type: String }],
     orcid: String,
     researchGate: String,

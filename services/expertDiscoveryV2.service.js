@@ -215,8 +215,10 @@ function computeMetricsFromOpenAlexWorks(works, expertName) {
 }
 
 function scoreExpert({ papersMetrics, trialMetrics }) {
-  // Metric weights (as requested):
-  // Recency 30%, Trial Leadership 30%, Status(last-author) 20%, Journal Impact 20%
+  // Metric weights:
+  // - Citations / impact (via avg citations + influential papers) are now the strongest factor,
+  //   so that highly cited global experts are ranked higher.
+  // - Recency and trial leadership still matter but slightly less than before.
   const recency = clamp01(papersMetrics.recentPapers2y / 6); // 6+ recent papers => strong
   const trialLeadership = clamp01(trialMetrics.leadershipCount / 3); // 3+ PI trials => strong
   const status = clamp01(papersMetrics.lastAuthor5y / 4); // 4+ last author in 5y => strong
@@ -228,7 +230,10 @@ function scoreExpert({ papersMetrics, trialMetrics }) {
   const impact = clamp01(impactRaw);
 
   const final =
-    recency * 0.3 + trialLeadership * 0.3 + status * 0.2 + impact * 0.2;
+    recency * 0.25 + // was 0.3
+    trialLeadership * 0.25 + // was 0.3
+    status * 0.2 +
+    impact * 0.3; // was 0.2
 
   return {
     scores: { recency, trialLeadership, status, impact },

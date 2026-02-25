@@ -11,28 +11,48 @@ import {
 } from "../services/summary.service.js";
 import { generateSummaryReport } from "../services/summaryReport.service.js";
 import { batchSimplifyTrialTitles } from "../services/trialSimplification.service.js";
+import { fetchPublicationById } from "../services/urlParser.service.js";
 
 const router = Router();
 
+// Build publication content in same structured form as chatbot (full abstract, keywords) for better summaries
+function buildPublicationContentForSummary(pub) {
+  const title = pub.title || "Unknown";
+  const authors = Array.isArray(pub.authors) ? pub.authors.join(", ") : (pub.authors || "Unknown");
+  const journal = pub.journal || "Unknown";
+  const year = pub.year || "";
+  const abstract = pub.abstract || pub.fullAbstract || "";
+  const keywords = Array.isArray(pub.keywords) ? pub.keywords.join(", ") : (pub.keywords || "");
+  const parts = [
+    `Title: ${title}`,
+    `Authors: ${authors}`,
+    `Journal: ${journal}${year ? ` (${year})` : ""}`,
+    abstract ? `Abstract:\n${abstract}` : "",
+    keywords ? `Keywords: ${keywords}` : "",
+  ].filter(Boolean);
+  return parts.join("\n\n");
+}
+
 router.post("/ai/summary", async (req, res) => {
-  const { text, type, trial, simplify = false } = req.body || {};
-  
+  const { text, type, trial, simplify = false, pmid } = req.body || {};
+  const publication = req.body?.publication;
+
   // For trials, generate structured summary with procedures, risks/benefits, and participant requirements
   if (type === "trial" && trial) {
     try {
       const details = await generateTrialDetails(trial, "all", simplify);
-      
+
       // Also generate a general summary
       const generalSummary = await summarizeText(text || "", type || "general", simplify);
-      
-      res.json({ 
+
+      res.json({
         summary: {
           structured: true,
           generalSummary: generalSummary,
           procedures: details.procedures,
           risksBenefits: details.risksBenefits,
           participantRequirements: details.participantRequirements,
-        }
+        },
       });
       return;
     } catch (error) {
@@ -40,7 +60,27 @@ router.post("/ai/summary", async (req, res) => {
       // Fallback to regular summary
     }
   }
-  
+
+  // For publications: when pmid is provided, fetch full publication (same as publication-detail chatbot) for richer summary
+  if (type === "publication" && (pmid || publication?.pmid || publication?.id)) {
+    const idToFetch = pmid || publication?.pmid || publication?.id;
+    try {
+      const fullPub = await fetchPublicationById(String(idToFetch));
+      if (fullPub) {
+        const fullContent = buildPublicationContentForSummary({
+          ...publication,
+          ...fullPub,
+          fullAbstract: fullPub.abstract || publication?.abstract,
+          abstract: fullPub.abstract || publication?.abstract,
+        });
+        const summary = await summarizeText(fullContent, type, simplify);
+        return res.json({ summary });
+      }
+    } catch (err) {
+      console.warn("AI summary: fetch by PMID failed, using provided text:", err?.message);
+    }
+  }
+
   const summary = await summarizeText(text || "", type || "general", simplify);
   res.json({ summary });
 });

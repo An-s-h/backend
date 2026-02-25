@@ -283,6 +283,7 @@ function extractAndAggregateAuthors(works, constraints, location = null) {
           works: [],
           totalCitations: 0,
           recentWorks: 0,
+          recentWorks1y: 0, // last 1 year (for dashboard scoring)
           recentTopicWorks: 0, // last 5 years (topic-specific)
           lastAuthorCount: 0,
           firstAuthorCount: 0,
@@ -316,6 +317,9 @@ function extractAndAggregateAuthors(works, constraints, location = null) {
       authorData.totalCitations += citationCount;
       authorData.relevanceScore += workRelevance;
 
+      if (year >= currentYear - 1) {
+        authorData.recentWorks1y++;
+      }
       if (year >= currentYear - 2) {
         authorData.recentWorks++;
       }
@@ -878,16 +882,19 @@ function calculateAuthorRecencyScore(works, currentYear) {
 /**
  * Rank authors by upgraded deterministic formula: topic works, citations, recency,
  * field relevance, senior authorship, topic dominance, PI score. Optional clinical-trial intent weighting.
+ * When forDashboard=true (Patient/Researcher dashboard only): score = last 1 year (75%) + last 2 years (25%) + citations (overall).
  * @param {Array} authors - Authors with topicWorksCount, realWorksCount, fieldRelevance, trial metrics, etc.
  * @param {string|null} location - Optional location for tie-breaking
  * @param {string|null} topic - Optional topic string to detect clinical trial intent
+ * @param {boolean} forDashboard - If true, use dashboard-only formula: 75% last 1y + 25% last 2y + overall citations
  */
-function rankAuthorsByMetrics(authors, location = null, topic = null) {
+function rankAuthorsByMetrics(authors, location = null, topic = null, forDashboard = false) {
   const searchCity = extractCityName(location);
   const searchState = extractStateName(location);
   const searchCountryCode = location ? extractCountryCode(location) : null;
   const currentYear = new Date().getFullYear();
   const clinicalTrialIntent = detectClinicalTrialIntent(topic || "");
+  const isGlobalSearch = !location; // When no location is specified, treat as "global experts"
 
   const maxRawPiScore =
     authors.length > 0
@@ -933,19 +940,81 @@ function rankAuthorsByMetrics(authors, location = null, topic = null) {
       const D = topicDominance;
       const P = piScore;
 
+      // Dashboard-only scoring (Patient & Researcher dashboard): last 1 year (75%) + last 2 years (25%) + citations (overall)
       let finalScore;
-      if (clinicalTrialIntent) {
-        finalScore =
-          0.15 * W + 0.1 * C + 0.1 * R + 0.15 * F + 0.2 * S + 0.1 * D + 0.2 * P;
+      let dashboardScores = null;
+      if (forDashboard) {
+        const last1y = author.recentWorks1y ?? (author.works || []).filter((w) => (w.year || 0) >= currentYear - 1).length;
+        const last2y = author.recentWorks ?? (author.works || []).filter((w) => (w.year || 0) >= currentYear - 2).length;
+        const last1yNorm = Math.min(1, last1y / 10);
+        const last2yNorm = Math.min(1, last2y / 15);
+        const citeNorm = Math.min(1, citationCount / 3000);
+        const recencyComponent = 0.75 * last1yNorm + 0.25 * last2yNorm;
+        finalScore = 0.5 * recencyComponent + 0.5 * citeNorm;
+        dashboardScores = {
+          works: W,
+          citations: C,
+          recency: R,
+          fieldRelevance: F,
+          seniorAuthorship: S,
+          topicDominance: D,
+          piScore: P,
+          location: 0,
+          final: finalScore,
+          dashboard: true,
+          last1y: last1y,
+          last2y: last2y,
+          last1yNorm,
+          last2yNorm,
+          citationsOverall: citationCount,
+          citeNorm,
+          recencyComponent,
+        };
+      } else if (clinicalTrialIntent) {
+        if (isGlobalSearch) {
+          // Clinical-trial intent + global experts: keep strong PI focus,
+          // but give citations extra weight.
+          finalScore =
+            0.12 * W + // topic works
+            0.22 * C + // citations (extra emphasis globally)
+            0.08 * R + // recency
+            0.13 * F + // field relevance
+            0.18 * S + // senior authorship
+            0.07 * D + // topic dominance
+            0.2 * P; // PI score
+        } else {
+          // Clinical-trial intent + location-specific
+          finalScore =
+            0.14 * W +
+            0.16 * C + // slightly higher citation weight than before
+            0.09 * R +
+            0.14 * F +
+            0.18 * S +
+            0.09 * D +
+            0.2 * P;
+        }
       } else {
-        finalScore =
-          0.2 * W +
-          0.15 * C +
-          0.15 * R +
-          0.2 * F +
-          0.15 * S +
-          0.1 * D +
-          0.05 * P;
+        if (isGlobalSearch) {
+          // Non-trial, global experts: citations are the single strongest signal.
+          finalScore =
+            0.16 * W +
+            0.3 * C + // highest weight on citations for global experts
+            0.12 * R +
+            0.16 * F +
+            0.12 * S +
+            0.09 * D +
+            0.05 * P;
+        } else {
+          // Non-trial, location-specific: moderately increase citation weight.
+          finalScore =
+            0.19 * W +
+            0.22 * C + // more weight on citations than previous 0.15
+            0.13 * R +
+            0.19 * F +
+            0.13 * S +
+            0.09 * D +
+            0.05 * P;
+        }
       }
 
       if (F < 0.4) finalScore *= 0.7;
@@ -978,9 +1047,11 @@ function rankAuthorsByMetrics(authors, location = null, topic = null) {
         locationScore = 0.3;
       }
 
+      if (dashboardScores) dashboardScores.location = locationScore;
+
       return {
         ...author,
-        scores: {
+        scores: dashboardScores || {
           works: W,
           citations: C,
           recency: R,
@@ -1442,6 +1513,7 @@ export async function findDeterministicExperts(
   options = {},
 ) {
   const { limitOpenAlexProfiles = false, skipAISummaries = false } = options;
+  const forDashboard = limitOpenAlexProfiles || skipAISummaries;
 
   try {
     console.log(
@@ -1502,12 +1574,13 @@ export async function findDeterministicExperts(
         limitOpenAlexProfiles,
       );
 
-      // Step 5: Ranking (upgraded formula: senior authorship, topic dominance, PI score; optional trial intent)
+      // Step 5: Ranking (dashboard: last 1y 75% + last 2y 25% + citations; else upgraded formula)
       console.log("Step 5: Ranking authors by metrics...");
       rankedAuthors = rankAuthorsByMetrics(
         authorCandidatesWithRealStats,
         location,
         topic,
+        forDashboard,
       );
       console.log(`Ranked ${rankedAuthors.length} authors`);
 

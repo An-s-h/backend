@@ -735,9 +735,28 @@ router.get("/search/trials", async (req, res) => {
       sortByDate,
     } = req.query;
 
+    // Fetch profile first when userId is provided (needed for deriving q/location when empty and for matching)
+    let userProfile = null;
+    if (userId) {
+      userProfile = await Profile.findOne({ userId }).lean();
+    }
+
     // Natural language → keywords (e.g. "what is the benefit of vitamins in cancer" → "vitamins cancer")
+    // When userId is set and q is empty, derive query from profile (same as dashboard/recommendations pipeline)
+    let queryFromReq = (q || "").trim();
+    if (!queryFromReq && userProfile) {
+      if (userProfile.patient?.conditions?.length) {
+        queryFromReq = userProfile.patient.conditions[0];
+      } else if (userProfile.researcher?.interests?.length) {
+        queryFromReq = userProfile.researcher.interests[0];
+      } else if (userProfile.researcher?.specialties?.length) {
+        queryFromReq = userProfile.researcher.specialties[0];
+      } else {
+        queryFromReq = "oncology";
+      }
+    }
     const searchQ =
-      naturalLanguageToSearchKeywords(q || "") || (q || "").trim();
+      naturalLanguageToSearchKeywords(queryFromReq) || queryFromReq;
 
     // Layer 3: Extract biomarkers from conditions/keywords if provided
     // Only extract if conditions are actually provided (medical interests enabled)
@@ -759,31 +778,35 @@ router.get("/search/trials", async (req, res) => {
       biomarkers = [...biomarkers, ...keywordBiomarkers];
     }
 
-    // Extract biomarkers from user profile if userId is provided (signed-in users)
-    // We'll fetch the profile here and reuse it later for matching
-    let userProfile = null;
-    if (userId) {
-      userProfile = await Profile.findOne({ userId }).lean();
-      if (userProfile) {
-        const profileConditions = userProfile.patient?.conditions || [];
-        const profileKeywords = userProfile.patient?.keywords || [];
-        const profileConditionsStr = profileConditions.join(" ");
-        const profileKeywordsStr = profileKeywords.join(" ");
+    // Extract biomarkers from user profile (already fetched above when userId set)
+    if (userProfile) {
+      const profileConditions = userProfile.patient?.conditions || [];
+      const profileKeywords = userProfile.patient?.keywords || [];
+      const profileConditionsStr = profileConditions.join(" ");
+      const profileKeywordsStr = profileKeywords.join(" ");
 
-        if (profileConditionsStr) {
-          const profileBiomarkers = extractBiomarkers(profileConditionsStr);
-          biomarkers = [...biomarkers, ...profileBiomarkers];
-        }
-        if (profileKeywordsStr) {
-          const profileKeywordBiomarkers =
-            extractBiomarkers(profileKeywordsStr);
-          biomarkers = [...biomarkers, ...profileKeywordBiomarkers];
-        }
+      if (profileConditionsStr) {
+        const profileBiomarkers = extractBiomarkers(profileConditionsStr);
+        biomarkers = [...biomarkers, ...profileBiomarkers];
+      }
+      if (profileKeywordsStr) {
+        const profileKeywordBiomarkers =
+          extractBiomarkers(profileKeywordsStr);
+        biomarkers = [...biomarkers, ...profileKeywordBiomarkers];
       }
     }
 
     // Remove duplicates
     biomarkers = [...new Set(biomarkers)];
+
+    // Use location from profile when not in query (same as dashboard/recommendations pipeline)
+    let locationForTrials = location;
+    if (!locationForTrials && userProfile) {
+      const loc =
+        userProfile.patient?.location || userProfile.researcher?.location;
+      if (loc?.country) locationForTrials = loc.country;
+      else if (typeof loc === "string") locationForTrials = loc;
+    }
 
     // Fetch a larger batch to sort by match percentage before pagination
     // This ensures results are sorted across all pages, not just within each page
@@ -792,10 +815,10 @@ router.get("/search/trials", async (req, res) => {
     // Fetch up to 500 results for sorting (covers ~83 pages with 6 results per page)
     const batchSize = Math.min(500, Math.max(100, requestedPageSize * 50));
 
-    const result = await searchClinicalTrials({
+    let result = await searchClinicalTrials({
       q: searchQ,
       status,
-      location,
+      location: locationForTrials,
       phase,
       eligibilitySex,
       eligibilityAgeMin,
@@ -806,7 +829,26 @@ router.get("/search/trials", async (req, res) => {
       recentMonths: recentMonths ? parseInt(recentMonths, 10) : undefined,
       sortByDate: sortByDate === "true" || sortByDate === true,
     });
-    const allResults = result.items || [];
+    let allResults = result.items || [];
+
+    // When location (country) yields 0 results, retry without location so user sees trials (use 5 months for fallback)
+    if (allResults.length === 0 && locationForTrials) {
+      result = await searchClinicalTrials({
+        q: searchQ,
+        status,
+        location: undefined,
+        phase,
+        eligibilitySex,
+        eligibilityAgeMin,
+        eligibilityAgeMax,
+        biomarkers,
+        page: 1,
+        pageSize: batchSize,
+        recentMonths: 5,
+        sortByDate: sortByDate === "true" || sortByDate === true,
+      });
+      allResults = result.items || [];
+    }
 
     // Build user profile for matching (reuse if already fetched for biomarkers)
     if (!userProfile) {

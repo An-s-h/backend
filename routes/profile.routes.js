@@ -2,6 +2,7 @@ import { Router } from "express";
 import mongoose from "mongoose";
 import { Profile } from "../models/Profile.js";
 import { User } from "../models/User.js";
+import { clearRecommendationsCache } from "../services/recommendationsCache.js";
 import { Thread } from "../models/Thread.js";
 import { Reply } from "../models/Reply.js";
 import { Community } from "../models/Community.js";
@@ -425,6 +426,124 @@ router.put("/profile/:userId", async (req, res) => {
     { new: true, upsert: true },
   );
   return res.json({ ok: true, profile: doc });
+});
+
+// PATCH /api/profile/:userId/patient-conditions — update patient conditions and optional primary query indices
+// Clears recommendations cache so next load uses new conditions.
+router.patch("/profile/:userId/patient-conditions", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    let conditions = req.body?.conditions;
+    if (!Array.isArray(conditions)) {
+      if (typeof conditions === "string") {
+        conditions = conditions
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      } else {
+        return res
+          .status(400)
+          .json({ error: "conditions must be an array of strings" });
+      }
+    }
+    conditions = conditions.map((c) => String(c).trim()).filter(Boolean);
+
+    let primaryConditionIndices = req.body?.primaryConditionIndices;
+    if (primaryConditionIndices != null) {
+      if (!Array.isArray(primaryConditionIndices)) {
+        primaryConditionIndices = [];
+      }
+      primaryConditionIndices = primaryConditionIndices
+        .map((i) => parseInt(i, 10))
+        .filter((i) => Number.isInteger(i) && i >= 0 && i < conditions.length)
+        .slice(0, 2); // max 2
+    }
+
+    const update = { "patient.conditions": conditions };
+    if (primaryConditionIndices != null) {
+      update["patient.primaryConditionIndices"] = primaryConditionIndices;
+    }
+
+    const doc = await Profile.findOneAndUpdate(
+      { userId },
+      { $set: update },
+      { new: true },
+    );
+    if (!doc) {
+      return res.status(404).json({ error: "Profile not found" });
+    }
+    clearRecommendationsCache(userId);
+    return res.json({
+      ok: true,
+      profile: doc,
+      conditions: doc?.patient?.conditions || conditions,
+      primaryConditionIndices: doc?.patient?.primaryConditionIndices,
+    });
+  } catch (err) {
+    console.error("Error updating patient conditions:", err);
+    return res
+      .status(500)
+      .json({ error: "Failed to update conditions", message: err.message });
+  }
+});
+
+// PATCH /api/profile/:userId/researcher-interests — update researcher interests and optional primary query indices
+// Clears recommendations cache so next load uses new interests.
+router.patch("/profile/:userId/researcher-interests", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    let interests = req.body?.interests;
+    if (!Array.isArray(interests)) {
+      if (typeof interests === "string") {
+        interests = interests
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      } else {
+        return res
+          .status(400)
+          .json({ error: "interests must be an array of strings" });
+      }
+    }
+    interests = interests.map((i) => String(i).trim()).filter(Boolean);
+
+    let primaryInterestIndices = req.body?.primaryInterestIndices;
+    if (primaryInterestIndices != null) {
+      if (!Array.isArray(primaryInterestIndices)) {
+        primaryInterestIndices = [];
+      }
+      primaryInterestIndices = primaryInterestIndices
+        .map((i) => parseInt(i, 10))
+        .filter((i) => Number.isInteger(i) && i >= 0 && i < interests.length)
+        .slice(0, 2); // max 2
+    }
+
+    const update = { "researcher.interests": interests };
+    if (primaryInterestIndices != null) {
+      update["researcher.primaryInterestIndices"] = primaryInterestIndices;
+    }
+
+    const doc = await Profile.findOneAndUpdate(
+      { userId },
+      { $set: update },
+      { new: true },
+    );
+    if (!doc) {
+      return res.status(404).json({ error: "Profile not found" });
+    }
+    clearRecommendationsCache(userId);
+    return res.json({
+      ok: true,
+      profile: doc,
+      interests: doc?.researcher?.interests || interests,
+      primaryInterestIndices: doc?.researcher?.primaryInterestIndices,
+    });
+  } catch (err) {
+    console.error("Error updating researcher interests:", err);
+    return res
+      .status(500)
+      .json({ error: "Failed to update interests", message: err.message });
+  }
 });
 
 // GET /api/collabiora-expert/profile/:userId - Get Collabiora expert profile with ORCID data and forums

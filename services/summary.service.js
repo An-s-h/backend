@@ -132,49 +132,33 @@ export async function summarizeText(text, type = "general", simplify = false) {
       model: modelName,
     });
 
-    // For publications, generate structured summary
+    // For publications, generate structured key insights (Yori-style content in JSON for highlighted section cards)
+    const PUBLICATION_CONTENT_LIMIT = 10000;
     if (type === "publication") {
-      const languageInstruction = simplify
-        ? "You are explaining medical research to a patient. Use very simple, everyday words. Avoid medical jargon completely. If you must use a medical term, explain it in simple words. Use short sentences. Keep it friendly and easy to understand."
-        : "Summarize this research publication for researchers and medical professionals. Use appropriate technical terminology and research language.";
+      const publicationContent = text.substring(0, PUBLICATION_CONTENT_LIMIT);
 
-      const prompt = simplify
-        ? `You are explaining medical research to a patient in simple, friendly language. ${languageInstruction}
+      const prompt = `You are Yori, a health research assistant. Summarize this publication in the same informative style as your chatbot on a publication-detail page. Use clear, accessible language but you may use appropriate technical terms (e.g. MRI, EEG, biomarkers, neuroimaging) and briefly explain them when helpful. Match the tone of a helpful research assistant—informative and precise, not oversimplified.
 
-Structure your response as a JSON object with these sections. Write each section as if talking to a friend, using everyday words:
+Return a JSON object with exactly these keys. Each value should be 2–4 sentences (or short bullet points in plain text). Base everything on the publication content below. Do not invent facts.
 
 {
-  "coreMessage": "The most important finding in 1-2 very simple sentences (what they discovered). Use words like 'found that', 'discovered', 'learned'. Avoid complex terms.",
-  "what": "What the study was about - explain the main question or problem in 2-3 simple sentences. Use everyday language. Example: 'They wanted to see if...' instead of 'They investigated whether...'",
-  "why": "Why this research matters - explain why this is important in 2-3 simple sentences. Connect it to how it might help people. Use words like 'This is important because...'",
-  "how": "How they did the study - describe what they did in 2-3 simple sentences. Use simple words like 'they gave', 'they tested', 'they compared'. Avoid terms like 'administered', 'assessed', 'evaluated'.",
-  "soWhat": "What this means for you - explain how this might matter to patients in 2-3 simple sentences. Use words like 'This means...', 'This could help...', 'If you have...'",
-  "keyTakeaway": "One simple sentence that's easy to remember. Write it like you're giving advice to a friend."
+  "coreMessage": "The most important finding in 1-2 sentences—what they discovered or the main takeaway.",
+  "what": "What the study was about: the main question, problem, or condition. Can mention current challenges or background.",
+  "why": "Why this research matters: importance, context, and who it affects.",
+  "how": "How they did the study: methods, tools, or approaches (e.g. neuroimaging, biomarkers, trials). You may list techniques in a short paragraph.",
+  "soWhat": "So what does this mean: implications, impact on patients or practice, and future outlook.",
+  "keyTakeaway": "One sentence takeaway that should be remembered."
 }
 
-Publication content: ${text.substring(0, 2000)}
+Publication content:
+${publicationContent}
 
-IMPORTANT: Use only simple, everyday words. Replace medical terms with plain language. Keep sentences short. Return ONLY valid JSON, no markdown formatting.`
-        : `You are a medical research expert. Summarize this research publication for researchers and medical professionals. Use appropriate technical terminology and research language. Structure your response as a JSON object with these sections:
-
-{
-  "coreMessage": "The most important finding in 1-2 sentences (what they discovered)",
-  "what": "What the study was about - describe the research question/problem (2-3 sentences)",
-  "why": "Why this research matters - explain the importance and context (2-3 sentences)",
-  "how": "How they did the study - describe the methods (2-3 sentences)",
-  "soWhat": "So what does this mean? - explain relevance, implications, and significance (2-3 sentences)",
-  "keyTakeaway": "One sentence takeaway that should be remembered"
-}
-
-Publication content: ${text.substring(0, 2000)}
-
-Return ONLY valid JSON, no markdown formatting. Use appropriate technical and scientific terminology.`;
+Return ONLY valid JSON. No markdown code fences, no extra text before or after.`;
 
       let result;
       try {
-        // Estimate tokens: prompt + text content + response
-        const textLength = text.substring(0, 2000).length;
-        const estimatedTokens = 500 + textLength / 4 + 1500;
+        const textLength = publicationContent.length;
+        const estimatedTokens = 500 + textLength / 4 + 2000;
 
         result = await rateLimiter.execute(
           async () => {
@@ -186,7 +170,6 @@ Return ONLY valid JSON, no markdown formatting. Use appropriate technical and sc
           estimatedTokens,
         );
       } catch (firstError) {
-        // If we have two API keys and first one failed, try the alternate
         if (genAI && genAI2 && !attemptWithAlternate) {
           const errorMessage = firstError.message || String(firstError);
           const errorStatus =
@@ -208,7 +191,6 @@ Return ONLY valid JSON, no markdown formatting. Use appropriate technical and sc
           if (isRetryableError) {
             attemptWithAlternate = true;
             geminiInstance = getGeminiInstance(true);
-            // Try alternate model if flash-lite is overloaded
             const alternateModelName =
               modelName === "gemini-2.5-flash-lite"
                 ? "gemini-2.5-flash"
@@ -234,20 +216,13 @@ Return ONLY valid JSON, no markdown formatting. Use appropriate technical and sc
       }
 
       let responseText = result.response.text().trim();
-
-      // Clean markdown if present
       if (responseText.startsWith("```")) {
-        responseText = responseText
-          .replace(/```json\n?/g, "")
-          .replace(/```\n?/g, "")
-          .trim();
+        responseText = responseText.replace(/^```\w*\n?/, "").replace(/\n?```\s*$/, "").trim();
       }
-
       try {
         const structured = JSON.parse(responseText);
         return { structured: true, ...structured };
       } catch (parseError) {
-        // If JSON parsing fails, return as plain text
         return { structured: false, summary: responseText };
       }
     }
