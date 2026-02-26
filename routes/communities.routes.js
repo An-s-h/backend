@@ -1,6 +1,7 @@
 import { Router } from "express";
 import mongoose from "mongoose";
 import { Community } from "../models/Community.js";
+import { CommunityCategory } from "../models/CommunityCategory.js";
 import { CommunityProposal } from "../models/CommunityProposal.js";
 import { Subcategory } from "../models/Subcategory.js";
 import { CommunityMembership } from "../models/CommunityMembership.js";
@@ -68,6 +69,75 @@ function normalizeConditions(input) {
 // ============================================
 // COMMUNITY ROUTES
 // ============================================
+
+// Get forum display categories with their communities (for Health Forums page; only communities with categoryId are shown)
+router.get("/communities/categories", async (req, res) => {
+  try {
+    const { userId } = req.query;
+
+    const categories = await CommunityCategory.find({})
+      .sort({ sortOrder: 1, name: 1 })
+      .lean();
+
+    const categoryIds = categories.map((c) => c._id);
+
+    const communities = await Community.find({
+      communityType: "patient",
+      categoryId: { $in: categoryIds },
+    })
+      .sort({ name: 1 })
+      .lean();
+
+    const communityIds = communities.map((c) => c._id);
+
+    const [memberCounts, userMemberships] = await Promise.all([
+      CommunityMembership.aggregate([
+        { $match: { communityId: { $in: communityIds } } },
+        { $group: { _id: "$communityId", count: { $sum: 1 } } },
+      ]),
+      userId
+        ? CommunityMembership.find({ userId }).lean()
+        : Promise.resolve([]),
+    ]);
+
+    const memberCountMap = {};
+    memberCounts.forEach((item) => {
+      memberCountMap[item._id.toString()] = item.count;
+    });
+    const userMembershipMap = {};
+    userMemberships.forEach((m) => {
+      userMembershipMap[m.communityId.toString()] = m;
+    });
+
+    const communitiesWithData = communities.map((c) => ({
+      ...c,
+      image: c.coverImage || "",
+      memberCount: memberCountMap[c._id.toString()] || 0,
+      isFollowing: !!userMembershipMap[c._id.toString()],
+      membership: userMembershipMap[c._id.toString()] || null,
+    }));
+
+    const byCategory = {};
+    categories.forEach((cat) => {
+      byCategory[cat._id.toString()] = {
+        ...cat,
+        communities: communitiesWithData.filter(
+          (c) => c.categoryId && c.categoryId.toString() === cat._id.toString()
+        ),
+      };
+    });
+
+    res.json({
+      categories: categories.map((cat) => ({
+        ...cat,
+        communities: byCategory[cat._id.toString()].communities,
+      })),
+    });
+  } catch (error) {
+    console.error("Error fetching community categories:", error);
+    res.status(500).json({ error: "Failed to fetch categories" });
+  }
+});
 
 // Get all communities with member counts and thread counts
 router.get("/communities", async (req, res) => {

@@ -13,6 +13,7 @@ import { Reply } from "../models/Reply.js";
 import { Post } from "../models/Post.js";
 import { Comment } from "../models/Comment.js";
 import { Community } from "../models/Community.js";
+import { CommunityCategory } from "../models/CommunityCategory.js";
 import { CommunityProposal } from "../models/CommunityProposal.js";
 import { CommunityMembership } from "../models/CommunityMembership.js";
 import { Subcategory } from "../models/Subcategory.js";
@@ -1060,6 +1061,111 @@ router.post("/admin/upload", verifyAdmin, uploadSingle, async (req, res) => {
 });
 
 // ============================================
+// COMMUNITY CATEGORIES (admin) — for Health Forums grouping
+// ============================================
+
+router.get("/admin/community-categories", verifyAdmin, async (req, res) => {
+  try {
+    const categories = await CommunityCategory.find({})
+      .sort({ sortOrder: 1, name: 1 })
+      .lean();
+    const categoryIds = categories.map((c) => c._id);
+    const counts = await Community.countDocuments({
+      categoryId: { $in: categoryIds },
+    });
+    const countByCat = await Community.aggregate([
+      { $match: { categoryId: { $in: categoryIds } } },
+      { $group: { _id: "$categoryId", count: { $sum: 1 } } },
+    ]);
+    const countMap = {};
+    countByCat.forEach((item) => {
+      countMap[item._id.toString()] = item.count;
+    });
+    res.json({
+      categories: categories.map((c) => ({
+        ...c,
+        communityCount: countMap[c._id.toString()] || 0,
+      })),
+    });
+  } catch (error) {
+    console.error("Error fetching community categories:", error);
+    res.status(500).json({ error: "Failed to fetch community categories" });
+  }
+});
+
+router.post("/admin/community-categories", verifyAdmin, async (req, res) => {
+  try {
+    const { name, sortOrder, defaultOpen, headingColor } = req.body;
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: "name is required" });
+    }
+    const slug = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "")
+      || "category";
+    const existing = await CommunityCategory.findOne({ slug });
+    if (existing) {
+      return res.status(400).json({ error: "A category with this name already exists" });
+    }
+    const category = await CommunityCategory.create({
+      name: name.trim(),
+      slug,
+      sortOrder: typeof sortOrder === "number" ? sortOrder : (await CommunityCategory.countDocuments()),
+      defaultOpen: !!defaultOpen,
+      headingColor: headingColor || "#2F3C96",
+    });
+    res.status(201).json({ ok: true, category });
+  } catch (error) {
+    console.error("Error creating community category:", error);
+    res.status(500).json({ error: "Failed to create community category" });
+  }
+});
+
+router.patch("/admin/community-categories/:id", verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, sortOrder, defaultOpen, headingColor } = req.body;
+    const category = await CommunityCategory.findById(id);
+    if (!category) {
+      return res.status(404).json({ error: "Category not found" });
+    }
+    if (name !== undefined && name.trim()) {
+      category.name = name.trim();
+      category.slug = name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/(^-|-$)/g, "")
+        || "category";
+    }
+    if (sortOrder !== undefined) category.sortOrder = Number(sortOrder);
+    if (defaultOpen !== undefined) category.defaultOpen = !!defaultOpen;
+    if (headingColor !== undefined) category.headingColor = headingColor || "#2F3C96";
+    await category.save();
+    res.json({ ok: true, category });
+  } catch (error) {
+    console.error("Error updating community category:", error);
+    res.status(500).json({ error: "Failed to update community category" });
+  }
+});
+
+router.delete("/admin/community-categories/:id", verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const category = await CommunityCategory.findById(id);
+    if (!category) {
+      return res.status(404).json({ error: "Category not found" });
+    }
+    await Community.updateMany({ categoryId: id }, { $set: { categoryId: null } });
+    await CommunityCategory.findByIdAndDelete(id);
+    res.json({ ok: true, message: "Category deleted; communities unlinked" });
+  } catch (error) {
+    console.error("Error deleting community category:", error);
+    res.status(500).json({ error: "Failed to delete community category" });
+  }
+});
+
+// ============================================
 // COMMUNITY MANAGEMENT (admin)
 // ============================================
 
@@ -1110,7 +1216,7 @@ router.get("/admin/communities", verifyAdmin, async (req, res) => {
   }
 });
 
-// Create community (admin) — supports communityType: "patient" | "researcher"
+// Create community (admin) — supports communityType, categoryId, iconSvg
 router.post("/admin/communities", verifyAdmin, async (req, res) => {
   try {
     const {
@@ -1121,6 +1227,9 @@ router.post("/admin/communities", verifyAdmin, async (req, res) => {
       tags,
       isOfficial,
       communityType,
+      categoryId,
+      iconSvg,
+      color,
     } = req.body;
     if (!name || !name.trim()) {
       return res.status(400).json({ error: "name is required" });
@@ -1130,7 +1239,6 @@ router.post("/admin/communities", verifyAdmin, async (req, res) => {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/(^-|-$)/g, "");
-    // Differentiate Patient vs Researcher: same name can exist in both
     if (type === "researcher") {
       slug = slug ? `${slug}-researcher` : "researcher";
     }
@@ -1148,12 +1256,65 @@ router.post("/admin/communities", verifyAdmin, async (req, res) => {
       tags: Array.isArray(tags) ? tags : [],
       isOfficial: !!isOfficial,
       communityType: type,
-      createdByResearcher: false, // Admin-created, not researcher-proposed
+      createdByResearcher: false,
+      categoryId: categoryId || null,
+      iconSvg: typeof iconSvg === "string" ? iconSvg : "",
+      color: color || "#2F3C96",
     });
     res.status(201).json({ ok: true, community });
   } catch (error) {
     console.error("Error creating community:", error);
     res.status(500).json({ error: "Failed to create community" });
+  }
+});
+
+// Update community (admin) — categoryId, iconSvg, name, description, etc.
+router.patch("/admin/communities/:id", verifyAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      name,
+      description,
+      coverImage,
+      thumbnailUrl,
+      tags,
+      isOfficial,
+      categoryId,
+      iconSvg,
+      color,
+    } = req.body;
+    const community = await Community.findById(id);
+    if (!community) {
+      return res.status(404).json({ error: "Community not found" });
+    }
+    if (name !== undefined && name.trim()) {
+      community.name = name.trim();
+      let slug = name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/(^-|-$)/g, "");
+      if (community.communityType === "researcher") {
+        slug = slug ? `${slug}-researcher` : "researcher";
+      }
+      const existing = await Community.findOne({ slug, _id: { $ne: id } });
+      if (existing) {
+        return res.status(400).json({ error: "A community with this name already exists" });
+      }
+      community.slug = slug;
+    }
+    if (description !== undefined) community.description = description || "";
+    if (coverImage !== undefined) community.coverImage = coverImage || "";
+    if (thumbnailUrl !== undefined && !coverImage) community.coverImage = thumbnailUrl || "";
+    if (tags !== undefined) community.tags = Array.isArray(tags) ? tags : community.tags;
+    if (isOfficial !== undefined) community.isOfficial = !!isOfficial;
+    if (categoryId !== undefined) community.categoryId = categoryId || null;
+    if (typeof iconSvg === "string") community.iconSvg = iconSvg;
+    if (color !== undefined) community.color = color || "#2F3C96";
+    await community.save();
+    res.json({ ok: true, community });
+  } catch (error) {
+    console.error("Error updating community:", error);
+    res.status(500).json({ error: "Failed to update community" });
   }
 });
 
