@@ -41,6 +41,51 @@ function setCache(key, value) {
 }
 
 /**
+ * Hosts that serve openly accessible PDFs that our proxy can reliably fetch.
+ * Publisher PDFs (Springer, Wiley, Nature, etc.) are NOT in this list because
+ * they block server-side bots and/or require auth cookies.
+ */
+const PROXY_FRIENDLY_PDF_HOSTS = [
+  "arxiv.org",
+  "export.arxiv.org",
+  "medrxiv.org",
+  "biorxiv.org",
+  "europepmc.org",
+  "ebi.ac.uk",
+  "pmc.ncbi.nlm.nih.gov",
+  "pubmedcentral.nih.gov",
+  "ncbi.nlm.nih.gov",
+  "pdfs.semanticscholar.org",
+  "api.semanticscholar.org",
+  "semanticscholar.org",
+  "zenodo.org",
+  "researchsquare.com",
+  "f1000research.com",
+  "peerj.com",
+  "elifesciences.org",
+  "figshare.com",
+  "osf.io",
+  "psyarxiv.com",
+  "ssrn.com",
+];
+
+/**
+ * Returns true if the URL is from a host that our server-side proxy can
+ * reliably fetch (open repositories, not publisher-gated sites).
+ */
+function isProxyFriendlyPdfUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return PROXY_FRIENDLY_PDF_HOSTS.some(
+      (h) => host === h || host.endsWith("." + h),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Extract PMC ID from PMID using NCBI elink.
  */
 async function getPmcidFromPmid(pmid) {
@@ -54,6 +99,32 @@ async function getPmcidFromPmid(pmid) {
     const linksetdb = linksets[0]?.linksetdbs?.[0];
     const ids = linksetdb?.ids || [];
     if (ids.length > 0) return `PMC${ids[0]}`;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Try to get a PDF URL from Semantic Scholar API using DOI.
+ * Only returns the URL if it's from a proxy-friendly host (not a publisher site).
+ */
+async function getPdfUrlFromSemanticScholar(doi) {
+  if (!doi) return null;
+  try {
+    const cleanDoi = doi.replace(/^https?:\/\/doi\.org\//i, "").trim();
+    const url = `https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(cleanDoi)}?fields=openAccessPdf,externalIds`;
+    const res = await axios.get(url, {
+      timeout: 8000,
+      headers: { "User-Agent": "CuraLink/1.0 (mailto:support@curalink.org)" },
+    });
+    const pdf = res.data?.openAccessPdf?.url;
+    // Only return proxy-friendly URLs — skip publisher PDFs that will fail
+    if (pdf && typeof pdf === "string" && pdf.startsWith("http")) {
+      if (isProxyFriendlyPdfUrl(pdf)) return pdf;
+      // Still return it but marked — callers can use it as a directUrl fallback
+      return pdf;
+    }
     return null;
   } catch {
     return null;
@@ -95,6 +166,15 @@ export async function checkUnpaywall(doi) {
             license: best.license,
           }
         : null,
+      // Preserve ALL oa_locations for fallback PDF searches
+      oa_locations: (data?.oa_locations || []).map((loc) => ({
+        url: loc.url,
+        url_for_pdf: loc.url_for_pdf || null,
+        version: loc.version,
+        license: loc.license,
+        host_type: loc.host_type,
+        repository_institution: loc.repository_institution,
+      })),
       doi: cleanDoi,
       title: data?.title,
       year: data?.year,
@@ -405,6 +485,7 @@ async function fetchHtmlArticle(htmlUrl) {
 
 /**
  * Step 3b: Try Europe PMC article API for full text URL / core result.
+ * Returns pmcid, best PDF URLs from their fullTextUrlList, and open access status.
  */
 async function fetchEuropePmcArticle(pmidOrDoi) {
   const q = /^\d+$/.test(String(pmidOrDoi).trim())
@@ -421,9 +502,58 @@ async function fetchEuropePmcArticle(pmidOrDoi) {
     const pmcid = hit.pmcid || hit.pmcId;
     const fullTextUrlList = hit.fullTextUrlList?.fullTextUrl || [];
 
+    // Extract the best PDF URL from fullTextUrlList.
+    // Priority: Europe_PMC PDF > PubMedCentral PDF > any PDF
+    // These URLs are proxy-friendly since they come from ebi.ac.uk / ncbi.nlm.nih.gov
+    let pdfUrl = null;
+
+    // 1. Prefer Europe PMC's own PDF (reliably proxy-able from ebi.ac.uk)
+    const epmcPdf = fullTextUrlList.find(
+      (u) =>
+        u.documentStyle === "pdf" &&
+        (u.site === "Europe_PMC" || (u.url && u.url.includes("europepmc.org"))),
+    );
+    if (epmcPdf?.url) pdfUrl = epmcPdf.url;
+
+    // 2. PubMed Central PDF (from ncbi.nlm.nih.gov)
+    if (!pdfUrl) {
+      const pmcPdf = fullTextUrlList.find(
+        (u) =>
+          u.documentStyle === "pdf" &&
+          (u.site === "PubMedCentral" ||
+            (u.url && u.url.includes("ncbi.nlm.nih.gov"))),
+      );
+      if (pmcPdf?.url) pdfUrl = pmcPdf.url;
+    }
+
+    // 3. Any PDF link in the list
+    if (!pdfUrl) {
+      const anyPdf = fullTextUrlList.find(
+        (u) =>
+          u.documentStyle === "pdf" ||
+          (u.url && /\.pdf(?:[?#]|$)/i.test(u.url)),
+      );
+      if (anyPdf?.url) pdfUrl = anyPdf.url;
+    }
+
+    // Also get the HTML viewer URL from Europe PMC for fallback
+    const htmlEntry = fullTextUrlList.find(
+      (u) =>
+        u.documentStyle === "html" &&
+        (u.site === "Europe_PMC" || (u.url && u.url.includes("europepmc.org"))),
+    );
+    const htmlViewerUrl = htmlEntry?.url || null;
+
+    // Build the Europe PMC viewer URL from PMCID if we have one
+    const pmcViewerUrl = pmcid
+      ? `https://europepmc.org/articles/PMC${pmcid.replace(/^PMC/i, "")}`
+      : htmlViewerUrl;
+
     return {
       pmcid,
       fullTextUrlList,
+      pdfUrl,
+      pmcViewerUrl,
       hasFullText: !!hit.fullTextUrlList,
       inEPMC: !!hit.inEPMC,
       openAccess: hit.isOpenAccess === "Y",
@@ -481,7 +611,7 @@ export function getAccessLevel(
   if (unpaywallResult?.is_oa && unpaywallResult?.best_oa_location?.url) {
     return {
       level: "open_access",
-      label: "Open Access (HTML)",
+      label: `Open Access${oaStatus ? ` (${oaStatus})` : ""}`,
       badgeColor: "emerald",
       canReadOnPlatform: false,
       externalUrl: unpaywallResult.best_oa_location.url,
@@ -508,7 +638,15 @@ export function getAccessLevel(
 
 /**
  * Main: Fetch full-text content for a publication.
- * Returns: { accessLevel, fullText, pdfUrl } or { accessLevel } when no full text.
+ * Returns: { accessLevel, fullText, pdfUrl, pmcViewerUrl } or { accessLevel } when no full text.
+ *
+ * PDF URL priority:
+ * 1. Europe PMC PDF (ebi.ac.uk) — proxy-friendly, always works
+ * 2. PubMed Central PDF (ncbi.nlm.nih.gov) — proxy-friendly
+ * 3. Unpaywall repository PDF (green OA, repo host) — proxy-friendly
+ * 4. Publication's own openAccessPdf/pdfUrl field (may or may not work)
+ * 5. Semantic Scholar PDF (if from a proxy-friendly host)
+ * 6. Unpaywall publisher PDF (gold/bronze OA at publisher) — may fail proxy, use as directUrl
  */
 export async function fetchFullText(publication) {
   if (!publication) return { accessLevel: null, fullText: null, pdfUrl: null };
@@ -526,17 +664,30 @@ export async function fetchFullText(publication) {
       accessLevel,
       fullText: null,
       pdfUrl: publication.pdfUrl,
+      pmcViewerUrl: null,
       unpaywall: null,
     };
   }
 
+  // Run Unpaywall and Europe PMC lookups in parallel for speed
   let unpaywallResult = null;
-  if (doi) {
-    unpaywallResult = await checkUnpaywall(doi);
+  let epmcResult = null;
+  let pmcid = publication.pmcid || publication.pmcId;
+
+  const [unpaywallSettled, epmcSettled] = await Promise.allSettled([
+    doi ? checkUnpaywall(doi) : Promise.resolve(null),
+    pmid || doi ? fetchEuropePmcArticle(pmid || doi) : Promise.resolve(null),
+  ]);
+
+  if (unpaywallSettled.status === "fulfilled") {
+    unpaywallResult = unpaywallSettled.value;
+  }
+  if (epmcSettled.status === "fulfilled") {
+    epmcResult = epmcSettled.value;
+    if (epmcResult?.pmcid && !pmcid) pmcid = epmcResult.pmcid;
   }
 
   let fullText = null;
-  let pmcid = publication.pmcid || publication.pmcId;
 
   // Try PMC XML first (best structured content)
   if (pmid && !pmcid) {
@@ -546,12 +697,9 @@ export async function fetchFullText(publication) {
     fullText = await fetchEuropePmcFullText(pmcid);
   }
 
-  // Fallback: Europe PMC article lookup for PMID/DOI
-  if (!fullText && (pmid || doi)) {
-    const epmc = await fetchEuropePmcArticle(pmid || doi);
-    if (epmc?.pmcid) {
-      fullText = await fetchEuropePmcFullText(epmc.pmcid);
-    }
+  // If EPMC returned a pmcid but XML wasn't fetched yet, try it
+  if (!fullText && epmcResult?.pmcid) {
+    fullText = await fetchEuropePmcFullText(epmcResult.pmcid);
   }
 
   // Fallback: Fetch HTML from Unpaywall OA URL (Open Access HTML, no PDF)
@@ -566,22 +714,69 @@ export async function fetchFullText(publication) {
 
   const accessLevel = getAccessLevel(publication, unpaywallResult, !!fullText);
 
-  // Ensure PDF URL is set from best available source
-  const pdfUrl =
-    accessLevel.pdfUrl ||
-    unpaywallResult?.best_oa_location?.url_for_pdf ||
-    publication?.openAccessPdf ||
-    publication?.pdfUrl;
+  // ── PDF URL resolution — prioritise proxy-friendly repository URLs ──────
+
+  // 1. Europe PMC PDF (best: we proxy ebi.ac.uk with no issues)
+  let pdfUrl = epmcResult?.pdfUrl || null;
+
+  // 2. Unpaywall: search ALL oa_locations for proxy-friendly PDF URLs first
+  if (!pdfUrl) {
+    const allOaLocs = [
+      unpaywallResult?.best_oa_location,
+      ...(unpaywallResult?.oa_locations || []),
+    ].filter(Boolean);
+
+    // First pass: proxy-friendly URLs only (repository copies)
+    for (const loc of allOaLocs) {
+      if (loc.url_for_pdf && isProxyFriendlyPdfUrl(loc.url_for_pdf)) {
+        pdfUrl = loc.url_for_pdf;
+        break;
+      }
+    }
+
+    // Second pass: any URL with a PDF, even if from a publisher (use as directUrl fallback)
+    if (!pdfUrl) {
+      for (const loc of allOaLocs) {
+        if (loc.url_for_pdf) {
+          pdfUrl = loc.url_for_pdf;
+          break;
+        }
+      }
+    }
+  }
+
+  // 3. Publication's own fields (set by the source API, e.g. OpenAlex, Semantic Scholar)
+  if (!pdfUrl) {
+    pdfUrl = publication?.openAccessPdf || publication?.pdfUrl || null;
+  }
+
+  // 4. Last resort: Semantic Scholar (only if not already found)
+  if (!pdfUrl && doi) {
+    try {
+      pdfUrl = await getPdfUrlFromSemanticScholar(doi);
+    } catch {
+      // ignore
+    }
+  }
 
   if (pdfUrl) {
     accessLevel.pdfUrl = pdfUrl;
     accessLevel.canReadOnPlatform = true;
   }
 
+  // Provide the Europe PMC viewer URL so the frontend can use it as an
+  // open-access fallback when PDF embedding fails.
+  const pmcViewerUrl =
+    epmcResult?.pmcViewerUrl ||
+    (pmcid
+      ? `https://europepmc.org/articles/PMC${pmcid.toString().replace(/^PMC/i, "")}`
+      : null);
+
   return {
     accessLevel,
     fullText,
     pdfUrl: pdfUrl || null,
+    pmcViewerUrl,
     unpaywall: unpaywallResult,
   };
 }

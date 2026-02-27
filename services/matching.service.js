@@ -549,6 +549,23 @@ export function calculatePublicationMatch(pub, userProfile) {
   const journal = pub.journal || "";
   const keywords = Array.isArray(pub.keywords) ? pub.keywords.join(" ") : "";
 
+  // Use raw search query (when available) for exact phrase matching in title/abstract
+  const rawQuery =
+    userProfile?.patient?.rawSearchQuery ||
+    userProfile?.searchQuery ||
+    "";
+  const normalizedQuery = rawQuery
+    ? rawQuery.toLowerCase().replace(/\s+/g, " ").trim()
+    : "";
+  const titleLower = title.toLowerCase();
+  const abstractLower = abstract.toLowerCase();
+  let hasExactPhraseInTitle = false;
+  let hasExactPhraseInAbstract = false;
+  if (normalizedQuery && normalizedQuery.length >= 3) {
+    hasExactPhraseInTitle = titleLower.includes(normalizedQuery);
+    hasExactPhraseInAbstract = abstractLower.includes(normalizedQuery);
+  }
+
   // For researchers with multiple interests, give high score if ANY interest matches
   let topicScore = 0;
   let matchCount = 0; // Count how many interests match
@@ -588,17 +605,59 @@ export function calculatePublicationMatch(pub, userProfile) {
   const recencyScore =
     year >= now - 2 ? 1 : year >= now - 5 ? 0.7 : year >= now - 10 ? 0.4 : 0.2;
 
-  const weighted = topicScore * 0.6 + locationScore * 0.3 + recencyScore * 0.1;
+  // Emphasize topic match, keep recency, drop location from scoring
+  // Non-linear emphasis spreads mid vs strong matches further apart
+  const baseTopic = Math.max(0, Math.min(1, topicScore));
+  let topicEmphasis = Math.pow(baseTopic, 1.25);
+
+  // When the user searched a specific phrase (e.g. "hair loss"),
+  // and that exact phrase does NOT appear in title/abstract,
+  // slightly discount the topic emphasis so exact-phrase papers rank higher.
+  if (
+    normalizedQuery &&
+    normalizedQuery.length >= 3 &&
+    !hasExactPhraseInTitle &&
+    !hasExactPhraseInAbstract
+  ) {
+    topicEmphasis *= 0.9;
+  }
+  const weighted = topicEmphasis * 0.8 + recencyScore * 0.2;
   let final = weighted;
-  // Add base score boost (align with trials for consistent UX)
-  final += 0.15; // Base boost for all matches
-  if (topicScore > 0) final += 0.2; // Additional boost for topic matches (was 0.15)
-  final = Math.min(0.99, final); // Cap at 100%
-  final = Math.max(0.15, final); // Higher minimum score (15%)
+
+  // Small base boost only when there is a clear topical signal
+  if (topicScore > 0.2) final += 0.08;
+
+  // Strong reward for exact phrase matches in title/abstract (e.g. "pcos treatment")
+  if (normalizedQuery && normalizedQuery.length >= 3) {
+    if (hasExactPhraseInTitle) {
+      final += 0.2;
+    } else if (hasExactPhraseInAbstract) {
+      final += 0.12;
+    }
+  }
+
+  // Cap below perfect so UI never shows 100% match
+  final = Math.min(0.99, final);
+  final = Math.max(0.1, final);
+
+  // Ensure that obvious exact-phrase matches are never scored below weaker matches
+  if (normalizedQuery && normalizedQuery.length >= 3) {
+    const minForTitle = 0.96;
+    const minForAbstract = 0.9;
+    if (hasExactPhraseInTitle && final < minForTitle) {
+      final = minForTitle;
+    } else if (hasExactPhraseInAbstract && final < minForAbstract) {
+      final = minForAbstract;
+    }
+  }
 
   const parts = [];
   if (topicScore > 0.5) parts.push("topic match");
-  if (locationScore > 0.5) parts.push("location");
+  if (hasExactPhraseInTitle) {
+    parts.push("exact phrase in title");
+  } else if (hasExactPhraseInAbstract) {
+    parts.push("exact phrase in abstract");
+  }
   if (year >= now - 5) parts.push("recent research");
 
   return {

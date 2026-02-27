@@ -8,6 +8,7 @@ import {
   generateTrialDetails,
   simplifyTrialSummary,
   batchSimplifyPublicationTitles,
+  simplifyPublicationForPatients,
 } from "../services/summary.service.js";
 import { generateSummaryReport } from "../services/summaryReport.service.js";
 import { batchSimplifyTrialTitles } from "../services/trialSimplification.service.js";
@@ -83,6 +84,50 @@ router.post("/ai/summary", async (req, res) => {
 
   const summary = await summarizeText(text || "", type || "general", simplify);
   res.json({ summary });
+});
+
+// Extra plain-language simplification for publications for patients, preserving technical terms
+router.post("/ai/simplify-publication", async (req, res) => {
+  try {
+    const { pmid, publication } = req.body || {};
+
+    let basePublication = publication || null;
+    const idToFetch = pmid || publication?.pmid || publication?.id;
+
+    // When we have an ID/PMID, fetch the richer version of the publication
+    if (idToFetch) {
+      try {
+        const fullPub = await fetchPublicationById(String(idToFetch));
+        if (fullPub) {
+          basePublication = {
+            ...publication,
+            ...fullPub,
+            fullAbstract: fullPub.abstract || publication?.abstract,
+            abstract: fullPub.abstract || publication?.abstract,
+          };
+        }
+      } catch (err) {
+        console.warn(
+          "AI simplify-publication: fetch by PMID failed, using provided publication only:",
+          err?.message,
+        );
+      }
+    }
+
+    if (!basePublication) {
+      return res
+        .status(400)
+        .json({ error: "publication or pmid is required for simplification" });
+    }
+
+    const summary = await simplifyPublicationForPatients(basePublication);
+    res.json({ summary });
+  } catch (error) {
+    console.error("Error simplifying publication for patients:", error);
+    res.status(500).json({
+      error: "Failed to simplify publication",
+    });
+  }
 });
 
 router.post("/ai/extract-conditions", async (req, res) => {

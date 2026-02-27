@@ -1663,6 +1663,15 @@ router.get("/search/publications", async (req, res) => {
       ];
     }
 
+    // Preserve raw search query on profile so publication matcher can reward exact phrase hits in title/abstract
+    if (q && q.trim()) {
+      if (!userProfile) {
+        userProfile = { patient: {} };
+      }
+      if (!userProfile.patient) userProfile.patient = {};
+      userProfile.patient.rawSearchQuery = q.trim();
+    }
+
     // Calculate match percentages (always run when we have terms to match - profile or search query)
     const resultsWithMatch = userProfile
       ? allResults.map((publication) => {
@@ -2932,7 +2941,7 @@ router.get("/search/publication/:pmid/fulltext", async (req, res) => {
       });
     }
 
-    const { accessLevel, fullText, pdfUrl, unpaywall } =
+    const { accessLevel, fullText, pdfUrl, pmcViewerUrl, unpaywall } =
       await fetchFullText(publication);
     const publisher = unpaywall?.publisher || publication.journal || null;
 
@@ -2941,6 +2950,7 @@ router.get("/search/publication/:pmid/fulltext", async (req, res) => {
       accessLevel,
       fullText,
       pdfUrl,
+      pmcViewerUrl: pmcViewerUrl || null,
       publisher,
     });
   } catch (error) {
@@ -2954,14 +2964,26 @@ router.get("/search/publication/:pmid/fulltext", async (req, res) => {
   }
 });
 
+
 // PDF proxy: fetches PDF and streams with Content-Disposition: inline
 // Production flow: DOI → Unpaywall → best_oa_location.url → validate content-type → allow
 // Fallback: allowlist for sources without DOI (arXiv, Semantic Scholar, etc.)
+// NOTE: Only truly open-access / publicly accessible PDF hosts should be listed here.
 const PDF_PROXY_ALLOWED_HOSTS = [
+  // arXiv / preprints
   "arxiv.org",
+  "export.arxiv.org",
+  "ar5iv.org",
+  "medrxiv.org",
+  "biorxiv.org",
+  "researchsquare.com",
+  "zenodo.org",
+  // Semantic Scholar / OpenAlex
   "semanticscholar.org",
   "pdfs.semanticscholar.org",
+  "api.semanticscholar.org",
   "openalex.org",
+  // Europe PMC / NCBI
   "europepmc.org",
   "eurpmc.org",
   "ebi.ac.uk",
@@ -2969,10 +2991,65 @@ const PDF_PROXY_ALLOWED_HOSTS = [
   "pmc.ncbi.nlm.nih.gov",
   "ncbi.nlm.nih.gov",
   "pubmed.ncbi.nlm.nih.gov",
+  // Wiley (many OA articles served here)
   "wiley.com",
   "onlinelibrary.wiley.com",
+  // Springer / Nature (OA)
+  "springer.com",
+  "link.springer.com",
+  "springerlink.com",
+  "nature.com",
+  "springernature.com",
+  "biomedcentral.com",
+  // PLOS
+  "plos.org",
+  "journals.plos.org",
+  // MDPI (fully open access)
+  "mdpi.com",
+  // Frontiers (fully open access)
+  "frontiersin.org",
+  // BMJ
+  "bmj.com",
+  // OUP
+  "oup.com",
+  "academic.oup.com",
+  // Hindawi / Wiley OA
+  "hindawi.com",
+  "downloads.hindawi.com",
+  // Elsevier / ScienceDirect (limited OA)
+  "sciencedirect.com",
+  "elsevier.com",
+  "linkinghub.elsevier.com",
+  // T&F
+  "tandfonline.com",
+  "taylorfrancis.com",
+  // Sage
+  "sagepub.com",
+  "journals.sagepub.com",
+  // Cambridge
+  "cambridge.org",
+  // Karger
+  "karger.com",
+  // Misc known OA hosts
   "ugeskriftet.dk",
   "content.ugeskriftet.dk",
+  "jmir.org",
+  "gpospublisher.com",
+  "f1000research.com",
+  "peerj.com",
+  "elifesciences.org",
+  "royalsocietypublishing.org",
+  "biochemj.org",
+  "portlandpress.com",
+  "rupress.org",
+  "liebertpub.com",
+  "ahajournals.org",
+  "jamanetwork.com",
+  "thelancet.com",
+  "nejm.org",
+  "annals.org",
+  "annalsofoncology.org",
+  "cell.com",
 ];
 
 function isAllowedPdfUrlFallback(url) {
@@ -3014,22 +3091,9 @@ function urlContainsDoiAndTrustedHost(url, doi) {
     const u = new URL(url);
     const pathLower = (u.pathname + u.search).toLowerCase();
     const doiInPath = pathLower.includes(cleanDoi.toLowerCase());
-    const trustedHosts = [
-      "wiley.com",
-      "onlinelibrary.wiley.com",
-      "springer.com",
-      "nature.com",
-      "plos.org",
-      "mdpi.com",
-      "frontiersin.org",
-      "tandfonline.com",
-      "oup.com",
-      "bmj.com",
-      "sciencedirect.com",
-      "ugeskriftet.dk",
-    ];
+    // All hosts in the proxy allowed list are considered trusted for DOI-based verification
     const host = u.hostname.toLowerCase();
-    const isTrusted = trustedHosts.some(
+    const isTrusted = PDF_PROXY_ALLOWED_HOSTS.some(
       (h) => host === h || host.endsWith("." + h),
     );
     return doiInPath && isTrusted;
@@ -3039,11 +3103,15 @@ function urlContainsDoiAndTrustedHost(url, doi) {
 }
 
 function isPdfContentType(ct, url) {
-  if (!ct) return false;
+  if (!ct) {
+    // No content-type but URL strongly suggests PDF — accept
+    return url ? /\.pdf(?:[?#]|$)/i.test(url) : false;
+  }
   const m = ct.toLowerCase().split(";")[0].trim();
   if (m === "application/pdf") return true;
-  if (m === "application/octet-stream" && url && /\.pdf(\?|$)/i.test(url))
-    return true;
+  if (m === "application/octet-stream") return true; // many servers return octet-stream for PDFs
+  if (m === "binary/octet-stream") return true;
+  if (url && /\.pdf(?:[?#]|$)/i.test(url)) return true; // URL ends in .pdf
   return false;
 }
 
@@ -3056,35 +3124,51 @@ router.get("/search/pdf-proxy", async (req, res) => {
     }
 
     let allowed = false;
+
+    // -- Step 1: DOI-based Unpaywall verification (most reliable) --
     if (doi && typeof doi === "string") {
       const cleanDoi = doi.replace(/^https?:\/\/doi\.org\//i, "").trim();
       if (cleanDoi) {
         const unpaywall = await checkUnpaywall(cleanDoi);
-        const loc = unpaywall?.best_oa_location;
-        if (loc) {
-          const pdfUrl = loc.url_for_pdf || loc.url;
-          if (pdfUrl && urlMatches(url, pdfUrl)) allowed = true;
-        }
-        if (
-          !allowed &&
-          unpaywall?.is_oa &&
-          urlContainsDoiAndTrustedHost(url, cleanDoi)
-        ) {
-          allowed = true;
+        if (unpaywall) {
+          const loc = unpaywall?.best_oa_location;
+          // Check all OA locations, not just the best
+          const allLocs = [
+            loc,
+            ...(unpaywall?.oa_locations || []),
+          ].filter(Boolean);
+          for (const l of allLocs) {
+            const pdfUrl = l.url_for_pdf || l.url;
+            if (pdfUrl && urlMatches(url, pdfUrl)) {
+              allowed = true;
+              break;
+            }
+          }
+          // If the paper is OA and the URL contains the DOI on a trusted publisher host, allow it
+          if (!allowed && unpaywall?.is_oa && urlContainsDoiAndTrustedHost(url, cleanDoi)) {
+            allowed = true;
+          }
         }
       }
     }
+
+    // -- Step 2: Host allowlist fallback (for arXiv, PMC, Semantic Scholar, known OA publishers) --
     if (!allowed && isAllowedPdfUrlFallback(url)) {
       allowed = true;
     }
+
     if (!allowed) {
-      return res.status(403).json({ error: "URL not allowed for proxy" });
+      return res.status(403).json({
+        error: "URL not allowed for proxy. This publisher has not granted open access.",
+      });
     }
 
     const requestUrl = new URL(url);
     const referer = doi
       ? `https://doi.org/${doi.replace(/^https?:\/\/doi\.org\//i, "").trim()}`
       : requestUrl.origin + "/";
+
+    // Fetch the PDF — follow redirects, accept 2xx responses
     const resp = await axios.get(url, {
       responseType: "stream",
       timeout: 60000,
@@ -3092,39 +3176,69 @@ router.get("/search/pdf-proxy", async (req, res) => {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        Accept: "application/pdf,application/octet-stream,*/*",
+        Accept: "application/pdf,application/octet-stream,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "identity", // avoid compressed streams that break streaming
         Referer: referer,
+        Origin: requestUrl.origin,
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "cross-site",
       },
-      validateStatus: (s) => s === 200,
-      maxRedirects: 5,
+      validateStatus: (s) => s >= 200 && s < 400, // follow redirects; accept 200-399
+      maxRedirects: 10,
     });
-    if (resp.status !== 200) {
-      return res.status(502).json({ error: "Failed to fetch PDF" });
+
+    if (resp.status < 200 || resp.status >= 400) {
+      return res.status(502).json({ error: "Failed to fetch PDF from publisher" });
     }
-    const ct = resp.headers["content-type"];
-    if (!isPdfContentType(ct, url)) {
-      return res.status(415).json({ error: "Resource is not a PDF" });
+
+    const ct = resp.headers["content-type"] || "";
+    const finalUrl = resp.request?.res?.responseUrl || url;
+
+    if (!isPdfContentType(ct, finalUrl)) {
+      console.warn(`PDF proxy: non-PDF content-type '${ct}' from ${url}`);
+      return res.status(415).json({
+        error: "The URL returned HTML/non-PDF content. The paper may require a subscription or login.",
+      });
     }
+
+    // Forward content-length if available for progress bars
+    const contentLength = resp.headers["content-length"];
+    if (contentLength) res.setHeader("Content-Length", contentLength);
+
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", "inline; filename=publication.pdf");
     res.setHeader("Cache-Control", "public, max-age=3600");
+    // Allow cross-origin so PDF.js (running in the browser) can read the bytes
+    res.setHeader("Access-Control-Allow-Origin", "*");
     resp.data.pipe(res);
   } catch (err) {
     const status = err.response?.status;
-    const is403 = status === 403;
+    const is403 = status === 403 || status === 401;
+    const is404 = status === 404;
+    const isTimeout = err.code === "ECONNABORTED" || err.code === "ETIMEDOUT";
     console.warn(
       "PDF proxy error:",
       err?.message,
-      is403 ? "(publisher blocked)" : "",
+      status ? `(HTTP ${status})` : "",
     );
     if (is403) {
       return res.status(403).json({
-        error:
-          "Publisher blocks embedded viewing. Use Open in new tab to read the PDF.",
+        error: "Publisher blocks server-side fetching. Use 'Open in new tab' to read the PDF.",
       });
     }
-    res.status(502).json({ error: "Failed to fetch PDF" });
+    if (is404) {
+      return res.status(404).json({
+        error: "PDF not found at the given URL. It may have moved or been removed.",
+      });
+    }
+    if (isTimeout) {
+      return res.status(504).json({
+        error: "Timed out fetching PDF. The publisher server may be slow.",
+      });
+    }
+    res.status(502).json({ error: "Failed to fetch PDF from publisher" });
   }
 });
 

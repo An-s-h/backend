@@ -311,6 +311,163 @@ Return ONLY valid JSON. No markdown code fences, no extra text before or after.`
   }
 }
 
+/**
+ * Extra plain-language simplification for research publications for patients.
+ * Returns the same structured keys as the main publication summary
+ * (coreMessage, what, why, how, soWhat, keyTakeaway) but in simpler wording.
+ */
+export async function simplifyPublicationForPatients(publication) {
+  if (!publication) {
+    return { structured: false, summary: "" };
+  }
+
+  // Fallback if no API keys are available
+  if (!apiKey && !apiKey2) {
+    const abstract = String(
+      publication.abstract ||
+        publication.fullAbstract ||
+        publication.summary ||
+        "",
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    const words = abstract.split(" ");
+    const fallback =
+      words.slice(0, 60).join(" ") + (words.length > 60 ? "…" : "");
+    return { structured: false, summary: fallback };
+  }
+
+  try {
+    const geminiInstance = getGeminiInstance();
+    if (!geminiInstance) {
+      const abstract = String(
+        publication.abstract ||
+          publication.fullAbstract ||
+          publication.summary ||
+          "",
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      const words = abstract.split(" ");
+      const fallback =
+        words.slice(0, 60).join(" ") + (words.length > 60 ? "…" : "");
+      return { structured: false, summary: fallback };
+    }
+
+    const modelName = "gemini-2.5-flash-lite";
+    const model = geminiInstance.getGenerativeModel({
+      model: modelName,
+    });
+
+    const title = publication.title || "Unknown";
+    const authors = Array.isArray(publication.authors)
+      ? publication.authors.join(", ")
+      : publication.authors || "Unknown";
+    const journal = publication.journal || "Unknown";
+    const year = publication.year || "";
+    const abstract =
+      publication.abstract || publication.fullAbstract || publication.summary || "";
+    const keywords = Array.isArray(publication.keywords)
+      ? publication.keywords.join(", ")
+      : publication.keywords || "";
+
+    const parts = [
+      `Title: ${title}`,
+      `Authors: ${authors}`,
+      `Journal: ${journal}${year ? ` (${year})` : ""}`,
+      abstract ? `Abstract:\n${abstract}` : "",
+      keywords ? `Keywords: ${keywords}` : "",
+    ].filter(Boolean);
+
+    const publicationContent = parts.join("\n\n").slice(0, 10000);
+
+    const prompt = `You are Yori, a kind health research assistant.
+
+Your job is to explain this medical research publication to a patient or caregiver
+using very clear, plain language WHILE keeping the medical meaning and technical terms.
+
+Return a JSON object with EXACTLY these keys:
+{
+  "coreMessage": "...",
+  "what": "...",
+  "why": "...",
+  "how": "...",
+  "soWhat": "...",
+  "keyTakeaway": "..."
+}
+
+DETAILED RULES:
+- Keep the original medical meaning exactly the same
+- Do NOT invent new results, risks, or claims
+- Keep all important disease names, treatments, tests, and technical terms
+  (for example: "Parkinson's disease", "MRI", "immunotherapy", "biomarker")
+- When you use a technical term, briefly explain it in simple words in the same sentence
+  (for example: "biomarker (a blood or scan signal doctors measure)")
+- Do NOT rename or remove medical conditions or treatments
+- If something is uncertain in the study, say that it is uncertain
+
+STYLE:
+- Write for someone with a high-school reading level
+- Use short, clear sentences (about 10–18 words each)
+- Use friendly, direct language: "this study looked at", "this means", "for people with this condition"
+- Each field should be 2–4 sentences in plain language.
+
+FIELD MEANINGS:
+- "coreMessage": The single most important idea or finding, in 1–2 simple sentences.
+- "what": What the study is about and which condition or problem it focuses on.
+- "why": Why this study matters and who might care about it.
+- "how": How the study was done (tests, scans, medicines, type of study).
+- "soWhat": What the results could mean in real life, especially for patients.
+- "keyTakeaway": One short sentence that a patient should remember.
+
+Publication details:
+${publicationContent}
+
+Return ONLY valid JSON with those keys. No markdown, no extra text before or after.`;
+
+    const textLength = publicationContent.length;
+    const estimatedTokens = 500 + textLength / 4 + 2000;
+
+    const result = await rateLimiter.execute(
+      async () => {
+        return await retryWithBackoff(async () => {
+          return await model.generateContent(prompt);
+        });
+      },
+      modelName,
+      estimatedTokens,
+    );
+
+    let responseText = result.response.text().trim();
+    if (responseText.startsWith("```")) {
+      responseText = responseText
+        .replace(/^```\w*\n?/, "")
+        .replace(/\n?```\s*$/, "")
+        .trim();
+    }
+
+    try {
+      const structured = JSON.parse(responseText);
+      return { structured: true, ...structured };
+    } catch (parseError) {
+      return { structured: false, summary: responseText };
+    }
+  } catch (e) {
+    console.error("AI publication patient simplification error:", e);
+    const fallbackSource =
+      publication.abstract ||
+      publication.fullAbstract ||
+      publication.summary ||
+      publication.title ||
+      "";
+    const clean = String(fallbackSource).replace(/\s+/g, " ").trim();
+    const words = clean.split(" ");
+    const fallback =
+      words.slice(0, 60).join(" ") + (words.length > 60 ? "…" : "");
+    return { structured: false, summary: fallback };
+  }
+}
+
 export async function extractConditions(naturalLanguage) {
   if (!naturalLanguage) return [];
 
